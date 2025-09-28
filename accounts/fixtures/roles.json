@@ -1,0 +1,34 @@
+[
+  {
+    "model": "accounts.role",
+    "pk": "550e8400-e29b-41d4-a716-446655440001",
+    "fields": {
+      "name": "Admin",
+      "description": "System administrator with full access to all features"
+    }
+  },
+  {
+    "model": "accounts.role",
+    "pk": "550e8400-e29b-41d4-a716-446655440002",
+    "fields": {
+      "name": "Manager",
+      "description": "Store manager with management privileges"
+    }
+  },
+  {
+    "model": "accounts.role",
+    "pk": "550e8400-e29b-41d4-a716-446655440003",
+    "fields": {
+      "name": "Cashier",
+      "description": "Point of sale operator with limited access"
+    }
+  },
+  {
+    "model": "accounts.role",
+    "pk": "550e8400-e29b-41d4-a716-446655440004",
+    "fields": {
+      "name": "Warehouse Staff",
+      "description": "Inventory and warehouse management staff"
+    }
+  }
+]
