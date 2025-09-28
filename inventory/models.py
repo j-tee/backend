@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
 from decimal import Decimal
 from accounts.models import Business, BusinessMembership
@@ -63,29 +63,6 @@ class StoreFront(models.Model):
         return f"{self.name} (Owner: {self.user.name})"
 
 
-class Batch(models.Model):
-    """Batches of imported goods"""
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='batches')
-    package_code = models.CharField(max_length=100, unique=True)
-    arrival_date = models.DateField()
-    supplier = models.CharField(max_length=255)
-    description = models.TextField(blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-    
-    class Meta:
-        db_table = 'batches'
-        ordering = ['-arrival_date']
-        indexes = [
-            models.Index(fields=['warehouse', 'arrival_date']),
-            models.Index(fields=['package_code']),
-        ]
-    
-    def __str__(self):
-        return f"{self.package_code} - {self.supplier}"
-
-
 class Product(models.Model):
     """Products in the inventory"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -117,31 +94,68 @@ class Product(models.Model):
         return self.wholesale_price if sale_type == 'wholesale' else self.retail_price
 
 
-class BatchProduct(models.Model):
-    """Products within specific batches (BatchItems)"""
+class Stock(models.Model):
+    """Stock entries representing receipted inventory lots"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='batch_products')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='batch_products')
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock_items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_items')
+    supplier = models.CharField(max_length=255, blank=True, null=True)
+    reference_code = models.CharField(max_length=100, blank=True, null=True)
+    arrival_date = models.DateField(blank=True, null=True)
+    expiry_date = models.DateField(blank=True, null=True)
     quantity = models.PositiveIntegerField()
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    unit_tax_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))], default=Decimal('0.00'))
+    unit_tax_amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    unit_additional_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
-        db_table = 'batch_products'
-        unique_together = ['batch', 'product']
+        db_table = 'stock'
+        ordering = ['product__name', 'warehouse__name']
         indexes = [
-            models.Index(fields=['batch', 'product']),
+            models.Index(fields=['warehouse', 'product']),
+            models.Index(fields=['product', 'expiry_date']),
+            models.Index(fields=['reference_code']),
         ]
-    
+        constraints = [
+            models.UniqueConstraint(fields=['warehouse', 'product', 'reference_code', 'expiry_date'], name='stock_unique_reference'),
+        ]
+
     def __str__(self):
-        return f"{self.product.name} - {self.batch.package_code} - Qty: {self.quantity}"
+        code = self.reference_code or 'N/A'
+        return f"{self.product.name} @ {self.warehouse.name} [{code}]"
+
+    def save(self, *args, **kwargs):
+        if self.unit_cost and self.unit_tax_rate and (self.unit_tax_amount is None or self.unit_tax_amount == Decimal('0.00')):
+            tax_value = (self.unit_cost * self.unit_tax_rate) / Decimal('100.00')
+            self.unit_tax_amount = tax_value.quantize(Decimal('0.01'))
+        super().save(*args, **kwargs)
+
+    @property
+    def landed_unit_cost(self) -> Decimal:
+        return (self.unit_cost or Decimal('0.00')) + (self.unit_tax_amount or Decimal('0.00')) + (self.unit_additional_cost or Decimal('0.00'))
+
+    @property
+    def total_tax_amount(self) -> Decimal:
+        return (self.unit_tax_amount or Decimal('0.00')) * self.quantity
+
+    @property
+    def total_additional_cost(self) -> Decimal:
+        return (self.unit_additional_cost or Decimal('0.00')) * self.quantity
+
+    @property
+    def total_landed_cost(self) -> Decimal:
+        return self.landed_unit_cost * self.quantity
 
 
 class Inventory(models.Model):
     """Current inventory levels (denormalized for performance)"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='inventory')
-    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, null=True, blank=True, related_name='inventory')
+    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_entries')
     warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='inventory')
     quantity = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -149,15 +163,16 @@ class Inventory(models.Model):
     
     class Meta:
         db_table = 'inventory'
-        unique_together = ['product', 'batch', 'warehouse']
+        unique_together = ['product', 'warehouse', 'stock']
         indexes = [
             models.Index(fields=['product', 'warehouse']),
             models.Index(fields=['warehouse', 'quantity']),
-            models.Index(fields=['batch', 'warehouse']),
+            models.Index(fields=['stock', 'warehouse']),
         ]
     
     def __str__(self):
-        return f"{self.product.name} - {self.warehouse.name} - Qty: {self.quantity}"
+        stock_ref = self.stock.reference_code if self.stock and self.stock.reference_code else 'N/A'
+        return f"{self.product.name} - {self.warehouse.name} [{stock_ref}] - Qty: {self.quantity}"
 
 
 class Transfer(models.Model):
@@ -171,7 +186,7 @@ class Transfer(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='transfers')
-    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, related_name='transfers')
+    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers')
     from_warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='outbound_transfers')
     to_storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='inbound_transfers')
     quantity = models.PositiveIntegerField()
@@ -192,7 +207,8 @@ class Transfer(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.product.name} - {self.from_warehouse.name} to {self.to_storefront.name} - Qty: {self.quantity}"
+        stock_ref = self.stock.reference_code if self.stock and self.stock.reference_code else 'N/A'
+        return f"{self.product.name} ({stock_ref}) - {self.from_warehouse.name} to {self.to_storefront.name} - Qty: {self.quantity}"
 
 
 class StockAlert(models.Model):

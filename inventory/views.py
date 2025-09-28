@@ -4,15 +4,15 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.db.models import Q, Sum, Count
 from .models import (
-    Category, Warehouse, StoreFront, Batch, Product, 
-    BatchProduct, Inventory, Transfer, StockAlert,
+    Category, Warehouse, StoreFront, Product, Stock,
+    Inventory, Transfer, StockAlert,
     BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 from .serializers import (
     CategorySerializer, WarehouseSerializer, StoreFrontSerializer, 
-    BatchSerializer, ProductSerializer, BatchProductSerializer,
+    StockSerializer, ProductSerializer,
     InventorySerializer, TransferSerializer, StockAlertSerializer,
-    InventorySummarySerializer, BatchArrivalReportSerializer,
+    InventorySummarySerializer, StockArrivalReportSerializer,
     BusinessWarehouseSerializer, BusinessStoreFrontSerializer,
     StoreFrontEmployeeSerializer, WarehouseEmployeeSerializer
 )
@@ -39,13 +39,6 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
 
-class BatchViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing batches"""
-    queryset = Batch.objects.all()
-    serializer_class = BatchSerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-
 class ProductViewSet(viewsets.ModelViewSet):
     """ViewSet for managing products"""
     queryset = Product.objects.all()
@@ -53,23 +46,26 @@ class ProductViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
 
 
-class BatchProductViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing batch products"""
-    queryset = BatchProduct.objects.all()
-    serializer_class = BatchProductSerializer
+class StockViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing stock lots"""
+    queryset = Stock.objects.select_related('warehouse', 'product').all()
+    serializer_class = StockSerializer
     permission_classes = [permissions.IsAuthenticated]
 
 
 class InventoryViewSet(viewsets.ModelViewSet):
     """ViewSet for managing inventory"""
-    queryset = Inventory.objects.all()
+    queryset = Inventory.objects.select_related('product', 'warehouse', 'stock').all()
     serializer_class = InventorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
 
 class TransferViewSet(viewsets.ModelViewSet):
     """ViewSet for managing transfers"""
-    queryset = Transfer.objects.all()
+    queryset = Transfer.objects.select_related(
+        'product', 'stock', 'from_warehouse', 'to_storefront',
+        'requested_by', 'approved_by'
+    ).all()
     serializer_class = TransferSerializer
     permission_classes = [permissions.IsAuthenticated]
 
@@ -119,8 +115,8 @@ class InventorySummaryView(APIView):
         return Response(data)
 
 
-class BatchArrivalReportView(APIView):
-    """View for batch arrival reports"""
+class StockArrivalReportView(APIView):
+    """View for stock arrival reports"""
     permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request):

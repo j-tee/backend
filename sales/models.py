@@ -1,9 +1,9 @@
 import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from decimal import Decimal
-from inventory.models import StoreFront, Product, Batch
+from inventory.models import StoreFront, Product, Stock
 
 
 User = get_user_model()
@@ -100,15 +100,26 @@ class Sale(models.Model):
     
     @property
     def subtotal(self):
-        """Calculate subtotal before discount and tax"""
-        return sum(item.total_price for item in self.sale_items.all())
+        """Calculate subtotal (after line discounts, before sale-level discount and tax)"""
+        return sum((item.base_amount for item in self.sale_items.all()), Decimal('0.00'))
+
+    @property
+    def line_tax_total(self):
+        """Aggregate tax across all sale items"""
+        return sum((item.tax_amount for item in self.sale_items.all()), Decimal('0.00'))
     
     def calculate_total(self):
         """Calculate final total with discount and tax"""
         subtotal = self.subtotal
         discounted_total = subtotal - self.discount_amount
-        final_total = discounted_total + self.tax_amount
-        return final_total
+        if discounted_total < Decimal('0.00'):
+            discounted_total = Decimal('0.00')
+
+        tax_total = self.line_tax_total
+        self.tax_amount = tax_total
+
+        final_total = discounted_total + tax_total
+        return final_total.quantize(Decimal('0.01'))
 
 
 class SaleItem(models.Model):
@@ -116,26 +127,44 @@ class SaleItem(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='sale_items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='sale_items')
-    batch = models.ForeignKey(Batch, on_delete=models.CASCADE, null=True, blank=True, related_name='sale_items')
+    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_items')
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
     discount_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'))
+    tax_rate = models.DecimalField(max_digits=5, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))])
+    tax_amount = models.DecimalField(max_digits=10, decimal_places=2, default=Decimal('0.00'), validators=[MinValueValidator(Decimal('0.00'))])
     
     class Meta:
         db_table = 'sales_items'
         indexes = [
             models.Index(fields=['sale', 'product']),
-            models.Index(fields=['product', 'batch']),
+            models.Index(fields=['product', 'stock']),
         ]
     
     def __str__(self):
         return f"{self.product.name} x {self.quantity} - {self.total_price}"
     
+    @property
+    def base_amount(self):
+        return (self.unit_price * self.quantity) - (self.discount_amount or Decimal('0.00'))
+
+    @property
+    def gross_amount(self):
+        return self.base_amount + (self.tax_amount or Decimal('0.00'))
+
     def save(self, *args, **kwargs):
         """Calculate total price before saving"""
-        if not self.total_price:
-            self.total_price = (self.unit_price * self.quantity) - self.discount_amount
+        base_amount = self.base_amount
+        if base_amount < Decimal('0.00'):
+            base_amount = Decimal('0.00')
+
+        if self.tax_rate and (self.tax_amount is None or self.tax_amount == Decimal('0.00')):
+            calculated_tax = (base_amount * self.tax_rate) / Decimal('100.00')
+            self.tax_amount = calculated_tax.quantize(Decimal('0.01'))
+
+        if not self.total_price or self.total_price == Decimal('0.00'):
+            self.total_price = (base_amount + (self.tax_amount or Decimal('0.00'))).quantize(Decimal('0.01'))
         super().save(*args, **kwargs)
 
 

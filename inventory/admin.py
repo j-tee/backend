@@ -1,8 +1,7 @@
 from django.contrib import admin
-from django.utils.html import format_html
 from .models import (
-    Category, Warehouse, StoreFront, Batch, Product, 
-    BatchProduct, Inventory, Transfer, StockAlert
+    Category, Warehouse, StoreFront, Product, Stock,
+    Inventory, Transfer, StockAlert
 )
 
 
@@ -33,23 +32,6 @@ class StoreFrontAdmin(admin.ModelAdmin):
     ordering = ['name']
 
 
-class BatchProductInline(admin.TabularInline):
-    model = BatchProduct
-    extra = 0
-    readonly_fields = ['id', 'created_at', 'updated_at']
-
-
-@admin.register(Batch)
-class BatchAdmin(admin.ModelAdmin):
-    inlines = [BatchProductInline]
-    list_display = ['package_code', 'warehouse', 'supplier', 'arrival_date', 'created_at']
-    search_fields = ['package_code', 'supplier', 'description']
-    list_filter = ['warehouse', 'arrival_date', 'created_at']
-    readonly_fields = ['id', 'created_at', 'updated_at']
-    ordering = ['-arrival_date']
-    date_hierarchy = 'arrival_date'
-
-
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
     list_display = ['name', 'sku', 'category', 'retail_price', 'wholesale_price', 'cost', 'is_active']
@@ -72,38 +54,38 @@ class ProductAdmin(admin.ModelAdmin):
     )
 
 
-@admin.register(BatchProduct)
-class BatchProductAdmin(admin.ModelAdmin):
-    list_display = ['batch', 'product', 'quantity', 'created_at']
-    search_fields = ['batch__package_code', 'product__name', 'product__sku']
-    list_filter = ['batch__warehouse', 'created_at']
-    readonly_fields = ['id', 'created_at', 'updated_at']
-    ordering = ['-created_at']
+@admin.register(Stock)
+class StockAdmin(admin.ModelAdmin):
+    list_display = ['product', 'warehouse', 'reference_code', 'supplier', 'quantity', 'unit_cost', 'unit_tax_amount', 'unit_additional_cost', 'landed_unit_cost', 'expiry_date', 'created_at']
+    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'reference_code', 'supplier']
+    list_filter = ['warehouse', 'expiry_date', 'created_at']
+    readonly_fields = ['id', 'created_at', 'updated_at', 'landed_unit_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost']
+    ordering = ['product__name']
 
 
 @admin.register(Inventory)
 class InventoryAdmin(admin.ModelAdmin):
-    list_display = ['product', 'warehouse', 'batch', 'quantity', 'updated_at']
-    search_fields = ['product__name', 'product__sku', 'warehouse__name']
+    list_display = ['product', 'warehouse', 'stock', 'quantity', 'updated_at']
+    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'stock__reference_code']
     list_filter = ['warehouse', 'updated_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['product__name']
     
     def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product', 'warehouse', 'batch')
+        return super().get_queryset(request).select_related('product', 'warehouse', 'stock')
 
 
 @admin.register(Transfer)
 class TransferAdmin(admin.ModelAdmin):
-    list_display = ['product', 'from_warehouse', 'to_storefront', 'quantity', 'status', 'created_at']
-    search_fields = ['product__name', 'product__sku', 'from_warehouse__name', 'to_storefront__name']
+    list_display = ['product', 'stock', 'from_warehouse', 'to_storefront', 'quantity', 'status', 'created_at']
+    search_fields = ['product__name', 'product__sku', 'stock__reference_code', 'from_warehouse__name', 'to_storefront__name']
     list_filter = ['status', 'from_warehouse', 'to_storefront', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-created_at']
     
     fieldsets = (
         ('Transfer Details', {
-            'fields': ('id', 'product', 'batch', 'quantity', 'status')
+            'fields': ('id', 'product', 'stock', 'quantity', 'status')
         }),
         ('Location', {
             'fields': ('from_warehouse', 'to_storefront')

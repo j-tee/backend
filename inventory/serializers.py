@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from .models import (
-    Category, Warehouse, StoreFront, Batch, Product, 
-    BatchProduct, Inventory, Transfer, StockAlert,
+    Category, Warehouse, StoreFront, Product, Stock,
+    Inventory, Transfer, StockAlert,
     BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 
@@ -47,25 +47,23 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
-class BatchProductSerializer(serializers.ModelSerializer):
+class StockSerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
-    
-    class Meta:
-        model = BatchProduct
-        fields = ['id', 'batch', 'product', 'product_name', 'product_sku', 'quantity', 'created_at', 'updated_at']
-        read_only_fields = ['id', 'created_at', 'updated_at']
-
-
-class BatchSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
-    batch_products = BatchProductSerializer(many=True, read_only=True)
+    landed_unit_cost = serializers.DecimalField(source='landed_unit_cost', max_digits=12, decimal_places=2, read_only=True)
+    total_tax_amount = serializers.DecimalField(source='total_tax_amount', max_digits=14, decimal_places=2, read_only=True)
+    total_additional_cost = serializers.DecimalField(source='total_additional_cost', max_digits=14, decimal_places=2, read_only=True)
+    total_landed_cost = serializers.DecimalField(source='total_landed_cost', max_digits=14, decimal_places=2, read_only=True)
     
     class Meta:
-        model = Batch
+        model = Stock
         fields = [
-            'id', 'warehouse', 'warehouse_name', 'package_code', 'arrival_date',
-            'supplier', 'description', 'batch_products', 'created_at', 'updated_at'
+            'id', 'warehouse', 'warehouse_name', 'product', 'product_name', 'product_sku',
+            'supplier', 'reference_code', 'arrival_date', 'expiry_date',
+            'quantity', 'unit_cost', 'unit_tax_rate', 'unit_tax_amount', 'unit_additional_cost',
+            'landed_unit_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost',
+            'description', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -74,13 +72,21 @@ class InventorySerializer(serializers.ModelSerializer):
     product_name = serializers.CharField(source='product.name', read_only=True)
     product_sku = serializers.CharField(source='product.sku', read_only=True)
     warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
-    batch_package_code = serializers.CharField(source='batch.package_code', read_only=True)
+    stock_reference_code = serializers.CharField(source='stock.reference_code', read_only=True)
+    stock_supplier = serializers.CharField(source='stock.supplier', read_only=True)
+    stock_expiry_date = serializers.DateField(source='stock.expiry_date', read_only=True)
+    stock_unit_cost = serializers.DecimalField(source='stock.unit_cost', max_digits=12, decimal_places=2, read_only=True)
+    stock_landed_unit_cost = serializers.DecimalField(source='stock.landed_unit_cost', max_digits=12, decimal_places=2, read_only=True)
+    stock_total_tax_amount = serializers.DecimalField(source='stock.total_tax_amount', max_digits=14, decimal_places=2, read_only=True)
+    stock_total_landed_cost = serializers.DecimalField(source='stock.total_landed_cost', max_digits=14, decimal_places=2, read_only=True)
     
     class Meta:
         model = Inventory
         fields = [
-            'id', 'product', 'product_name', 'product_sku', 'batch', 'batch_package_code',
-            'warehouse', 'warehouse_name', 'quantity', 'created_at', 'updated_at'
+            'id', 'product', 'product_name', 'product_sku', 'stock', 'stock_reference_code',
+            'stock_supplier', 'stock_expiry_date', 'stock_unit_cost', 'stock_landed_unit_cost',
+            'stock_total_tax_amount', 'stock_total_landed_cost', 'warehouse', 'warehouse_name',
+            'quantity', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -92,15 +98,18 @@ class TransferSerializer(serializers.ModelSerializer):
     to_storefront_name = serializers.CharField(source='to_storefront.name', read_only=True)
     requested_by_name = serializers.CharField(source='requested_by.name', read_only=True)
     approved_by_name = serializers.CharField(source='approved_by.name', read_only=True)
-    batch_package_code = serializers.CharField(source='batch.package_code', read_only=True)
+    stock_reference_code = serializers.CharField(source='stock.reference_code', read_only=True)
+    stock_supplier = serializers.CharField(source='stock.supplier', read_only=True)
+    stock_expiry_date = serializers.DateField(source='stock.expiry_date', read_only=True)
+    stock_landed_unit_cost = serializers.DecimalField(source='stock.landed_unit_cost', max_digits=12, decimal_places=2, read_only=True)
     
     class Meta:
         model = Transfer
         fields = [
-            'id', 'product', 'product_name', 'product_sku', 'batch', 'batch_package_code',
-            'from_warehouse', 'from_warehouse_name', 'to_storefront', 'to_storefront_name',
-            'quantity', 'status', 'requested_by', 'requested_by_name', 'approved_by', 
-            'approved_by_name', 'note', 'created_at', 'updated_at'
+            'id', 'product', 'product_name', 'product_sku', 'stock', 'stock_reference_code',
+            'stock_supplier', 'stock_expiry_date', 'stock_landed_unit_cost', 'from_warehouse', 'from_warehouse_name',
+            'to_storefront', 'to_storefront_name', 'quantity', 'status', 'requested_by',
+            'requested_by_name', 'approved_by', 'approved_by_name', 'note', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at']
 
@@ -186,11 +195,11 @@ class InventorySummarySerializer(serializers.Serializer):
     last_updated = serializers.DateTimeField()
 
 
-class BatchArrivalReportSerializer(serializers.Serializer):
-    """Serializer for batch arrival reports"""
+class StockArrivalReportSerializer(serializers.Serializer):
+    """Serializer for stock arrival reports"""
     warehouse_id = serializers.UUIDField()
     warehouse_name = serializers.CharField()
     arrival_date = serializers.DateField()
-    batch_count = serializers.IntegerField()
-    total_products = serializers.IntegerField()
+    stock_count = serializers.IntegerField()
+    total_quantity = serializers.IntegerField()
     suppliers = serializers.ListField(child=serializers.CharField())
