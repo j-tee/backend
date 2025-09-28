@@ -134,3 +134,6 @@ media/
 staticfiles/
 .DS_Store
 *.env
+.vscode/
+.idea/
+.env.*
