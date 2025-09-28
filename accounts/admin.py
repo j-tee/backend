@@ -1,7 +1,7 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import Role, User, UserProfile, AuditLog
+from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership
 
 
 @admin.register(Role)
@@ -64,3 +64,21 @@ class AuditLogAdmin(admin.ModelAdmin):
     
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+@admin.register(Business)
+class BusinessAdmin(admin.ModelAdmin):
+    list_display = ['name', 'owner', 'email', 'tin', 'is_active', 'created_at']
+    search_fields = ['name', 'tin', 'email', 'owner__name', 'owner__email']
+    list_filter = ['is_active', 'created_at']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['name']
+
+
+@admin.register(BusinessMembership)
+class BusinessMembershipAdmin(admin.ModelAdmin):
+    list_display = ['business', 'user', 'role', 'is_admin', 'is_active', 'created_at']
+    list_filter = ['role', 'is_admin', 'is_active', 'created_at']
+    search_fields = ['business__name', 'user__name', 'user__email']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['business__name', 'user__name']

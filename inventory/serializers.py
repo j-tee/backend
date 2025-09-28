@@ -1,7 +1,8 @@
 from rest_framework import serializers
 from .models import (
     Category, Warehouse, StoreFront, Batch, Product, 
-    BatchProduct, Inventory, Transfer, StockAlert
+    BatchProduct, Inventory, Transfer, StockAlert,
+    BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 
 
@@ -117,6 +118,61 @@ class StockAlertSerializer(serializers.ModelSerializer):
             'resolved_at', 'created_at'
         ]
         read_only_fields = ['id', 'created_at', 'resolved_at']
+
+
+class BusinessWarehouseSerializer(serializers.ModelSerializer):
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
+    
+    class Meta:
+        model = BusinessWarehouse
+        fields = [
+            'id', 'business', 'business_name', 'warehouse', 'warehouse_name',
+            'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'warehouse_name']
+
+
+class BusinessStoreFrontSerializer(serializers.ModelSerializer):
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    storefront_name = serializers.CharField(source='storefront.name', read_only=True)
+    owner_name = serializers.CharField(source='storefront.user.name', read_only=True)
+    
+    class Meta:
+        model = BusinessStoreFront
+        fields = [
+            'id', 'business', 'business_name', 'storefront', 'storefront_name',
+            'owner_name', 'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'storefront_name', 'owner_name']
+
+
+class StoreFrontEmployeeSerializer(serializers.ModelSerializer):
+    storefront_name = serializers.CharField(source='storefront.name', read_only=True)
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    
+    class Meta:
+        model = StoreFrontEmployee
+        fields = [
+            'id', 'business', 'business_name', 'storefront', 'storefront_name',
+            'user', 'user_name', 'role', 'is_active', 'assigned_at', 'removed_at'
+        ]
+        read_only_fields = ['id', 'assigned_at', 'removed_at', 'business_name', 'storefront_name', 'user_name']
+
+
+class WarehouseEmployeeSerializer(serializers.ModelSerializer):
+    warehouse_name = serializers.CharField(source='warehouse.name', read_only=True)
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    
+    class Meta:
+        model = WarehouseEmployee
+        fields = [
+            'id', 'business', 'business_name', 'warehouse', 'warehouse_name',
+            'user', 'user_name', 'role', 'is_active', 'assigned_at', 'removed_at'
+        ]
+        read_only_fields = ['id', 'assigned_at', 'removed_at', 'business_name', 'warehouse_name', 'user_name']
 
 
 # Specialized serializers for specific use cases

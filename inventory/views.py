@@ -5,13 +5,16 @@ from rest_framework.views import APIView
 from django.db.models import Q, Sum, Count
 from .models import (
     Category, Warehouse, StoreFront, Batch, Product, 
-    BatchProduct, Inventory, Transfer, StockAlert
+    BatchProduct, Inventory, Transfer, StockAlert,
+    BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 from .serializers import (
     CategorySerializer, WarehouseSerializer, StoreFrontSerializer, 
     BatchSerializer, ProductSerializer, BatchProductSerializer,
     InventorySerializer, TransferSerializer, StockAlertSerializer,
-    InventorySummarySerializer, BatchArrivalReportSerializer
+    InventorySummarySerializer, BatchArrivalReportSerializer,
+    BusinessWarehouseSerializer, BusinessStoreFrontSerializer,
+    StoreFrontEmployeeSerializer, WarehouseEmployeeSerializer
 )
 
 
@@ -75,6 +78,34 @@ class StockAlertViewSet(viewsets.ModelViewSet):
     """ViewSet for managing stock alerts"""
     queryset = StockAlert.objects.all()
     serializer_class = StockAlertSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class BusinessWarehouseViewSet(viewsets.ModelViewSet):
+    """Manage warehouse-business associations"""
+    queryset = BusinessWarehouse.objects.select_related('business', 'warehouse').all()
+    serializer_class = BusinessWarehouseSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class BusinessStoreFrontViewSet(viewsets.ModelViewSet):
+    """Manage storefront-business associations"""
+    queryset = BusinessStoreFront.objects.select_related('business', 'storefront', 'storefront__user').all()
+    serializer_class = BusinessStoreFrontSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class StoreFrontEmployeeViewSet(viewsets.ModelViewSet):
+    """Manage storefront employee assignments"""
+    queryset = StoreFrontEmployee.objects.select_related('business', 'storefront', 'user').all()
+    serializer_class = StoreFrontEmployeeSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+
+class WarehouseEmployeeViewSet(viewsets.ModelViewSet):
+    """Manage warehouse employee assignments"""
+    queryset = WarehouseEmployee.objects.select_related('business', 'warehouse', 'user').all()
+    serializer_class = WarehouseEmployeeSerializer
     permission_classes = [permissions.IsAuthenticated]
 
 

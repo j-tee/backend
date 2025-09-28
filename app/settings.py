@@ -13,20 +13,29 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 from pathlib import Path
 import os
 
+from decouple import AutoConfig, Config, Csv, RepositoryEnv
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+ENV_FILE = BASE_DIR / os.getenv('DJANGO_ENV_FILE', '.env.development')
+if ENV_FILE.exists():
+    config = Config(RepositoryEnv(str(ENV_FILE)))
+else:
+    config = AutoConfig(search_path=str(BASE_DIR))
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-qypa%1&zw5yph-(3sogpdy7x((f8!r)npt6s@6%@fw1(10&e9l'
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-qypa%1&zw5yph-(3sogpdy7x((f8!r)npt6s@6%@fw1(10&e9l')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', cast=bool, default=False)
 
-ALLOWED_HOSTS = []
+_raw_allowed_hosts = config('ALLOWED_HOSTS', default='')
+ALLOWED_HOSTS = Csv()(_raw_allowed_hosts) if _raw_allowed_hosts else []
 
 
 # Application definition
@@ -39,6 +48,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework.authtoken',
     'corsheaders',
     'accounts',
     'inventory',
@@ -84,11 +94,11 @@ WSGI_APPLICATION = 'app.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'pos_db',
-        'USER': 'pos_user',
-        'PASSWORD': 'pos_password',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': config('DB_NAME', default='pos_db'),
+        'USER': config('DB_USER', default='postgres'),
+        'PASSWORD': config('DB_PASSWORD', default=''),
+        'HOST': config('DB_HOST', default='localhost'),
+        'PORT': config('DB_PORT', default='5432'),
     }
 }
 
@@ -132,7 +142,7 @@ STATIC_URL = 'static/'
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.UUIDField'
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
@@ -148,10 +158,7 @@ REST_FRAMEWORK = {
 }
 
 # CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+CORS_ALLOWED_ORIGINS = config('CORS_ALLOWED_ORIGINS', cast=Csv(), default='http://localhost:3000,http://127.0.0.1:3000')
 
 # Password hashers
 PASSWORD_HASHERS = [
@@ -187,7 +194,10 @@ MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
 # Email settings (for development, use console backend)
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'noreply@posbackend.com'
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default='noreply@posbackend.com')
+
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+ENV_NAME = config('ENV_NAME', default='development')
 
 # Logging configuration
 LOGGING = {

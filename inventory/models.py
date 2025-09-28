@@ -2,7 +2,9 @@ import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
 from decimal import Decimal
+from accounts.models import Business, BusinessMembership
 
 
 User = get_user_model()
@@ -221,3 +223,97 @@ class StockAlert(models.Model):
     
     def __str__(self):
         return f"{self.alert_type} - {self.product.name} at {self.warehouse.name}"
+
+
+class BusinessWarehouse(models.Model):
+    """Associates a warehouse with a business."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='business_warehouses')
+    warehouse = models.OneToOneField(Warehouse, on_delete=models.CASCADE, related_name='business_link')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'business_warehouses'
+        ordering = ['business__name', 'warehouse__name']
+
+    def __str__(self):
+        return f"{self.warehouse.name} -> {self.business.name}"
+
+
+class BusinessStoreFront(models.Model):
+    """Associates a storefront with a business."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='business_storefronts')
+    storefront = models.OneToOneField(StoreFront, on_delete=models.CASCADE, related_name='business_link')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'business_storefronts'
+        ordering = ['business__name', 'storefront__name']
+
+    def __str__(self):
+        return f"{self.storefront.name} -> {self.business.name}"
+
+
+class StoreFrontEmployee(models.Model):
+    """Employee assignments to storefronts within a business."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='storefront_employees')
+    storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='employees')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='storefront_assignments')
+    role = models.CharField(max_length=20, choices=BusinessMembership.ROLE_CHOICES, default=BusinessMembership.STAFF)
+    is_active = models.BooleanField(default=True)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    removed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'storefront_employees'
+        unique_together = ['storefront', 'user']
+        ordering = ['storefront__name', 'user__name']
+
+    def __str__(self):
+        return f"{self.user.name} @ {self.storefront.name}"
+
+    def clean(self):
+        if not BusinessStoreFront.objects.filter(business=self.business, storefront=self.storefront, is_active=True).exists():
+            raise ValidationError('Storefront must belong to the specified business.')
+        if not BusinessMembership.objects.filter(business=self.business, user=self.user, is_active=True).exists():
+            raise ValidationError('User must be an active member of the business to be assigned.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+
+class WarehouseEmployee(models.Model):
+    """Employee assignments to warehouses within a business."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='warehouse_employees')
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='employees')
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='warehouse_assignments')
+    role = models.CharField(max_length=20, choices=BusinessMembership.ROLE_CHOICES, default=BusinessMembership.STAFF)
+    is_active = models.BooleanField(default=True)
+    assigned_at = models.DateTimeField(auto_now_add=True)
+    removed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'warehouse_employees'
+        unique_together = ['warehouse', 'user']
+        ordering = ['warehouse__name', 'user__name']
+
+    def __str__(self):
+        return f"{self.user.name} @ {self.warehouse.name}"
+
+    def clean(self):
+        if not BusinessWarehouse.objects.filter(business=self.business, warehouse=self.warehouse, is_active=True).exists():
+            raise ValidationError('Warehouse must belong to the specified business.')
+        if not BusinessMembership.objects.filter(business=self.business, user=self.user, is_active=True).exists():
+            raise ValidationError('User must be an active member of the business to be assigned.')
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)

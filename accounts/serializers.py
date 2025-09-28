@@ -1,6 +1,7 @@
 from rest_framework import serializers
 from django.contrib.auth import authenticate
-from .models import Role, User, UserProfile, AuditLog
+from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership
+from rest_framework.authtoken.models import Token
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -95,3 +96,84 @@ class AuditLogSerializer(serializers.ModelSerializer):
             'changes', 'ip_address', 'user_agent', 'timestamp'
         ]
         read_only_fields = ['id', 'timestamp']
+
+
+class BusinessMembershipSerializer(serializers.ModelSerializer):
+    user_name = serializers.CharField(source='user.name', read_only=True)
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    
+    class Meta:
+        model = BusinessMembership
+        fields = [
+            'id', 'business', 'business_name', 'user', 'user_name',
+            'role', 'is_admin', 'is_active', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'user_name']
+
+
+class BusinessSerializer(serializers.ModelSerializer):
+    owner_name = serializers.CharField(source='owner.name', read_only=True)
+    memberships = BusinessMembershipSerializer(many=True, read_only=True)
+    
+    class Meta:
+        model = Business
+        fields = [
+            'id', 'name', 'tin', 'email', 'address', 'website', 'phone_numbers',
+            'social_handles', 'is_active', 'owner', 'owner_name',
+            'memberships', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'owner', 'owner_name', 'memberships', 'created_at', 'updated_at']
+
+
+class BusinessRegistrationSerializer(serializers.Serializer):
+    owner_name = serializers.CharField(max_length=255)
+    owner_email = serializers.EmailField()
+    owner_password = serializers.CharField(write_only=True, min_length=8)
+    business_name = serializers.CharField(max_length=255)
+    business_tin = serializers.CharField(max_length=100)
+    business_email = serializers.EmailField()
+    business_address = serializers.CharField()
+    business_phone_numbers = serializers.ListField(child=serializers.CharField(), allow_empty=False)
+    business_website = serializers.URLField(required=False, allow_blank=True, allow_null=True)
+    business_social_handles = serializers.DictField(child=serializers.CharField(), required=False)
+    generate_token = serializers.BooleanField(default=True)
+
+    def validate_owner_email(self, value):
+        if User.objects.filter(email=value).exists():
+            raise serializers.ValidationError('A user with this email already exists.')
+        return value
+
+    def validate_business_tin(self, value):
+        if Business.objects.filter(tin=value).exists():
+            raise serializers.ValidationError('A business with this TIN already exists.')
+        return value
+
+    def create(self, validated_data):
+        social_handles = validated_data.get('business_social_handles', {})
+        business_website = validated_data.get('business_website')
+        generate_token = validated_data.pop('generate_token', True)
+
+        owner = User.objects.create_user(
+            email=validated_data['owner_email'],
+            password=validated_data['owner_password'],
+            name=validated_data['owner_name']
+        )
+
+        business = Business.objects.create(
+            owner=owner,
+            name=validated_data['business_name'],
+            tin=validated_data['business_tin'],
+            email=validated_data['business_email'],
+            address=validated_data['business_address'],
+            phone_numbers=validated_data['business_phone_numbers'],
+            social_handles=social_handles,
+            website=business_website
+        )
+
+        token = Token.objects.create(user=owner) if generate_token else None
+
+        return {
+            'user': owner,
+            'business': business,
+            'token': token.key if token else None
+        }

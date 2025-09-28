@@ -7,10 +7,11 @@ from django.contrib.auth import login, logout
 from django.contrib.auth.decorators import login_required
 from django.utils.decorators import method_decorator
 from django.db.models import Q
-from .models import Role, User, UserProfile, AuditLog
+from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership
 from .serializers import (
     RoleSerializer, UserSerializer, UserProfileSerializer, AuditLogSerializer,
-    LoginSerializer, ChangePasswordSerializer
+    LoginSerializer, ChangePasswordSerializer, BusinessSerializer,
+    BusinessMembershipSerializer, BusinessRegistrationSerializer
 )
 
 
@@ -114,6 +115,39 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
         return queryset.select_related('user')
 
 
+class BusinessViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing businesses"""
+    queryset = Business.objects.all().prefetch_related('memberships__user')
+    serializer_class = BusinessSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        base_queryset = Business.objects.all().prefetch_related('memberships__user')
+        if user.is_superuser or user.is_admin():
+            return base_queryset
+        return base_queryset.filter(memberships__user=user).distinct()
+
+    def perform_create(self, serializer):
+        serializer.save(owner=self.request.user)
+
+
+class BusinessMembershipViewSet(viewsets.ModelViewSet):
+    """ViewSet for managing business memberships"""
+    queryset = BusinessMembership.objects.select_related('business', 'user').all()
+    serializer_class = BusinessMembershipSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        user = self.request.user
+        if user.is_superuser or user.is_admin():
+            return self.queryset
+        return self.queryset.filter(business__memberships__user=user).distinct()
+
+    def perform_create(self, serializer):
+        serializer.save(invited_by=self.request.user)
+
+
 class LoginView(APIView):
     """User login view"""
     permission_classes = [permissions.AllowAny]
@@ -161,4 +195,24 @@ class ChangePasswordView(APIView):
             
             return Response({'message': 'Password changed successfully'}, status=status.HTTP_200_OK)
         
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class RegisterBusinessView(APIView):
+    """Public endpoint for registering a user and business simultaneously."""
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = []
+
+    def post(self, request):
+        serializer = BusinessRegistrationSerializer(data=request.data)
+        if serializer.is_valid():
+            result = serializer.save()
+            business_data = BusinessSerializer(result['business'], context={'request': request}).data
+            user_data = UserSerializer(result['user'], context={'request': request}).data
+            response_data = {
+                'token': result['token'],
+                'user': user_data,
+                'business': business_data
+            }
+            return Response(response_data, status=status.HTTP_201_CREATED)
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
