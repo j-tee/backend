@@ -1,7 +1,16 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin as BaseUserAdmin
 from django.utils.html import format_html
-from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership
+from .models import (
+    Role,
+    User,
+    UserProfile,
+    AuditLog,
+    Business,
+    BusinessMembership,
+    BusinessInvitation,
+    EmailVerificationToken,
+)
 
 
 @admin.register(Role)
@@ -46,6 +55,23 @@ class UserAdmin(BaseUserAdmin):
         if obj:  # editing an existing object
             return self.readonly_fields + ('email',)
         return self.readonly_fields
+
+
+@admin.register(BusinessInvitation)
+class BusinessInvitationAdmin(admin.ModelAdmin):
+    list_display = ['email', 'business', 'role', 'status', 'created_at', 'expires_at']
+    list_filter = ['status', 'role', 'created_at']
+    search_fields = ['email', 'business__name']
+    readonly_fields = ['id', 'token', 'accepted_at', 'accepted_by', 'created_at', 'updated_at']
+    ordering = ['-created_at']
+
+
+@admin.register(EmailVerificationToken)
+class EmailVerificationTokenAdmin(admin.ModelAdmin):
+    list_display = ['user', 'token', 'created_at', 'expires_at', 'consumed_at']
+    search_fields = ['user__email', 'token']
+    readonly_fields = ['id', 'user', 'token', 'created_at', 'expires_at', 'consumed_at']
+    ordering = ['-created_at']
 
 
 @admin.register(AuditLog)

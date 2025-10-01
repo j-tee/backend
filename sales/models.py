@@ -3,7 +3,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from decimal import Decimal
-from inventory.models import StoreFront, Product, Stock
+from inventory.models import StoreFront, Product, Stock, StockProduct, StockProduct
 
 
 User = get_user_model()
@@ -108,6 +108,24 @@ class Sale(models.Model):
         """Aggregate tax across all sale items"""
         return sum((item.tax_amount for item in self.sale_items.all()), Decimal('0.00'))
     
+    @property
+    def total_profit_amount(self):
+        """Calculate total profit across all sale items"""
+        return sum((item.total_profit_amount for item in self.sale_items.all()), Decimal('0.00'))
+
+    @property
+    def total_cost_amount(self):
+        """Calculate total cost across all sale items"""
+        return sum((item.unit_cost * item.quantity for item in self.sale_items.all()), Decimal('0.00'))
+
+    @property
+    def average_profit_margin(self):
+        """Calculate average profit margin across all sale items (weighted by revenue)"""
+        total_revenue = sum((item.unit_price * item.quantity for item in self.sale_items.all()), Decimal('0.00'))
+        if total_revenue <= Decimal('0.00'):
+            return Decimal('0.00')
+        return (self.total_profit_amount / total_revenue * Decimal('100')).quantize(Decimal('0.01'))
+    
     def calculate_total(self):
         """Calculate final total with discount and tax"""
         subtotal = self.subtotal
@@ -128,6 +146,7 @@ class SaleItem(models.Model):
     sale = models.ForeignKey(Sale, on_delete=models.CASCADE, related_name='sale_items')
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='sale_items')
     stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_items')
+    stock_product = models.ForeignKey(StockProduct, on_delete=models.SET_NULL, null=True, blank=True, related_name='sale_items')
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     total_price = models.DecimalField(max_digits=10, decimal_places=2)
@@ -140,6 +159,7 @@ class SaleItem(models.Model):
         indexes = [
             models.Index(fields=['sale', 'product']),
             models.Index(fields=['product', 'stock']),
+            models.Index(fields=['product', 'stock_product']),
         ]
     
     def __str__(self):
@@ -152,6 +172,39 @@ class SaleItem(models.Model):
     @property
     def gross_amount(self):
         return self.base_amount + (self.tax_amount or Decimal('0.00'))
+
+    @property
+    def unit_cost(self):
+        """Get the cost per unit for this sale item"""
+        if self.stock_product:
+            # Use the specific StockProduct entry
+            return self.stock_product.landed_unit_cost
+        elif self.stock:
+            # Fallback: Get the StockProduct for this specific stock and product
+            try:
+                stock_product = StockProduct.objects.get(stock=self.stock, product=self.product)
+                return stock_product.landed_unit_cost
+            except StockProduct.DoesNotExist:
+                pass
+        # Final fallback to product's latest cost
+        return self.product.get_latest_cost()
+
+    @property
+    def profit_amount(self):
+        """Calculate profit amount per unit (selling price - cost)"""
+        return self.unit_price - self.unit_cost
+
+    @property
+    def profit_margin(self):
+        """Calculate profit margin percentage ((selling_price - cost) / selling_price * 100)"""
+        if self.unit_price <= Decimal('0.00'):
+            return Decimal('0.00')
+        return ((self.unit_price - self.unit_cost) / self.unit_price * Decimal('100')).quantize(Decimal('0.01'))
+
+    @property
+    def total_profit_amount(self):
+        """Calculate total profit amount for this line item"""
+        return self.profit_amount * self.quantity
 
     def save(self, *args, **kwargs):
         """Calculate total price before saving"""

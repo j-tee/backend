@@ -101,7 +101,7 @@ class InventoryValuationReportBuilder:
 
         for record in queryset:
             stock = record.stock
-            unit_cost = quantize(stock.unit_cost) if stock else quantize(record.product.cost)
+            unit_cost = quantize(stock.unit_cost) if stock else Decimal('0.00')
             unit_tax_rate = quantize(stock.unit_tax_rate) if stock else Decimal('0.00')
             unit_tax_amount = quantize(stock.unit_tax_amount) if stock else Decimal('0.00')
             unit_additional = quantize(stock.unit_additional_cost) if stock else Decimal('0.00')
@@ -115,7 +115,7 @@ class InventoryValuationReportBuilder:
                 product_name=record.product.name,
                 product_sku=record.product.sku,
                 warehouse_name=record.warehouse.name,
-                stock_reference=stock.reference_code if stock else None,
+                stock_reference=getattr(stock, 'description', None),
                 quantity=quantity,
                 unit_cost=unit_cost,
                 unit_tax_rate=unit_tax_rate,

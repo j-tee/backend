@@ -1,11 +1,13 @@
+from datetime import timedelta
 from decimal import Decimal
 from io import BytesIO
 
 from django.contrib.auth import get_user_model
 from django.test import TestCase
+from django.utils import timezone
 from openpyxl import load_workbook
 
-from inventory.models import Category, Product, Warehouse, Stock, Inventory
+from inventory.models import Category, Product, Warehouse, Supplier, Stock, StockProduct, Inventory
 from reports.exporters import ExcelReportExporter
 from reports.services.inventory import InventoryValuationReportBuilder
 
@@ -24,20 +26,26 @@ class InventoryValuationReportTest(TestCase):
         self.product = Product.objects.create(
             name='Rice Bag 25kg',
             sku='RICE-25KG',
-            category=self.category,
-            retail_price=Decimal('350.00'),
-            wholesale_price=Decimal('320.00'),
-            cost=Decimal('250.00')
+            category=self.category
         )
         self.warehouse = Warehouse.objects.create(name='Central Warehouse', location='Industrial Estate')
-        self.stock = Stock.objects.create(
+        self.supplier = Supplier.objects.create(name='Agro Imports Ltd.')
+        today = timezone.now().date()
+        self.batch = Stock.objects.create(
             warehouse=self.warehouse,
+            arrival_date=today,
+            description='Goods receipt GRN-VAL-001'
+        )
+        self.stock = StockProduct.objects.create(
+            stock=self.batch,
             product=self.product,
+            supplier=self.supplier,
+            expiry_date=today + timedelta(days=180),
             quantity=100,
             unit_cost=Decimal('200.00'),
             unit_tax_rate=Decimal('12.50'),
             unit_additional_cost=Decimal('15.00'),
-            reference_code='STK-VAL-001'
+            description='Lot STK-VAL-001'
         )
         Inventory.objects.create(
             product=self.product,

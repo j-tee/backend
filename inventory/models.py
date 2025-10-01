@@ -28,6 +28,28 @@ class Category(models.Model):
         return self.name
 
 
+class Supplier(models.Model):
+    """Suppliers providing stock for products."""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='suppliers')
+    name = models.CharField(max_length=255)
+    contact_person = models.CharField(max_length=255, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    phone_number = models.CharField(max_length=50, blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'suppliers'
+        ordering = ['name']
+        unique_together = ['business', 'name']  # Prevent duplicate supplier names per business
+
+    def __str__(self):
+        return f"{self.name} ({self.business.name})"
+
+
 class Warehouse(models.Model):
     """Warehouses for storing inventory"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -66,14 +88,12 @@ class StoreFront(models.Model):
 class Product(models.Model):
     """Products in the inventory"""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
-    sku = models.CharField(max_length=100, unique=True)
+    sku = models.CharField(max_length=100)
     description = models.TextField(blank=True, null=True)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='products')
     unit = models.CharField(max_length=50, default='pcs')
-    retail_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
-    wholesale_price = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
-    cost = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
     is_active = models.BooleanField(default=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -81,86 +101,377 @@ class Product(models.Model):
     class Meta:
         db_table = 'products'
         ordering = ['name']
+        unique_together = ['business', 'sku']  # Prevent duplicate SKUs per business
         indexes = [
-            models.Index(fields=['sku']),
-            models.Index(fields=['category', 'is_active']),
+            models.Index(fields=['business', 'sku']),
+            models.Index(fields=['business', 'category', 'is_active']),
         ]
     
     def __str__(self):
-        return f"{self.name} ({self.sku})"
+        return f"{self.name} ({self.sku}) - {self.business.name}"
     
-    def get_price(self, sale_type='retail'):
-        """Get price based on sale type"""
-        return self.wholesale_price if sale_type == 'wholesale' else self.retail_price
+    def get_latest_cost(self, warehouse=None, supplier=None):
+        """Get the latest unit cost for this product from stock"""
+        stock_products = self.stock_items.all()
+        if warehouse:
+            stock_products = stock_products.filter(stock__warehouse=warehouse)
+        if supplier:
+            stock_products = stock_products.filter(supplier=supplier)
+        
+        latest_stock = stock_products.order_by('-created_at').first()
+        return latest_stock.unit_cost if latest_stock else Decimal('0.00')
+
+    def get_expected_profit_summary(self, warehouse=None, supplier=None, 
+                                   retail_percentage: Decimal = Decimal('100.00'), 
+                                   wholesale_percentage: Decimal = Decimal('0.00')):
+        """
+        Get expected profit summary across all stock products for this product.
+        
+        Args:
+            warehouse: Filter by specific warehouse
+            supplier: Filter by specific supplier  
+            retail_percentage: Percentage of units expected to be sold at retail price
+            wholesale_percentage: Percentage of units expected to be sold at wholesale price
+            
+        Returns:
+            Dictionary with profit summary for the specified scenario
+        """
+        stock_products = self.stock_items.all()
+        if warehouse:
+            stock_products = stock_products.filter(stock__warehouse=warehouse)
+        if supplier:
+            stock_products = stock_products.filter(supplier=supplier)
+        
+        total_quantity = sum(sp.quantity for sp in stock_products)
+        
+        if total_quantity == 0:
+            return {
+                'total_quantity': Decimal('0'),
+                'total_expected_profit': Decimal('0.00'),
+                'average_expected_margin': Decimal('0.00'),
+                'stock_products_count': 0,
+                'scenario': f'{retail_percentage}% retail, {wholesale_percentage}% wholesale',
+            }
+        
+        # Calculate profit for each stock product using the specified scenario
+        total_expected_profit = Decimal('0.00')
+        weighted_margin_sum = Decimal('0.00')
+        
+        for sp in stock_products:
+            scenario_profit = sp.get_expected_profit_for_scenario(retail_percentage, wholesale_percentage)
+            total_expected_profit += scenario_profit['total_profit']
+            # Weight margin by revenue for accurate average
+            revenue = scenario_profit['avg_selling_price'] * sp.quantity
+            if revenue > 0:
+                weighted_margin_sum += scenario_profit['profit_margin'] * revenue
+        
+        # Calculate weighted average margin
+        total_revenue = sum(
+            sp.get_expected_profit_for_scenario(retail_percentage, wholesale_percentage)['avg_selling_price'] * sp.quantity 
+            for sp in stock_products
+        )
+        avg_expected_margin = (weighted_margin_sum / total_revenue * Decimal('100')).quantize(Decimal('0.01')) if total_revenue > 0 else Decimal('0.00')
+        
+        return {
+            'total_quantity': total_quantity,
+            'total_expected_profit': total_expected_profit,
+            'average_expected_margin': avg_expected_margin,
+            'stock_products_count': stock_products.count(),
+            'scenario': f'{retail_percentage}% retail, {wholesale_percentage}% wholesale',
+            'retail_percentage': retail_percentage,
+            'wholesale_percentage': wholesale_percentage,
+        }
 
 
 class Stock(models.Model):
-    """Stock entries representing receipted inventory lots"""
+    """Stock batches for organizing inventory."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stock_items')
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_items')
-    supplier = models.CharField(max_length=255, blank=True, null=True)
-    reference_code = models.CharField(max_length=100, blank=True, null=True)
+    warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='stocks')
     arrival_date = models.DateField(blank=True, null=True)
-    expiry_date = models.DateField(blank=True, null=True)
-    quantity = models.PositiveIntegerField()
-    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
-    unit_tax_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))], default=Decimal('0.00'))
-    unit_tax_amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
-    unit_additional_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         db_table = 'stock'
-        ordering = ['product__name', 'warehouse__name']
+        ordering = ['-arrival_date', 'created_at']
         indexes = [
-            models.Index(fields=['warehouse', 'product']),
-            models.Index(fields=['product', 'expiry_date']),
-            models.Index(fields=['reference_code']),
-        ]
-        constraints = [
-            models.UniqueConstraint(fields=['warehouse', 'product', 'reference_code', 'expiry_date'], name='stock_unique_reference'),
+            models.Index(fields=['warehouse', 'arrival_date']),
         ]
 
     def __str__(self):
-        code = self.reference_code or 'N/A'
-        return f"{self.product.name} @ {self.warehouse.name} [{code}]"
+        arrival = self.arrival_date.isoformat() if self.arrival_date else 'unscheduled'
+        return f"{self.warehouse.name} stock ({arrival})"
+
+
+class StockProduct(models.Model):
+    """Stock items with supplier-specific data."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    stock = models.ForeignKey(Stock, on_delete=models.CASCADE, related_name='items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='stock_items')
+    supplier = models.ForeignKey(Supplier, on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_items')
+    expiry_date = models.DateField(blank=True, null=True)
+    quantity = models.PositiveIntegerField()
+    unit_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    unit_tax_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))], default=Decimal('0.00'), null=True, blank=True)
+    unit_tax_amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'), null=True, blank=True)
+    unit_additional_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'), null=True, blank=True)
+    retail_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    wholesale_price = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
+    description = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'stock_products'
+        ordering = ['product__name', 'stock__warehouse__name']
+        indexes = [
+            models.Index(fields=['stock', 'product']),
+            models.Index(fields=['product', 'expiry_date']),
+            models.Index(fields=['supplier']),
+            models.Index(fields=['stock', 'product', 'unit_cost']),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['stock', 'product', 'supplier', 'expiry_date', 'unit_cost'],
+                name='stock_unique_product_supplier_expiry_cost'
+            ),
+        ]
+
+    def __str__(self):
+        arrival = self.stock.arrival_date.isoformat() if self.stock.arrival_date else 'unscheduled'
+        supplier_info = f" by {self.supplier.name}" if self.supplier else ""
+        return f"{self.product.name} @ {self.stock.warehouse.name} ({arrival}){supplier_info}"
 
     def save(self, *args, **kwargs):
-        if self.unit_cost and self.unit_tax_rate and (self.unit_tax_amount is None or self.unit_tax_amount == Decimal('0.00')):
+        # Calculate tax_amount from tax_rate only if tax_amount is not already set
+        if self.unit_cost and self.unit_tax_rate is not None and (self.unit_tax_amount is None or self.unit_tax_amount == Decimal('0.00')):
             tax_value = (self.unit_cost * self.unit_tax_rate) / Decimal('100.00')
             self.unit_tax_amount = tax_value.quantize(Decimal('0.01'))
         super().save(*args, **kwargs)
 
     @property
+    def warehouse(self):
+        """Get warehouse from the stock batch."""
+        return self.stock.warehouse
+
+    @property
+    def effective_supplier(self):
+        return self.supplier
+
+    @property
     def landed_unit_cost(self) -> Decimal:
+        """Total cost per unit including all taxes and additional costs"""
         return (self.unit_cost or Decimal('0.00')) + (self.unit_tax_amount or Decimal('0.00')) + (self.unit_additional_cost or Decimal('0.00'))
 
     @property
+    def total_base_cost(self) -> Decimal:
+        """Total base cost for all units (without taxes and additional costs)"""
+        return (self.unit_cost or Decimal('0.00')) * self.quantity
+
+    @property
     def total_tax_amount(self) -> Decimal:
+        """Total tax amount for all units"""
         return (self.unit_tax_amount or Decimal('0.00')) * self.quantity
 
     @property
     def total_additional_cost(self) -> Decimal:
+        """Total additional costs for all units"""
         return (self.unit_additional_cost or Decimal('0.00')) * self.quantity
 
     @property
     def total_landed_cost(self) -> Decimal:
+        """Total landed cost including all taxes and additional costs"""
         return self.landed_unit_cost * self.quantity
+
+    @property
+    def expected_profit_amount(self) -> Decimal:
+        """Expected profit per unit if sold at retail price (retail_price - landed_unit_cost)"""
+        if not self.retail_price or self.retail_price <= Decimal('0.00'):
+            return Decimal('0.00')
+        return self.retail_price - self.landed_unit_cost
+
+    @property
+    def expected_profit_margin(self) -> Decimal:
+        """Expected profit margin percentage if sold at retail price"""
+        if not self.retail_price or self.retail_price <= Decimal('0.00'):
+            return Decimal('0.00')
+        return ((self.retail_price - self.landed_unit_cost) / self.retail_price * Decimal('100')).quantize(Decimal('0.01'))
+
+    @property
+    def expected_total_profit(self) -> Decimal:
+        """Expected total profit if all units sold at retail price"""
+        return self.expected_profit_amount * self.quantity
+
+    def get_expected_profit_scenarios(self) -> dict:
+        """
+        Calculate expected profit projections for different sales scenarios.
+        
+        Returns scenarios for:
+        - retail_only: All units sold at retail price
+        - wholesale_only: All units sold at wholesale price  
+        - mixed_scenarios: Various retail/wholesale combinations
+        """
+        scenarios = {}
+        
+        # Retail-only scenario
+        scenarios['retail_only'] = {
+            'scenario': 'retail_only',
+            'description': 'All units sold at retail price',
+            'retail_percentage': Decimal('100.00'),
+            'wholesale_percentage': Decimal('0.00'),
+            'avg_selling_price': self.retail_price,
+            'profit_per_unit': self.expected_profit_amount,
+            'profit_margin': self.expected_profit_margin,
+            'total_profit': self.expected_total_profit,
+        }
+        
+        # Wholesale-only scenario
+        wholesale_profit_per_unit = Decimal('0.00')
+        wholesale_margin = Decimal('0.00')
+        if self.wholesale_price and self.wholesale_price > Decimal('0.00'):
+            wholesale_profit_per_unit = self.wholesale_price - self.landed_unit_cost
+            wholesale_margin = ((self.wholesale_price - self.landed_unit_cost) / self.wholesale_price * Decimal('100')).quantize(Decimal('0.01'))
+        
+        scenarios['wholesale_only'] = {
+            'scenario': 'wholesale_only',
+            'description': 'All units sold at wholesale price',
+            'retail_percentage': Decimal('0.00'),
+            'wholesale_percentage': Decimal('100.00'),
+            'avg_selling_price': self.wholesale_price,
+            'profit_per_unit': wholesale_profit_per_unit,
+            'profit_margin': wholesale_margin,
+            'total_profit': wholesale_profit_per_unit * self.quantity,
+        }
+        
+        # Mixed scenarios - common combinations
+        mixed_scenarios = []
+        common_splits = [
+            (Decimal('90.00'), Decimal('10.00'), '90% retail, 10% wholesale'),
+            (Decimal('80.00'), Decimal('20.00'), '80% retail, 20% wholesale'),
+            (Decimal('70.00'), Decimal('30.00'), '70% retail, 30% wholesale'),
+            (Decimal('60.00'), Decimal('40.00'), '60% retail, 40% wholesale'),
+            (Decimal('50.00'), Decimal('50.00'), '50% retail, 50% wholesale'),
+            (Decimal('40.00'), Decimal('60.00'), '40% retail, 60% wholesale'),
+            (Decimal('30.00'), Decimal('70.00'), '30% retail, 70% wholesale'),
+            (Decimal('20.00'), Decimal('80.00'), '20% retail, 80% wholesale'),
+            (Decimal('10.00'), Decimal('90.00'), '10% retail, 90% wholesale'),
+        ]
+        
+        for retail_pct, wholesale_pct, description in common_splits:
+            retail_units = (retail_pct / Decimal('100.00')) * self.quantity
+            wholesale_units = (wholesale_pct / Decimal('100.00')) * self.quantity
+            
+            retail_profit = self.expected_profit_amount * retail_units
+            wholesale_profit = wholesale_profit_per_unit * wholesale_units
+            total_profit = retail_profit + wholesale_profit
+            
+            # Weighted average selling price
+            total_revenue = (self.retail_price * retail_units) + (self.wholesale_price * wholesale_units)
+            avg_price = total_revenue / self.quantity if self.quantity > 0 else Decimal('0.00')
+            
+            # Weighted average margin
+            avg_margin = (total_profit / total_revenue * Decimal('100')).quantize(Decimal('0.01')) if total_revenue > 0 else Decimal('0.00')
+            
+            mixed_scenarios.append({
+                'scenario': f'mixed_{int(retail_pct)}_{int(wholesale_pct)}',
+                'description': description,
+                'retail_percentage': retail_pct,
+                'wholesale_percentage': wholesale_pct,
+                'retail_units': retail_units,
+                'wholesale_units': wholesale_units,
+                'avg_selling_price': avg_price,
+                'profit_per_unit': total_profit / self.quantity if self.quantity > 0 else Decimal('0.00'),
+                'profit_margin': avg_margin,
+                'total_profit': total_profit,
+            })
+        
+        scenarios['mixed_scenarios'] = mixed_scenarios
+        
+        return scenarios
+
+    def get_expected_profit_for_scenario(self, retail_percentage: Decimal = Decimal('100.00'), 
+                                       wholesale_percentage: Decimal = Decimal('0.00')) -> dict:
+        """
+        Calculate expected profit for a specific retail/wholesale percentage split.
+        
+        Args:
+            retail_percentage: Percentage of units sold at retail price (0-100)
+            wholesale_percentage: Percentage of units sold at wholesale price (0-100)
+            
+        Returns:
+            Dictionary with profit calculations for the specified scenario
+        """
+        if retail_percentage + wholesale_percentage != Decimal('100.00'):
+            raise ValueError("Retail and wholesale percentages must sum to 100%")
+            
+        retail_pct = retail_percentage / Decimal('100.00')
+        wholesale_pct = wholesale_percentage / Decimal('100.00')
+        
+        retail_units = retail_pct * self.quantity
+        wholesale_units = wholesale_pct * self.quantity
+        
+        retail_profit = self.expected_profit_amount * retail_units
+        wholesale_profit_per_unit = Decimal('0.00')
+        if self.wholesale_price and self.wholesale_price > Decimal('0.00'):
+            wholesale_profit_per_unit = self.wholesale_price - self.landed_unit_cost
+        wholesale_profit = wholesale_profit_per_unit * wholesale_units
+        
+        total_profit = retail_profit + wholesale_profit
+        total_revenue = (self.retail_price * retail_units) + (self.wholesale_price * wholesale_units)
+        
+        avg_selling_price = total_revenue / self.quantity if self.quantity > 0 else Decimal('0.00')
+        avg_margin = (total_profit / total_revenue * Decimal('100')).quantize(Decimal('0.01')) if total_revenue > 0 else Decimal('0.00')
+        
+        return {
+            'retail_percentage': retail_percentage,
+            'wholesale_percentage': wholesale_percentage,
+            'retail_units': retail_units,
+            'wholesale_units': wholesale_units,
+            'avg_selling_price': avg_selling_price,
+            'profit_per_unit': total_profit / self.quantity if self.quantity > 0 else Decimal('0.00'),
+            'profit_margin': avg_margin,
+            'total_profit': total_profit,
+            'retail_profit': retail_profit,
+            'wholesale_profit': wholesale_profit,
+        }
+
+    @property
+    def cost_breakdown(self) -> dict:
+        """Detailed cost breakdown for analysis"""
+        return {
+            'unit_cost': self.unit_cost,
+            'unit_tax_rate': self.unit_tax_rate,
+            'unit_tax_amount': self.unit_tax_amount,
+            'unit_additional_cost': self.unit_additional_cost,
+            'landed_unit_cost': self.landed_unit_cost,
+            'retail_price': self.retail_price,
+            'wholesale_price': self.wholesale_price,
+            'quantity': self.quantity,
+            'total_base_cost': self.total_base_cost,
+            'total_tax_amount': self.total_tax_amount,
+            'total_additional_cost': self.total_additional_cost,
+            'total_landed_cost': self.total_landed_cost,
+            'expected_profit_amount': self.expected_profit_amount,
+            'expected_profit_margin': self.expected_profit_margin,
+            'expected_total_profit': self.expected_total_profit,
+            'profit_scenarios': self.get_expected_profit_scenarios(),
+        }
 
 
 class Inventory(models.Model):
     """Current inventory levels (denormalized for performance)"""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='inventory')
-    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_entries')
+    stock = models.ForeignKey(StockProduct, on_delete=models.SET_NULL, null=True, blank=True, related_name='inventory_entries')
     warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='inventory')
     quantity = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
     class Meta:
         db_table = 'inventory'
         unique_together = ['product', 'warehouse', 'stock']
@@ -169,10 +480,13 @@ class Inventory(models.Model):
             models.Index(fields=['warehouse', 'quantity']),
             models.Index(fields=['stock', 'warehouse']),
         ]
-    
+
     def __str__(self):
-        stock_ref = self.stock.reference_code if self.stock and self.stock.reference_code else 'N/A'
-        return f"{self.product.name} - {self.warehouse.name} [{stock_ref}] - Qty: {self.quantity}"
+        if self.stock and self.stock.stock:
+            arrival = self.stock.stock.arrival_date.isoformat() if self.stock.stock.arrival_date else 'unscheduled'
+        else:
+            arrival = 'unscheduled'
+        return f"{self.product.name} - {self.warehouse.name} ({arrival}) Qty: {self.quantity}"
 
 
 class Transfer(models.Model):
@@ -186,7 +500,7 @@ class Transfer(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='transfers')
-    stock = models.ForeignKey(Stock, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers')
+    stock = models.ForeignKey(StockProduct, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers')
     from_warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='outbound_transfers')
     to_storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='inbound_transfers')
     quantity = models.PositiveIntegerField()
@@ -207,8 +521,11 @@ class Transfer(models.Model):
         ]
     
     def __str__(self):
-        stock_ref = self.stock.reference_code if self.stock and self.stock.reference_code else 'N/A'
-        return f"{self.product.name} ({stock_ref}) - {self.from_warehouse.name} to {self.to_storefront.name} - Qty: {self.quantity}"
+        if self.stock and self.stock.stock:
+            arrival = self.stock.stock.arrival_date.isoformat() if self.stock.stock.arrival_date else 'unscheduled'
+        else:
+            arrival = 'unscheduled'
+        return f"{self.product.name} ({arrival}) - {self.from_warehouse.name} to {self.to_storefront.name} - Qty: {self.quantity}"
 
 
 class StockAlert(models.Model):

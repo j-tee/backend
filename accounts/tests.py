@@ -1,4 +1,4 @@
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.urls import reverse
 from django.utils import timezone
@@ -6,7 +6,8 @@ from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 from rest_framework.authtoken.models import Token
 from unittest.mock import patch
-from .models import Role, UserProfile, AuditLog, Business, BusinessMembership
+from .models import Role, UserProfile, AuditLog, Business, BusinessMembership, BusinessInvitation
+from .signals import ensure_default_roles, promote_platform_owner
 from .utils import log_user_action, track_model_changes
 
 User = get_user_model()
@@ -38,16 +39,44 @@ class RoleModelTest(TestCase):
     def test_role_manager_methods(self):
         """Test role manager custom methods"""
         # Create default roles
-        Role.objects.create(name='Admin', description='Administrator')
-        Role.objects.create(name='Cashier', description='Cashier role')
-        Role.objects.create(name='Manager', description='Manager role')
-        Role.objects.create(name='Warehouse Staff', description='Warehouse role')
+        Role.objects.get_or_create(name='Admin', defaults={'description': 'Administrator'})
+        Role.objects.get_or_create(name='Cashier', defaults={'description': 'Cashier role'})
+        Role.objects.get_or_create(name='Manager', defaults={'description': 'Manager role'})
+        Role.objects.get_or_create(name='Warehouse Staff', defaults={'description': 'Warehouse role'})
         
         admin_role = Role.objects.get_admin_role()
         self.assertEqual(admin_role.name, 'Admin')
         
         cashier_role = Role.objects.get_cashier_role()
         self.assertEqual(cashier_role.name, 'Cashier')
+
+
+class PlatformOwnerPromotionTest(TestCase):
+    """Verify platform owner promotion logic."""
+
+    def setUp(self):
+        ensure_default_roles()
+
+    @override_settings(PLATFORM_OWNER_EMAIL='owner@example.com')
+    def test_promote_existing_platform_owner(self):
+        user = User.objects.create_user(
+            email='owner@example.com',
+            password='testpass123',
+            name='Platform Owner'
+        )
+
+        changed = promote_platform_owner()
+        user.refresh_from_db()
+
+        self.assertTrue(changed)
+        self.assertTrue(user.is_superuser)
+        self.assertTrue(user.is_staff)
+        self.assertEqual(user.role.name, 'Admin')
+
+    @override_settings(PLATFORM_OWNER_EMAIL='missing@example.com')
+    def test_no_user_no_promotion(self):
+        changed = promote_platform_owner()
+        self.assertFalse(changed)
 
 
 class UserModelTest(TestCase):
@@ -90,7 +119,7 @@ class UserModelTest(TestCase):
     
     def test_user_role_methods(self):
         """Test user role checking methods"""
-        admin_role = Role.objects.create(name='Admin', description='Administrator')
+        admin_role, _ = Role.objects.get_or_create(name='Admin', defaults={'description': 'Administrator'})
         admin_user = User.objects.create_user(
             email='admin@example.com',
             password='pass123',
@@ -225,7 +254,8 @@ class AuthenticationAPITest(APITestCase):
             email='test@example.com',
             password='testpass123',
             name='Test User',
-            role=self.role
+            role=self.role,
+            email_verified=True
         )
     
     def test_login_success(self):
@@ -308,7 +338,7 @@ class RoleAPITest(APITestCase):
     
     def setUp(self):
         self.client = APIClient()
-        self.admin_role = Role.objects.create(name='Admin', description='Administrator')
+        self.admin_role, _ = Role.objects.get_or_create(name='Admin', defaults={'description': 'Administrator'})
         self.admin_user = User.objects.create_user(
             email='admin@example.com',
             password='adminpass123',
@@ -322,7 +352,9 @@ class RoleAPITest(APITestCase):
         """Test listing roles"""
         response = self.client.get('/accounts/api/roles/')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data['results']), 1)
+        self.assertGreaterEqual(len(response.data['results']), 1)
+        role_names = [role['name'] for role in response.data['results']]
+        self.assertIn('Admin', role_names)
     
     def test_create_role(self):
         """Test creating a role"""
@@ -354,9 +386,16 @@ class RoleAPITest(APITestCase):
     
     def test_delete_role(self):
         """Test deleting a role"""
-        response = self.client.delete(f'/accounts/api/roles/{self.admin_role.id}/')
+        temp_role = Role.objects.create(name='Temp Role', description='Temporary')
+        response = self.client.delete(f'/accounts/api/roles/{temp_role.id}/')
         self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(Role.objects.filter(id=self.admin_role.id).exists())
+        self.assertFalse(Role.objects.filter(id=temp_role.id).exists())
+
+    def test_delete_role_in_use_returns_error(self):
+        """Deleting a role tied to users should fail with a helpful error."""
+        response = self.client.delete(f'/accounts/api/roles/{self.admin_role.id}/')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(Role.objects.filter(id=self.admin_role.id).exists())
 
 
 class UserAPITest(APITestCase):
@@ -364,8 +403,8 @@ class UserAPITest(APITestCase):
     
     def setUp(self):
         self.client = APIClient()
-        self.admin_role = Role.objects.create(name='Admin', description='Administrator')
-        self.cashier_role = Role.objects.create(name='Cashier', description='Cashier role')
+        self.admin_role, _ = Role.objects.get_or_create(name='Admin', defaults={'description': 'Administrator'})
+        self.cashier_role, _ = Role.objects.get_or_create(name='Cashier', defaults={'description': 'Cashier role'})
         
         self.admin_user = User.objects.create_user(
             email='admin@example.com',
@@ -446,7 +485,7 @@ class AuditLogAPITest(APITestCase):
     
     def setUp(self):
         self.client = APIClient()
-        self.admin_role = Role.objects.create(name='Admin', description='Administrator')
+        self.admin_role, _ = Role.objects.get_or_create(name='Admin', defaults={'description': 'Administrator'})
         self.admin_user = User.objects.create_user(
             email='admin@example.com',
             password='adminpass123',
@@ -505,12 +544,13 @@ class TasksTest(TestCase):
         )
     
     @patch('accounts.tasks.send_mail')
-    def test_send_welcome_email_task(self):
+    def test_send_welcome_email_task(self, mock_send_mail):
         """Test send_welcome_email task"""
         from accounts.tasks import send_welcome_email
         
         result = send_welcome_email(self.user.id)
         
+        mock_send_mail.assert_called_once()
         self.assertIn('Welcome email sent', str(result))
     
     def test_cleanup_inactive_users_task(self):
@@ -552,61 +592,148 @@ class TasksTest(TestCase):
         self.assertIn('total_logins', result)
 
 
-class BusinessRegistrationAPITest(APITestCase):
-    """Tests for business registration workflow"""
+class RegistrationWorkflowAPITest(APITestCase):
+    """End-to-end tests for the new registration workflow."""
 
     def setUp(self):
         self.client = APIClient()
+        ensure_default_roles()
 
-    def test_register_business_success(self):
-        payload = {
-            'owner_name': 'New Owner',
-            'owner_email': 'newowner@example.com',
-            'owner_password': 'strongpass123',
-            'business_name': 'New Business',
-            'business_tin': 'TIN-NEW-001',
-            'business_email': 'contact@newbusiness.com',
-            'business_address': '456 Commerce Ave',
-            'business_phone_numbers': ['+15551234567'],
-            'business_website': 'https://newbusiness.com',
-            'business_social_handles': {'instagram': '@newbiz'}
+    def test_owner_registration_and_business_creation(self):
+        register_payload = {
+            'name': 'Owner User',
+            'email': 'owner@example.com',
+            'password': 'StrongPass123',
+            'account_type': User.ACCOUNT_OWNER,
         }
 
-        response = self.client.post('/accounts/api/auth/register-business/', payload, format='json')
+        response = self.client.post('/accounts/api/auth/register/', register_payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertIn('token', response.data)
-        self.assertIn('user', response.data)
-        self.assertIn('business', response.data)
+        self.assertIn('user_id', response.data)
 
-        user_id = response.data['user']['id']
-        business_id = response.data['business']['id']
+        user = User.objects.get(email='owner@example.com')
+        self.assertFalse(user.email_verified)
+        self.assertFalse(user.is_active)
 
-        business = Business.objects.get(id=business_id)
-        owner = User.objects.get(id=user_id)
+        verification = user.verification_tokens.first()
+        verify_response = self.client.post('/accounts/api/auth/verify-email/', {'token': verification.token}, format='json')
+        self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
 
-        self.assertEqual(business.owner, owner)
-        membership = BusinessMembership.objects.get(business=business, user=owner)
+        user.refresh_from_db()
+        self.assertTrue(user.email_verified)
+        self.assertTrue(user.is_active)
+
+        token = Token.objects.create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION='Token ' + token.key)
+
+        business_payload = {
+            'name': 'Owner Business',
+            'tin': 'TIN-OWNER-001',
+            'email': 'ownerbiz@example.com',
+            'address': '123 Owner St',
+            'phone_numbers': ['+10000000000'],
+            'social_handles': {'instagram': '@ownerbiz'},
+        }
+
+        business_response = self.client.post('/accounts/api/auth/register-business/', business_payload, format='json')
+        self.assertEqual(business_response.status_code, status.HTTP_201_CREATED)
+        self.assertIn('business', business_response.data)
+
+        business = Business.objects.get(tin='TIN-OWNER-001')
+        self.assertEqual(business.owner, user)
+        membership = BusinessMembership.objects.get(business=business, user=user)
         self.assertEqual(membership.role, BusinessMembership.OWNER)
         self.assertTrue(membership.is_admin)
 
-    def test_register_business_duplicate_email(self):
-        User.objects.create_user(
-            email='duplicate@example.com',
-            password='existingpass123',
-            name='Existing User'
-        )
-
+    def test_employee_registration_requires_invitation(self):
         payload = {
-            'owner_name': 'Another Owner',
-            'owner_email': 'duplicate@example.com',
-            'owner_password': 'strongpass123',
-            'business_name': 'Another Business',
-            'business_tin': 'TIN-ANOTHER-001',
-            'business_email': 'contact@anotherbusiness.com',
-            'business_address': '789 Commerce Ave',
-            'business_phone_numbers': ['+15559876543']
+            'name': 'Employee User',
+            'email': 'employee@example.com',
+            'password': 'EmployeePass123',
+            'account_type': User.ACCOUNT_EMPLOYEE,
         }
 
-        response = self.client.post('/accounts/api/auth/register-business/', payload, format='json')
+        response = self.client.post('/accounts/api/auth/register/', payload, format='json')
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertIn('owner_email', response.data)
+        self.assertIn('email', response.data)
+
+    def test_employee_registration_with_invitation(self):
+        owner = User.objects.create_user(
+            email='owner2@example.com',
+            password='StrongPass123',
+            name='Owner Two',
+            account_type=User.ACCOUNT_OWNER,
+            email_verified=True,
+        )
+
+        business = Business.objects.create(
+            owner=owner,
+            name='Business Two',
+            tin='TIN-BIZ-002',
+            email='biz2@example.com',
+            address='456 Market Ave',
+            phone_numbers=['+15550000000'],
+        )
+
+        invitation = BusinessInvitation.objects.create(
+            business=business,
+            email='employee@example.com',
+            role=BusinessMembership.STAFF,
+            invited_by=owner,
+        )
+        invitation.initialize_token()
+        invitation.save()
+
+        register_payload = {
+            'name': 'Employee User',
+            'email': 'employee@example.com',
+            'password': 'EmployeePass123',
+            'account_type': User.ACCOUNT_EMPLOYEE,
+        }
+
+        response = self.client.post('/accounts/api/auth/register/', register_payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        user = User.objects.get(email='employee@example.com')
+        verification = user.verification_tokens.first()
+        verify_response = self.client.post('/accounts/api/auth/verify-email/', {'token': verification.token}, format='json')
+        self.assertEqual(verify_response.status_code, status.HTTP_200_OK)
+
+        membership = BusinessMembership.objects.get(business=business, user=user)
+        self.assertEqual(membership.role, BusinessMembership.STAFF)
+        self.assertTrue(membership.is_active)
+
+        # Employees cannot register businesses
+        token = Token.objects.create(user=user)
+        self.client.credentials(HTTP_AUTHORIZATION='Token ' + token.key)
+        business_payload = {
+            'name': 'Should Fail',
+            'tin': 'TIN-FAIL-001',
+            'email': 'fail@example.com',
+            'address': 'Fail Street',
+            'phone_numbers': ['+19999999999'],
+        }
+        deny_response = self.client.post('/accounts/api/auth/register-business/', business_payload, format='json')
+        self.assertEqual(deny_response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_verify_email_via_get_redirect(self):
+        payload = {
+            'name': 'Owner User',
+            'email': 'owner-get@example.com',
+            'password': 'StrongPass123',
+            'account_type': User.ACCOUNT_OWNER,
+        }
+
+        response = self.client.post('/accounts/api/auth/register/', payload, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        user = User.objects.get(email='owner-get@example.com')
+        token = user.verification_tokens.first().token
+
+        redirect_response = self.client.get(f'/accounts/api/auth/verify-email/?token={token}', follow=False)
+        self.assertEqual(redirect_response.status_code, status.HTTP_302_FOUND)
+        self.assertIn('status=success', redirect_response['Location'])
+
+        user.refresh_from_db()
+        self.assertTrue(user.email_verified)
+        self.assertTrue(user.is_active)

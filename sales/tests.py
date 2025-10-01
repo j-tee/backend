@@ -3,7 +3,8 @@ from decimal import Decimal
 from django.contrib.auth import get_user_model
 from django.test import TestCase
 
-from inventory.models import Category, Product, StoreFront
+from accounts.models import Business
+from inventory.models import Category, Product, Stock, StockProduct, StoreFront, Warehouse
 from .models import Sale, SaleItem
 
 
@@ -17,6 +18,13 @@ class SaleItemTaxCalculationTest(TestCase):
 			password='testpass123',
 			name='Cashier One'
 		)
+		self.business = Business.objects.create(
+			owner=self.user,
+			name='Test Business',
+			tin='123456789',
+			email='business@example.com',
+			address='123 Test Street'
+		)
 		self.storefront = StoreFront.objects.create(
 			user=self.user,
 			name='POS Store',
@@ -24,12 +32,10 @@ class SaleItemTaxCalculationTest(TestCase):
 		)
 		self.category = Category.objects.create(name='Beverages')
 		self.product = Product.objects.create(
+			business=self.business,
 			name='Bottled Water',
 			sku='WATER-001',
-			category=self.category,
-			retail_price=Decimal('25.00'),
-			wholesale_price=Decimal('20.00'),
-			cost=Decimal('10.00')
+			category=self.category
 		)
 		self.sale = Sale.objects.create(
 			storefront=self.storefront,
@@ -63,3 +69,72 @@ class SaleItemTaxCalculationTest(TestCase):
 		total = self.sale.calculate_total()
 		self.assertEqual(total, Decimal('63.25'))
 		self.assertEqual(self.sale.tax_amount, Decimal('8.25'))
+
+	def test_sale_item_profit_margin_calculation(self):
+		# Create warehouse and stock for cost tracking
+		warehouse = Warehouse.objects.create(
+			name='Test Warehouse',
+			location='Test Location',
+			manager=self.user
+		)
+		stock = Stock.objects.create(
+			warehouse=warehouse,
+			arrival_date='2025-10-01'
+		)
+		stock_product = StockProduct.objects.create(
+			stock=stock,
+			product=self.product,
+			quantity=100,
+			unit_cost=Decimal('10.00'),  # Cost per unit
+			retail_price=Decimal('20.00')
+		)
+
+		# Create sale item with stock reference
+		sale_item = SaleItem.objects.create(
+			sale=self.sale,
+			product=self.product,
+			stock=stock,
+			stock_product=stock_product,
+			quantity=2,
+			unit_price=Decimal('20.00'),
+			total_price=Decimal('40.00')
+		)
+
+		# Test profit calculations
+		self.assertEqual(sale_item.unit_cost, Decimal('10.00'))  # Cost from stock
+		self.assertEqual(sale_item.profit_amount, Decimal('10.00'))  # 20.00 - 10.00
+		self.assertEqual(sale_item.profit_margin, Decimal('50.00'))  # (10.00 / 20.00) * 100
+		self.assertEqual(sale_item.total_profit_amount, Decimal('20.00'))  # 10.00 * 2
+
+	def test_sale_item_profit_margin_fallback_to_product_cost(self):
+		# Set up product with latest cost (no stock reference)
+		warehouse = Warehouse.objects.create(
+			name='Test Warehouse',
+			location='Test Location',
+			manager=self.user
+		)
+		stock = Stock.objects.create(
+			warehouse=warehouse,
+			arrival_date='2025-10-01'
+		)
+		StockProduct.objects.create(
+			stock=stock,
+			product=self.product,
+			quantity=100,
+			unit_cost=Decimal('8.00'),  # This will be the latest cost
+			retail_price=Decimal('20.00')
+		)
+
+		# Create sale item without stock reference
+		sale_item = SaleItem.objects.create(
+			sale=self.sale,
+			product=self.product,
+			quantity=1,
+			unit_price=Decimal('25.00'),
+			total_price=Decimal('25.00')
+		)
+
+		# Test profit calculations using fallback cost
+		self.assertEqual(sale_item.unit_cost, Decimal('8.00'))  # Latest cost from product
+		self.assertEqual(sale_item.profit_amount, Decimal('17.00'))  # 25.00 - 8.00
+		self.assertEqual(sale_item.profit_margin, Decimal('68.00'))  # (17.00 / 25.00) * 100

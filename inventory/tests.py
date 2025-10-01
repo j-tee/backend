@@ -5,86 +5,474 @@ from decimal import Decimal
 from django.test import TestCase
 from django.core.exceptions import ValidationError
 from django.utils import timezone
-
 from django.contrib.auth import get_user_model
+
+from rest_framework import status
+from rest_framework.test import APITestCase
+from rest_framework.authtoken.models import Token
 
 from .models import (
 	Warehouse, StoreFront, BusinessWarehouse, BusinessStoreFront,
-	StoreFrontEmployee, WarehouseEmployee, Category, Product, Stock
+	StoreFrontEmployee, WarehouseEmployee, Category, Product, Supplier, Stock, StockProduct
 )
 from accounts.models import Business, BusinessMembership
 
 User = get_user_model()
 
 
-class StockModelTest(TestCase):
+class BusinessTestMixin:
+	"""Utility mixin to create businesses for tests."""
+
+	def create_business(self, owner=None, **overrides):
+		suffix = uuid.uuid4().hex[:6]
+		if owner is None:
+			owner = User.objects.create_user(
+				email=f'owner-{suffix}@example.com',
+				password='testpass123',
+				name=f'Owner {suffix}'
+			)
+		business_defaults = {
+			'name': overrides.get('name', f'Test Business {suffix}'),
+			'tin': overrides.get('tin', f'TIN{suffix.upper()}'),
+			'email': overrides.get('email', f'biz{suffix}@example.com'),
+			'address': overrides.get('address', '123 Business Rd'),
+			'website': overrides.get('website', 'https://example.com'),
+			'phone_numbers': overrides.get('phone_numbers', ['+1234567890']),
+			'social_handles': overrides.get('social_handles', {'instagram': '@testbiz'}),
+		}
+		business = Business.objects.create(owner=owner, **business_defaults)
+		return owner, business
+
+
+class StockProductProfitTest(BusinessTestMixin, TestCase):
+	"""Test profit calculations for StockProduct with different scenarios"""
+
 	def setUp(self):
+		self.owner, self.business = self.create_business(name='Profit Test Biz', tin='TIN-PROFIT-001')
 		self.category = Category.objects.create(name='Electronics')
 		self.product = Product.objects.create(
-			name='Metallo Cable',
-			sku='MET-001',
-			category=self.category,
-			retail_price=Decimal('10.00'),
-			wholesale_price=Decimal('8.00'),
-			cost=Decimal('5.00')
+			business=self.business,
+			name='Test Laptop',
+			sku='LAPTOP-001',
+			category=self.category
 		)
-		self.warehouse = Warehouse.objects.create(name='Expiry Warehouse', location='Zone A')
+		self.warehouse = Warehouse.objects.create(name='Main Warehouse', location='Downtown')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+		self.stock = Stock.objects.create(warehouse=self.warehouse, description='Laptop stock')
+		self.supplier = Supplier.objects.create(
+			business=self.business,
+			name='Tech Supplier Inc',
+			email='contact@techsupplier.com'
+		)
 
-	def test_expiry_date_persists(self):
-		stock_item = Stock.objects.create(
-			warehouse=self.warehouse,
+	def test_expected_profit_scenarios_basic(self):
+		"""Test basic expected profit scenarios for retail and wholesale"""
+		stock_product = StockProduct.objects.create(
+			stock=self.stock,
 			product=self.product,
+			supplier=self.supplier,
 			quantity=100,
-			expiry_date=date(2025, 10, 30),
-			supplier='Cable Imports Ltd.',
-			reference_code='STK-EXP-001',
-			arrival_date=timezone.now().date()
-		)
-		self.assertEqual(stock_item.expiry_date.isoformat(), '2025-10-30')
-
-	def test_allows_multiple_expiries_for_same_batch_product(self):
-		Stock.objects.create(
-			warehouse=self.warehouse,
-			product=self.product,
-			quantity=50,
-			expiry_date=date(2025, 10, 30),
-			supplier='Cable Imports Ltd.',
-			reference_code='STK-EXP-001',
-			arrival_date=timezone.now().date()
-		)
-		Stock.objects.create(
-			warehouse=self.warehouse,
-			product=self.product,
-			quantity=40,
-			expiry_date=date(2025, 11, 20),
-			supplier='Cable Imports Ltd.',
-			reference_code='STK-EXP-002',
-			arrival_date=timezone.now().date()
-		)
-		self.assertEqual(
-			Stock.objects.filter(warehouse=self.warehouse, product=self.product).count(),
-			2
+			unit_cost=Decimal('800.00'),
+			unit_tax_rate=Decimal('10.00'),  # 10% tax = $80
+			unit_tax_amount=Decimal('80.00'),
+			unit_additional_cost=Decimal('20.00'),  # Total landed cost = 800 + 80 + 20 = 900
+			retail_price=Decimal('1200.00'),
+			wholesale_price=Decimal('1000.00')
 		)
 
-	def test_landed_cost_computation(self):
-		stock_item = Stock.objects.create(
-			warehouse=self.warehouse,
+		# Test retail-only scenario
+		retail_scenario = stock_product.get_expected_profit_scenarios()['retail_only']
+		self.assertEqual(retail_scenario['scenario'], 'retail_only')
+		self.assertEqual(retail_scenario['retail_percentage'], Decimal('100.00'))
+		self.assertEqual(retail_scenario['wholesale_percentage'], Decimal('0.00'))
+		self.assertEqual(retail_scenario['avg_selling_price'], Decimal('1200.00'))
+		self.assertEqual(retail_scenario['profit_per_unit'], Decimal('300.00'))  # 1200 - 900
+		self.assertEqual(retail_scenario['profit_margin'], Decimal('25.00'))  # (300/1200)*100
+		self.assertEqual(retail_scenario['total_profit'], Decimal('30000.00'))  # 300 * 100
+
+		# Test wholesale-only scenario
+		wholesale_scenario = stock_product.get_expected_profit_scenarios()['wholesale_only']
+		self.assertEqual(wholesale_scenario['scenario'], 'wholesale_only')
+		self.assertEqual(wholesale_scenario['retail_percentage'], Decimal('0.00'))
+		self.assertEqual(wholesale_scenario['wholesale_percentage'], Decimal('100.00'))
+		self.assertEqual(wholesale_scenario['avg_selling_price'], Decimal('1000.00'))
+		self.assertEqual(wholesale_scenario['profit_per_unit'], Decimal('100.00'))  # 1000 - 900
+		self.assertEqual(wholesale_scenario['profit_margin'], Decimal('10.00'))  # (100/1000)*100
+		self.assertEqual(wholesale_scenario['total_profit'], Decimal('10000.00'))  # 100 * 100
+
+	def test_expected_profit_scenarios_mixed(self):
+		"""Test mixed retail/wholesale scenarios"""
+		stock_product = StockProduct.objects.create(
+			stock=self.stock,
 			product=self.product,
-			quantity=80,
-			unit_cost=Decimal('12.50'),
+			supplier=self.supplier,
+			quantity=100,
+			unit_cost=Decimal('800.00'),
 			unit_tax_rate=Decimal('10.00'),
-			unit_additional_cost=Decimal('1.50'),
-			supplier='Cable Imports Ltd.',
-			reference_code='STK-COST-001',
-			arrival_date=timezone.now().date()
+			unit_tax_amount=Decimal('80.00'),
+			unit_additional_cost=Decimal('20.00'),
+			retail_price=Decimal('1200.00'),
+			wholesale_price=Decimal('1000.00')
 		)
-		stock_item.refresh_from_db()
-		self.assertEqual(stock_item.unit_tax_amount, Decimal('1.25'))
-		self.assertEqual(stock_item.landed_unit_cost, Decimal('15.25'))
-		self.assertEqual(stock_item.total_tax_amount, Decimal('100.00'))
-		self.assertEqual(stock_item.total_landed_cost, Decimal('1220.00'))
 
-class BusinessTestMixin:
+		scenarios = stock_product.get_expected_profit_scenarios()['mixed_scenarios']
+		
+		# Test 50/50 split
+		fifty_fifty = next(s for s in scenarios if s['scenario'] == 'mixed_50_50')
+		self.assertEqual(fifty_fifty['retail_percentage'], Decimal('50.00'))
+		self.assertEqual(fifty_fifty['wholesale_percentage'], Decimal('50.00'))
+		self.assertEqual(fifty_fifty['retail_units'], Decimal('50.00'))
+		self.assertEqual(fifty_fifty['wholesale_units'], Decimal('50.00'))
+		
+		# Average selling price: (1200*50 + 1000*50) / 100 = 1100
+		self.assertEqual(fifty_fifty['avg_selling_price'], Decimal('1100.00'))
+		
+		# Total profit: (300*50) + (100*50) = 15000 + 5000 = 20000
+		self.assertEqual(fifty_fifty['total_profit'], Decimal('20000.00'))
+		
+		# Average margin: (20000 / 110000) * 100 = 18.18%
+		self.assertEqual(fifty_fifty['profit_margin'], Decimal('18.18'))
+
+	def test_get_expected_profit_for_scenario(self):
+		"""Test custom scenario calculation"""
+		stock_product = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			supplier=self.supplier,
+			quantity=100,
+			unit_cost=Decimal('800.00'),
+			unit_tax_rate=Decimal('10.00'),
+			unit_tax_amount=Decimal('80.00'),
+			unit_additional_cost=Decimal('20.00'),
+			retail_price=Decimal('1200.00'),
+			wholesale_price=Decimal('1000.00')
+		)
+
+		# Test 70% retail, 30% wholesale
+		scenario = stock_product.get_expected_profit_for_scenario(
+			retail_percentage=Decimal('70.00'), 
+			wholesale_percentage=Decimal('30.00')
+		)
+		
+		self.assertEqual(scenario['retail_percentage'], Decimal('70.00'))
+		self.assertEqual(scenario['wholesale_percentage'], Decimal('30.00'))
+		self.assertEqual(scenario['retail_units'], Decimal('70.00'))
+		self.assertEqual(scenario['wholesale_units'], Decimal('30.00'))
+		self.assertEqual(scenario['avg_selling_price'], Decimal('1140.00'))  # (1200*70 + 1000*30) / 100
+		self.assertEqual(scenario['total_profit'], Decimal('24000.00'))  # (300*70) + (100*30)
+		self.assertEqual(scenario['profit_margin'], Decimal('21.05'))  # (24000 / 114000) * 100
+
+	def test_get_expected_profit_for_scenario_invalid_percentages(self):
+		"""Test that invalid percentages raise ValueError"""
+		stock_product = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			supplier=self.supplier,
+			quantity=10,
+			unit_cost=Decimal('100.00'),
+			retail_price=Decimal('150.00'),
+			wholesale_price=Decimal('120.00')
+		)
+
+		with self.assertRaises(ValueError):
+			stock_product.get_expected_profit_for_scenario(
+				retail_percentage=Decimal('60.00'), 
+				wholesale_percentage=Decimal('50.00')  # 60 + 50 != 100
+			)
+
+	def test_product_expected_profit_summary_scenarios(self):
+		"""Test Product.get_expected_profit_summary with different scenarios"""
+		# Create multiple stock products for the same product
+		sp1 = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			supplier=self.supplier,
+			quantity=50,
+			unit_cost=Decimal('800.00'),
+			unit_tax_rate=Decimal('10.00'),
+			unit_tax_amount=Decimal('80.00'),
+			unit_additional_cost=Decimal('20.00'),
+			retail_price=Decimal('1200.00'),
+			wholesale_price=Decimal('1000.00')
+		)
+		
+		sp2 = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			supplier=self.supplier,
+			quantity=30,
+			unit_cost=Decimal('750.00'),
+			unit_tax_rate=Decimal('10.00'),
+			unit_tax_amount=Decimal('75.00'),
+			unit_additional_cost=Decimal('15.00'),
+			retail_price=Decimal('1100.00'),
+			wholesale_price=Decimal('950.00')
+		)
+
+		# Test retail-only summary (default)
+		summary = self.product.get_expected_profit_summary()
+		self.assertEqual(summary['total_quantity'], 80)
+		self.assertEqual(summary['scenario'], '100.00% retail, 0.00% wholesale')
+		self.assertEqual(summary['stock_products_count'], 2)
+		
+		# Expected profit: sp1: 300*50 = 15000, sp2: (1100-840)*30 = 7800, total = 22800
+		self.assertEqual(summary['total_expected_profit'], Decimal('22800.00'))
+
+		# Test wholesale-only summary
+		wholesale_summary = self.product.get_expected_profit_summary(
+			retail_percentage=Decimal('0.00'), 
+			wholesale_percentage=Decimal('100.00')
+		)
+		self.assertEqual(wholesale_summary['scenario'], '0.00% retail, 100.00% wholesale')
+		# Expected profit: sp1: 100*50 = 5000, sp2: (950-840)*30 = 3300, total = 8300
+		self.assertEqual(wholesale_summary['total_expected_profit'], Decimal('8300.00'))
+
+		# Test mixed scenario
+		mixed_summary = self.product.get_expected_profit_summary(
+			retail_percentage=Decimal('70.00'), 
+			wholesale_percentage=Decimal('30.00')
+		)
+		self.assertEqual(mixed_summary['scenario'], '70.00% retail, 30.00% wholesale')
+		# This should calculate weighted profits across both stock products
+
+
+class ProfitProjectionAPITest(BusinessTestMixin, APITestCase):
+	"""Test profit projection API endpoints"""
+
+	def setUp(self):
+		self.owner, self.business = self.create_business(name='Profit API Test Biz', tin='TIN-PROFIT-API-001')
+		self.category = Category.objects.create(name='Electronics')
+		self.product = Product.objects.create(
+			business=self.business,
+			name='Test Laptop',
+			sku='LAPTOP-API-001',
+			category=self.category
+		)
+		self.warehouse = Warehouse.objects.create(name='API Warehouse', location='API City')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+		self.stock = Stock.objects.create(warehouse=self.warehouse, description='API stock batch')
+		self.supplier = Supplier.objects.create(
+			business=self.business,
+			name='API Supplier Inc',
+			email='api@supplier.com'
+		)
+
+		# Create stock product
+		self.stock_product = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			supplier=self.supplier,
+			quantity=100,
+			unit_cost=Decimal('800.00'),
+			unit_tax_rate=Decimal('10.00'),
+			unit_tax_amount=Decimal('80.00'),
+			unit_additional_cost=Decimal('20.00'),
+			retail_price=Decimal('1200.00'),
+			wholesale_price=Decimal('1000.00')
+		)
+
+		# Create user and token
+		self.user = User.objects.create_user(
+			email='api-test@example.com',
+			password='testpass123',
+			name='API Test User'
+		)
+		self.user.account_type = User.ACCOUNT_OWNER
+		self.user.email_verified = True
+		self.user.is_active = True
+		self.user.save()
+
+		BusinessMembership.objects.create(
+			business=self.business,
+			user=self.user,
+			role=BusinessMembership.OWNER,
+			is_admin=True
+		)
+
+		self.token = Token.objects.create(user=self.user)
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+
+	def test_get_available_scenarios(self):
+		"""Test getting list of available profit scenarios"""
+		url = '/inventory/api/profit-projections/scenarios/'
+		response = self.client.get(url)
+		
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		scenarios = response.data['scenarios']
+		
+		# Should have 11 predefined scenarios
+		self.assertEqual(len(scenarios), 11)
+		
+		# Check some specific scenarios
+		retail_only = next(s for s in scenarios if s['id'] == 'retail_only')
+		self.assertEqual(retail_only['name'], 'Retail Only')
+		self.assertEqual(retail_only['retail_percentage'], 100.00)
+		self.assertEqual(retail_only['wholesale_percentage'], 0.00)
+
+		mixed_70_30 = next(s for s in scenarios if s['id'] == 'mixed_70_30')
+		self.assertEqual(mixed_70_30['name'], '70% Retail, 30% Wholesale')
+		self.assertEqual(mixed_70_30['retail_percentage'], 70.00)
+		self.assertEqual(mixed_70_30['wholesale_percentage'], 30.00)
+
+	def test_stock_product_projection(self):
+		"""Test profit projection for individual stock product"""
+		url = '/inventory/api/profit-projections/stock-product/'
+		data = {
+			'stock_product_id': str(self.stock_product.id),
+			'retail_percentage': 70.00,
+			'wholesale_percentage': 30.00
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		
+		result = response.data
+		self.assertEqual(result['stock_product_id'], str(self.stock_product.id))
+		self.assertEqual(result['product_name'], 'Test Laptop')
+		self.assertEqual(result['quantity'], 100)
+		
+		# Check requested scenario
+		requested = result['requested_scenario']
+		self.assertEqual(requested['retail_percentage'], Decimal('70.00'))
+		self.assertEqual(requested['wholesale_percentage'], Decimal('30.00'))
+		self.assertEqual(requested['retail_units'], Decimal('70.00'))
+		self.assertEqual(requested['wholesale_units'], Decimal('30.00'))
+		self.assertEqual(requested['avg_selling_price'], Decimal('1140.000'))  # (1200*70 + 1000*30) / 100
+		self.assertEqual(requested['total_profit'], Decimal('24000.000'))  # (300*70) + (100*30)
+		
+		# Check retail-only scenario is included
+		retail_only = result['retail_only']
+		self.assertEqual(retail_only['scenario'], 'retail_only')
+		self.assertEqual(retail_only['total_profit'], Decimal('30000.00'))
+		
+		# Check mixed scenarios are included
+		mixed_scenarios = result['mixed_scenarios']
+		self.assertTrue(len(mixed_scenarios) > 0)
+		mixed_50_50 = next(s for s in mixed_scenarios if s['scenario'] == 'mixed_50_50')
+		self.assertEqual(mixed_50_50['retail_percentage'], Decimal('50.00'))
+
+	def test_stock_product_projection_invalid_stock_product(self):
+		"""Test profit projection with invalid stock product ID"""
+		url = '/inventory/api/profit-projections/stock-product/'
+		data = {
+			'stock_product_id': '00000000-0000-0000-0000-000000000000',  # Non-existent UUID
+			'retail_percentage': 50.00,
+			'wholesale_percentage': 50.00
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+		self.assertIn('error', response.data)
+
+	def test_stock_product_projection_invalid_percentages(self):
+		"""Test profit projection with invalid percentages"""
+		url = '/inventory/api/profit-projections/stock-product/'
+		data = {
+			'stock_product_id': str(self.stock_product.id),
+			'retail_percentage': 60.00,
+			'wholesale_percentage': 50.00  # 60 + 50 != 100
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_product_projection(self):
+		"""Test profit projection for product (across all stock products)"""
+		url = '/inventory/api/profit-projections/product/'
+		data = {
+			'product_id': str(self.product.id),
+			'retail_percentage': 80.00,
+			'wholesale_percentage': 20.00
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		
+		result = response.data
+		self.assertEqual(result['product_id'], str(self.product.id))
+		self.assertEqual(result['product_name'], 'Test Laptop')
+		self.assertEqual(result['total_quantity'], 100)
+		self.assertEqual(result['stock_products_count'], 1)
+		
+		# Check requested scenario
+		requested = result['requested_scenario']
+		self.assertEqual(requested['scenario'], '80.00% retail, 20.00% wholesale')
+		
+		# Check comparison scenarios
+		retail_only = result['retail_only']
+		self.assertEqual(retail_only['scenario'], '100.00% retail, 0.00% wholesale')
+		
+		wholesale_only = result['wholesale_only']
+		self.assertEqual(wholesale_only['scenario'], '0.00% retail, 100.00% wholesale')
+
+	def test_bulk_projection(self):
+		"""Test bulk profit projection for multiple stock products"""
+		url = '/inventory/api/profit-projections/bulk/'
+		data = {
+			'projections': [
+				{
+					'stock_product_id': str(self.stock_product.id),
+					'retail_percentage': 100.00,
+					'wholesale_percentage': 0.00
+				},
+				{
+					'stock_product_id': str(self.stock_product.id),
+					'retail_percentage': 0.00,
+					'wholesale_percentage': 100.00
+				}
+			]
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		
+		result = response.data
+		projections = result['projections']
+		self.assertEqual(len(projections), 2)
+		
+		# Check first projection (retail only)
+		projection1 = projections[0]
+		self.assertEqual(projection1['requested_scenario']['retail_percentage'], Decimal('100.00'))
+		self.assertEqual(projection1['requested_scenario']['total_profit'], Decimal('30000.00'))
+		
+		# Check second projection (wholesale only)
+		projection2 = projections[1]
+		self.assertEqual(projection2['requested_scenario']['wholesale_percentage'], Decimal('100.00'))
+		self.assertEqual(projection2['requested_scenario']['total_profit'], Decimal('10000.00'))
+
+	def test_bulk_projection_invalid_data(self):
+		"""Test bulk projection with invalid data"""
+		url = '/inventory/api/profit-projections/bulk/'
+		data = {
+			'projections': []  # Empty list
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+	def test_unauthorized_access(self):
+		"""Test that unauthorized users cannot access profit projections"""
+		# Create another user not belonging to the business
+		other_user = User.objects.create_user(
+			email='other@example.com',
+			password='testpass123',
+			name='Other User'
+		)
+		other_token = Token.objects.create(user=other_user)
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + other_token.key)
+		
+		url = '/inventory/api/profit-projections/stock-product/'
+		data = {
+			'stock_product_id': str(self.stock_product.id),
+			'retail_percentage': 50.00,
+			'wholesale_percentage': 50.00
+		}
+		
+		response = self.client.post(url, data, format='json')
+		self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+class StockModelTest(BusinessTestMixin, TestCase):
 	"""Utility mixin to create businesses for tests."""
 
 	def create_business(self, owner=None, **overrides):
@@ -247,3 +635,129 @@ class WarehouseEmployeeModelTest(BusinessTestMixin, TestCase):
 				warehouse=self.warehouse,
 				user=self.employee
 			)
+
+
+class OwnerStorefrontWarehouseAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner = User.objects.create_user(
+			email='api-owner@example.com',
+			password='testpass123',
+			name='API Owner'
+		)
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.email_verified = True
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		_, self.business = self.create_business(owner=self.owner, name='API Biz', tin='TIN-API-001')
+		self.token = Token.objects.create(user=self.owner)
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+		self.workspace_url = '/inventory/api/owner/workspace/'
+
+	def test_owner_can_create_storefront_and_warehouse(self):
+		response = self.client.get(self.workspace_url)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['storefronts'], [])
+		self.assertEqual(response.data['warehouses'], [])
+
+		storefront_payload = {
+			'name': 'Flagship Store',
+			'location': 'Main Street'
+		}
+		store_response = self.client.post('/inventory/api/storefronts/', storefront_payload, format='json')
+		self.assertEqual(store_response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(
+			BusinessStoreFront.objects.filter(business=self.business, storefront__name='Flagship Store').exists()
+		)
+
+		warehouse_payload = {
+			'name': 'Primary Warehouse',
+			'location': 'Industrial Estate'
+		}
+		warehouse_response = self.client.post('/inventory/api/warehouses/', warehouse_payload, format='json')
+		self.assertEqual(warehouse_response.status_code, status.HTTP_201_CREATED)
+		self.assertTrue(
+			BusinessWarehouse.objects.filter(business=self.business, warehouse__name='Primary Warehouse').exists()
+		)
+
+		workspace_response = self.client.get(self.workspace_url)
+		self.assertEqual(workspace_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(len(workspace_response.data['storefronts']), 1)
+		self.assertEqual(len(workspace_response.data['warehouses']), 1)
+		self.assertEqual(workspace_response.data['business']['storefront_count'], 1)
+		self.assertEqual(workspace_response.data['business']['warehouse_count'], 1)
+
+	def test_owner_can_update_and_delete_storefront(self):
+		store_response = self.client.post(
+			'/inventory/api/storefronts/',
+			{'name': 'Popup Store', 'location': 'Old Town'},
+			format='json'
+		)
+		self.assertEqual(store_response.status_code, status.HTTP_201_CREATED)
+		storefront_id = store_response.data['id']
+
+		update_response = self.client.patch(
+			f'/inventory/api/storefronts/{storefront_id}/',
+			{'name': 'Renovated Store', 'location': 'New Town'},
+			format='json'
+		)
+		self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(update_response.data['name'], 'Renovated Store')
+		self.assertEqual(update_response.data['location'], 'New Town')
+
+		delete_response = self.client.delete(f'/inventory/api/storefronts/{storefront_id}/')
+		self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+		self.assertFalse(StoreFront.objects.filter(id=storefront_id).exists())
+
+	def test_owner_can_update_and_delete_warehouse(self):
+		warehouse_response = self.client.post(
+			'/inventory/api/warehouses/',
+			{'name': 'Secondary Warehouse', 'location': 'Zone 3'},
+			format='json'
+		)
+		self.assertEqual(warehouse_response.status_code, status.HTTP_201_CREATED)
+		warehouse_id = warehouse_response.data['id']
+
+		update_response = self.client.patch(
+			f'/inventory/api/warehouses/{warehouse_id}/',
+			{'name': 'Updated Warehouse', 'location': 'Zone 5'},
+			format='json'
+		)
+		self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(update_response.data['name'], 'Updated Warehouse')
+		self.assertEqual(update_response.data['location'], 'Zone 5')
+
+		delete_response = self.client.delete(f'/inventory/api/warehouses/{warehouse_id}/')
+		self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
+		self.assertFalse(Warehouse.objects.filter(id=warehouse_id).exists())
+
+	def test_employee_cannot_create_storefront(self):
+		employee = User.objects.create_user(
+			email='emp@example.com',
+			password='pass12345',
+			name='Employee User',
+			account_type=User.ACCOUNT_EMPLOYEE
+		)
+		employee.email_verified = True
+		employee.is_active = True
+		employee.save(update_fields=['email_verified', 'is_active'])
+
+		BusinessMembership.objects.create(
+			business=self.business,
+			user=employee,
+			role=BusinessMembership.STAFF,
+			is_admin=False
+		)
+
+		employee_token = Token.objects.create(user=employee)
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + employee_token.key)
+
+		response = self.client.post(
+			'/inventory/api/storefronts/',
+			{'name': 'Blocked Store', 'location': 'Hidden'},
+			format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+

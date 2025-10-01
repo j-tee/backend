@@ -53,7 +53,7 @@ The system includes the following main models:
 - **Warehouses**: Storage locations
 - **StoreFronts**: Retail locations
 - **Batches**: Imported goods tracking
-- **Products**: Product catalog
+- **Products**: Product catalog (metadata only; selling prices now live on stock items)
 - **BatchProducts**: Products within batches
 - **Inventory**: Current stock levels
 - **Transfers**: Warehouse to storefront transfers
@@ -86,6 +86,14 @@ The system includes the following main models:
 
 ## Quick Start
 
+### Platform Owner Superuser
+
+Set the `PLATFORM_OWNER_EMAIL` environment variable to the email address of the platform owner. After migrations run, that user is automatically granted the `Admin` role along with Django `is_staff` and `is_superuser` flags, guaranteeing full access without hidden backdoors. Example for local development:
+
+```bash
+export PLATFORM_OWNER_EMAIL=owner@example.com
+```
+
 ### Prerequisites
 - Docker and Docker Compose
 - Python 3.11+ (for local development)
@@ -114,6 +122,12 @@ The system includes the following main models:
    ```bash
    docker-compose exec web python manage.py init_system
    ```
+
+5. **Seed demo businesses and transactional data (optional)**
+   ```bash
+   docker-compose exec web python manage.py seed_demo_data --owners 5
+   ```
+   This command provisions realistic demo records including business owners, warehouses, storefronts, stock, sales, and active subscriptions. Default owner passwords are set to `DemoPass123!` for quick logins.
 
 5. **Create a superuser (optional)**
    ```bash
@@ -149,17 +163,23 @@ The API will be available at `http://localhost:8000`
    python manage.py init_system --admin-email=admin@example.com --admin-password=admin123
    ```
 
-5. **Start the development server**
+5. **Seed demo businesses and transactional data (optional)**
+   ```bash
+   python manage.py seed_demo_data --owners 5
+   ```
+   Adjust `--owners`, `--max-warehouses`, and `--max-storefronts` to control dataset size. Each generated owner receives the password `DemoPass123!`.
+
+6. **Start the development server**
    ```bash
    python manage.py runserver
    ```
 
-6. **Start Celery worker (in another terminal)**
+7. **Start Celery worker (in another terminal)**
    ```bash
    celery -A app worker -l info
    ```
 
-7. **Start Celery beat (in another terminal)**
+8. **Start Celery beat (in another terminal)**
    ```bash
    celery -A app beat -l info
    ```

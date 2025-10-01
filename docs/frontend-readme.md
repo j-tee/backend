@@ -19,13 +19,14 @@ This document gives the frontend team an authoritative roadmap for integrating w
 ### Pagination on collection endpoints
 
 - All list endpoints use server-side pagination via DRF's page-number pagination.
-- The default page size is **20** records per request and can't be overridden client-side.
+- The default page size is **25** records per request with a maximum of **100** per page.
+- Page size can be customized using the `?page_size=<number>` query parameter.
 - Responses follow the DRF `PageNumberPagination` envelope:
   ```json
   {
     "count": 125,
-    "next": "http://localhost:8000/inventory/api/products/?page=3",
-    "previous": "http://localhost:8000/inventory/api/products/?page=1",
+    "next": "http://localhost:8000/inventory/api/products/?page=3&page_size=50",
+    "previous": "http://localhost:8000/inventory/api/products/?page=1&page_size=50",
     "results": [
       { "id": "...", "name": "Sample product", "sku": "PROD-001", "...": "..." }
     ]
@@ -34,9 +35,16 @@ This document gives the frontend team an authoritative roadmap for integrating w
   - `count` is the total records available for the current filter.
   - `next`/`previous` are absolute URLs or `null` when you've reached the end/beginning.
   - `results` contains the actual data array used to render tables, grids, or virtualized lists.
-- Append `?page=<number>` to collection URLs (e.g., `/inventory/api/products/?page=3`) to fetch subsequent pages.
+- Append `?page=<number>&page_size=<size>` to collection URLs (e.g., `/inventory/api/products/?page=3&page_size=50`) to fetch subsequent pages.
 - When building infinite scroll or batched table views, persist and increment the `page` pointer until `next` is `null`, and merge each page's `results` into your local cache/state.
 - Prefer showing loading spinners while fetching the next page and disable additional fetches if `next` is already `null` to avoid redundant requests.
+
+**Advanced Filtering and Ordering:**
+- All inventory endpoints support comprehensive filtering and ordering via query parameters.
+- **Filtering**: Use field-specific parameters to narrow results (e.g., `?category=<uuid>&is_active=true`).
+- **Ordering**: Use `?ordering=<field>` for ascending or `?ordering=-<field>` for descending order.
+- **Search**: Use `?search=<term>` for full-text search across relevant fields.
+- See individual endpoint documentation below for available filter and ordering options.
 
 > **Tip**: Capture and re-use the token returned by the registration or login endpoints in every subsequent request that requires authentication.
 
@@ -226,14 +234,31 @@ All inventory endpoints live under `/inventory/api/` and require authentication.
 
 ### 4.2 Products & stock lots
 
-| Resource | Endpoint | Required fields | Read-only highlights |
-| --- | --- | --- | --- |
-| Products | `/inventory/api/products/` | `name`, `sku`, `category`, `unit`, optional `description`, optional `is_active`. (Pricing fields are no longer exposed here.) | `category_name`, `created_at`, `updated_at` |
-| Stock (receipted lots) | `/inventory/api/stock/` | `warehouse`, `product`, `quantity`, `unit_cost`, optional `supplier`, `reference_code`, `arrival_date`, `expiry_date`, `unit_tax_rate`, `unit_tax_amount`, `unit_additional_cost`, `description`. | Derived pricing fields: `landed_unit_cost`, `total_tax_amount`, `total_additional_cost`, `total_landed_cost`.
+| Resource | Endpoint | Required fields | Read-only highlights | Filtering & Ordering |
+| --- | --- | --- | --- | --- |
+| Products | `/inventory/api/products/` | `name`, `sku`, `category`, `unit`, optional `description`, optional `is_active`. (Pricing fields are no longer exposed here.) | `category_name`, `created_at`, `updated_at` | **Filtering**: `?category=<uuid>&is_active=true&search=<term>`<br>**Ordering**: `?ordering=name` or `?ordering=-created_at`<br>**Search**: Searches in name and SKU |
+| Stock (receipted lots) | `/inventory/api/stock/` | `warehouse`, `product`, `quantity`, `unit_cost`, optional `supplier`, `reference_code`, `arrival_date`, `expiry_date`, `unit_tax_rate` (nullable), `unit_tax_amount` (nullable), `unit_additional_cost` (nullable), `description`. | Derived pricing fields: `landed_unit_cost`, `total_tax_amount`, `total_additional_cost`, `total_landed_cost`. | **Filtering**: `?warehouse=<uuid>&search=<term>`<br>**Ordering**: `?ordering=-arrival_date`<br>**Search**: Searches in description |
+| Stock Products | `/inventory/api/stock-products/` | `stock`, `product`, `quantity`, `unit_cost`, optional `supplier`, `expiry_date`, `unit_tax_rate` (nullable), `unit_tax_amount` (nullable), `unit_additional_cost` (nullable), `description`. | `landed_unit_cost`, `total_tax_amount`, `total_additional_cost`, `total_landed_cost`, `product_name`, `product_sku`, `supplier_name`. | **Filtering**: `?product=<uuid>&stock=<uuid>&supplier=<uuid>&has_quantity=true&search=<term>`<br>**Ordering**: `?ordering=-created_at` or `?ordering=quantity`<br>**Search**: Searches in product name and SKU |
+| Suppliers | `/inventory/api/suppliers/` | `name`, optional `contact_person`, `email`, `phone_number`, `address`, `notes`. | `created_at`, `updated_at` | **Search**: `?search=<term>` (name, contact, email)<br>**Ordering**: `?ordering=name` |
 
 > **Pricing shift**: Selling prices now originate from stock records or cashier input at the time of sale. The frontend must stop reading or writing `retail_price` / `wholesale_price` on `/inventory/api/products/` and instead derive price suggestions from `StockProduct` cost data or dedicated pricing UI controls.
 
-> **Landed cost logic**: When `unit_tax_rate` is provided and `unit_tax_amount` is omitted or `0`, the backend calculates `unit_tax_amount = unit_cost * unit_tax_rate / 100`. The `landed_unit_cost` is `unit_cost + unit_tax_amount + unit_additional_cost`. Keep UI consistent with these calculations.
+> **Landed cost logic**: When `unit_tax_rate` is provided, the backend ALWAYS calculates `unit_tax_amount = unit_cost * unit_tax_rate / 100` (overriding any manual entry). When `unit_tax_rate` is null, manually entered `unit_tax_amount` is preserved. The `landed_unit_cost` is `unit_cost + unit_tax_amount + unit_additional_cost`. Keep UI consistent with these calculations.
+
+**Query Examples:**
+```bash
+# Get products with pagination and filtering
+GET /inventory/api/products/?page=2&page_size=10&category=<uuid>&is_active=true&search=laptop&ordering=name
+
+# Get stock products with advanced filtering
+GET /inventory/api/stock-products/?page=1&page_size=50&supplier=<uuid>&has_quantity=true&search=widget&ordering=-created_at
+
+# Get stock batches for specific warehouse
+GET /inventory/api/stock/?warehouse=<uuid>&ordering=-arrival_date&page_size=20
+
+# Search suppliers
+GET /inventory/api/suppliers/?search=acme&ordering=name
+```
 
 ### 4.3 Inventory & transfers
 

@@ -1,4 +1,7 @@
+import secrets
 import uuid
+from datetime import timedelta
+
 from django.contrib.auth.models import AbstractBaseUser, BaseUserManager, PermissionsMixin
 from django.db import models
 from django.utils import timezone
@@ -62,6 +65,12 @@ class UserManager(BaseUserManager):
 
 class User(AbstractBaseUser, PermissionsMixin):
     """Custom user model with UUID primary key"""
+    ACCOUNT_OWNER = 'OWNER'
+    ACCOUNT_EMPLOYEE = 'EMPLOYEE'
+    ACCOUNT_TYPE_CHOICES = [
+        (ACCOUNT_OWNER, 'Business Owner'),
+        (ACCOUNT_EMPLOYEE, 'Employee'),
+    ]
     SUBSCRIPTION_STATUS_CHOICES = [
         ('Active', 'Active'),
         ('Inactive', 'Inactive'),
@@ -78,6 +87,8 @@ class User(AbstractBaseUser, PermissionsMixin):
         choices=SUBSCRIPTION_STATUS_CHOICES, 
         default='Inactive'
     )
+    account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPE_CHOICES, default=ACCOUNT_OWNER)
+    email_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
     is_superuser = models.BooleanField(default=False)
@@ -135,6 +146,100 @@ class User(AbstractBaseUser, PermissionsMixin):
             }
         )
         return membership
+
+
+class EmailVerificationToken(models.Model):
+    """Verification token for user email confirmation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='verification_tokens')
+    token = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'email_verification_tokens'
+        indexes = [models.Index(fields=['token'])]
+
+    def __str__(self):
+        return f"Verification token for {self.user.email}"
+
+    @staticmethod
+    def generate_token() -> str:
+        return secrets.token_urlsafe(32)
+
+    @classmethod
+    def create_for_user(cls, user, validity_hours: int = 48):
+        token_value = cls.generate_unique_token()
+        expires_at = timezone.now() + timedelta(hours=validity_hours)
+        return cls.objects.create(user=user, token=token_value, expires_at=expires_at)
+
+    @classmethod
+    def generate_unique_token(cls) -> str:
+        while True:
+            candidate = cls.generate_token()
+            if not cls.objects.filter(token=candidate).exists():
+                return candidate
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_consumed(self) -> bool:
+        return self.consumed_at is not None
+
+    def mark_consumed(self):
+        self.consumed_at = timezone.now()
+        self.save(update_fields=['consumed_at'])
+
+
+class PasswordResetToken(models.Model):
+    """Token used to reset user passwords securely."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='password_reset_tokens')
+    token = models.CharField(max_length=64, unique=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'password_reset_tokens'
+        indexes = [models.Index(fields=['token'])]
+
+    def __str__(self):
+        return f"Password reset token for {self.user.email}"
+
+    @staticmethod
+    def generate_token() -> str:
+        return secrets.token_urlsafe(32)
+
+    @classmethod
+    def generate_unique_token(cls) -> str:
+        while True:
+            candidate = cls.generate_token()
+            if not cls.objects.filter(token=candidate).exists():
+                return candidate
+
+    @classmethod
+    def create_for_user(cls, user, validity_hours: int = 2):
+        token_value = cls.generate_unique_token()
+        expires_at = timezone.now() + timedelta(hours=validity_hours)
+        return cls.objects.create(user=user, token=token_value, expires_at=expires_at)
+
+    @property
+    def is_expired(self) -> bool:
+        return timezone.now() > self.expires_at
+
+    @property
+    def is_consumed(self) -> bool:
+        return self.consumed_at is not None
+
+    def mark_consumed(self):
+        self.consumed_at = timezone.now()
+        self.save(update_fields=['consumed_at'])
 
 
 class Business(models.Model):
@@ -205,6 +310,68 @@ class BusinessMembership(models.Model):
         if self.role == self.OWNER:
             self.is_admin = True
         super().save(*args, **kwargs)
+
+
+class BusinessInvitation(models.Model):
+    """Represents a pending invitation for an employee to join a business."""
+
+    STATUS_PENDING = 'PENDING'
+    STATUS_ACCEPTED = 'ACCEPTED'
+    STATUS_EXPIRED = 'EXPIRED'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pending'),
+        (STATUS_ACCEPTED, 'Accepted'),
+        (STATUS_EXPIRED, 'Expired'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey('accounts.Business', on_delete=models.CASCADE, related_name='invitations')
+    email = models.EmailField()
+    role = models.CharField(max_length=20, choices=BusinessMembership.ROLE_CHOICES, default=BusinessMembership.STAFF)
+    invited_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='sent_business_invitations')
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_PENDING)
+    token = models.CharField(max_length=64, unique=True, blank=True, null=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    accepted_at = models.DateTimeField(null=True, blank=True)
+    accepted_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='accepted_business_invitations')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'business_invitations'
+        indexes = [
+            models.Index(fields=['email', 'status']),
+            models.Index(fields=['business', 'status']),
+        ]
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"Invitation for {self.email} to {self.business.name} ({self.role})"
+
+    @staticmethod
+    def generate_token() -> str:
+        return secrets.token_urlsafe(32)
+
+    def initialize_token(self, validity_hours: int = 168):
+        """Assign a fresh token + expiry if not already present."""
+        if not self.token:
+            self.token = self.generate_token()
+        if not self.expires_at:
+            self.expires_at = timezone.now() + timedelta(hours=validity_hours)
+
+    @property
+    def is_expired(self) -> bool:
+        return self.status == self.STATUS_EXPIRED or (self.expires_at and timezone.now() > self.expires_at)
+
+    def mark_accepted(self, accepted_by: 'User'):
+        self.status = self.STATUS_ACCEPTED
+        self.accepted_at = timezone.now()
+        self.accepted_by = accepted_by
+        self.save(update_fields=['status', 'accepted_at', 'accepted_by', 'updated_at'])
+
+    def mark_expired(self):
+        self.status = self.STATUS_EXPIRED
+        self.save(update_fields=['status', 'updated_at'])
 
 
 class UserProfile(models.Model):

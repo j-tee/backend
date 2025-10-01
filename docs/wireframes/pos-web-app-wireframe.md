@@ -52,6 +52,8 @@ This wireframe outlines the core layout for the POS web experience. It combines 
 - First row commonly showcases KPIs or quick statistic cards.
 - Below KPIs, reserve space for a tabbed region (e.g., "Today", "Week", "Month") or stacked widgets.
 - Ensure tables support pagination controls aligned with backend pagination metadata (`count`, `next`, `previous`).
+- Backend supports configurable page sizes (default: 25, max: 100) via `?page_size=<number>` parameter.
+- Implement filtering and ordering controls that map to backend query parameters (e.g., `?ordering=<field>&search=<term>`).
 
 ### Aside Panel
 - Right-aligned column (~320px) for:

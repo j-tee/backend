@@ -1,6 +1,6 @@
 from django.contrib import admin
 from .models import (
-    Category, Warehouse, StoreFront, Product, Stock,
+    Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
     Inventory, Transfer, StockAlert
 )
 
@@ -34,7 +34,7 @@ class StoreFrontAdmin(admin.ModelAdmin):
 
 @admin.register(Product)
 class ProductAdmin(admin.ModelAdmin):
-    list_display = ['name', 'sku', 'category', 'retail_price', 'wholesale_price', 'cost', 'is_active']
+    list_display = ['name', 'sku', 'category', 'unit', 'is_active']
     search_fields = ['name', 'sku', 'description']
     list_filter = ['category', 'is_active', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
@@ -44,8 +44,49 @@ class ProductAdmin(admin.ModelAdmin):
         ('Basic Information', {
             'fields': ('id', 'name', 'sku', 'description', 'category', 'unit', 'is_active')
         }),
-        ('Pricing', {
-            'fields': ('cost', 'retail_price', 'wholesale_price')
+        ('Timestamps', {
+            'fields': ('created_at', 'updated_at'),
+            'classes': ('collapse',)
+        }),
+    )
+
+
+@admin.register(Supplier)
+class SupplierAdmin(admin.ModelAdmin):
+    list_display = ['name', 'contact_person', 'email', 'phone_number', 'created_at']
+    search_fields = ['name', 'contact_person', 'email', 'phone_number']
+    list_filter = ['created_at']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['name']
+
+
+@admin.register(Stock)
+class StockAdmin(admin.ModelAdmin):
+    list_display = ['warehouse', 'arrival_date', 'created_at']
+    search_fields = ['warehouse__name']
+    list_filter = ['warehouse', 'arrival_date', 'created_at']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['-arrival_date']
+
+
+@admin.register(StockProduct)
+class StockProductAdmin(admin.ModelAdmin):
+    list_display = ['product', 'warehouse', 'supplier', 'quantity', 'unit_cost', 'unit_tax_amount', 'unit_additional_cost', 'landed_unit_cost', 'expiry_date', 'created_at']
+    search_fields = ['product__name', 'product__sku', 'stock__warehouse__name', 'supplier__name']
+    list_filter = ['stock__warehouse', 'supplier', 'expiry_date', 'created_at']
+    readonly_fields = ['id', 'created_at', 'updated_at', 'landed_unit_cost', 'total_base_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost']
+    ordering = ['product__name']
+    
+    fieldsets = (
+        ('Basic Information', {
+            'fields': ('id', 'stock', 'product', 'supplier', 'quantity', 'expiry_date', 'description')
+        }),
+        ('Cost Details', {
+            'fields': ('unit_cost', 'unit_tax_rate', 'unit_tax_amount', 'unit_additional_cost')
+        }),
+        ('Calculated Costs', {
+            'fields': ('landed_unit_cost', 'total_base_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost'),
+            'classes': ('collapse',)
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
@@ -54,19 +95,10 @@ class ProductAdmin(admin.ModelAdmin):
     )
 
 
-@admin.register(Stock)
-class StockAdmin(admin.ModelAdmin):
-    list_display = ['product', 'warehouse', 'reference_code', 'supplier', 'quantity', 'unit_cost', 'unit_tax_amount', 'unit_additional_cost', 'landed_unit_cost', 'expiry_date', 'created_at']
-    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'reference_code', 'supplier']
-    list_filter = ['warehouse', 'expiry_date', 'created_at']
-    readonly_fields = ['id', 'created_at', 'updated_at', 'landed_unit_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost']
-    ordering = ['product__name']
-
-
 @admin.register(Inventory)
 class InventoryAdmin(admin.ModelAdmin):
     list_display = ['product', 'warehouse', 'stock', 'quantity', 'updated_at']
-    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'stock__reference_code']
+    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'stock__product__name']
     list_filter = ['warehouse', 'updated_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['product__name']
@@ -78,7 +110,7 @@ class InventoryAdmin(admin.ModelAdmin):
 @admin.register(Transfer)
 class TransferAdmin(admin.ModelAdmin):
     list_display = ['product', 'stock', 'from_warehouse', 'to_storefront', 'quantity', 'status', 'created_at']
-    search_fields = ['product__name', 'product__sku', 'stock__reference_code', 'from_warehouse__name', 'to_storefront__name']
+    search_fields = ['product__name', 'product__sku', 'stock__product__name', 'from_warehouse__name', 'to_storefront__name']
     list_filter = ['status', 'from_warehouse', 'to_storefront', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-created_at']
