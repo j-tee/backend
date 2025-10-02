@@ -1,4 +1,4 @@
-from rest_framework import viewsets, status, permissions
+from rest_framework import viewsets, status, permissions, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -6,11 +6,20 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, CharFilter, BooleanFilter, UUIDFilter
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum, Count
 from django.contrib.auth import get_user_model
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
 from decimal import Decimal
-from accounts.models import BusinessMembership
+from accounts.models import Business, BusinessMembership, BusinessInvitation
+from accounts.serializers import (
+    BusinessInvitationSerializer,
+    BusinessMembershipDetailSerializer,
+    BusinessMembershipUpdateSerializer,
+    MembershipStorefrontAssignmentSerializer,
+)
+from accounts.utils import send_business_invitation_email, EmailDeliveryError
 from .models import (
     Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
     Inventory, Transfer, StockAlert,
@@ -115,6 +124,20 @@ def _get_primary_business_for_owner(user):
     if getattr(user, 'account_type', None) != getattr(User, 'ACCOUNT_OWNER', 'OWNER'):
         return None
     return user.owned_businesses.first()
+
+
+def _ensure_business_admin(user, business):
+    if user.is_superuser:
+        return
+
+    membership = BusinessMembership.objects.filter(
+        business=business,
+        user=user,
+        is_active=True,
+    ).first()
+
+    if not membership or membership.role not in {BusinessMembership.OWNER, BusinessMembership.ADMIN}:
+        raise PermissionDenied('You do not have permission to manage this business.')
 
 
 class CategoryViewSet(viewsets.ModelViewSet):
@@ -286,6 +309,197 @@ class ProductViewSet(viewsets.ModelViewSet):
         if instance.business_id not in business_ids:
             raise PermissionDenied('You do not have permission to delete this product.')
         instance.delete()
+
+
+class BusinessInvitationListCreateView(generics.ListCreateAPIView):
+    serializer_class = BusinessInvitationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = CustomPageNumberPagination
+
+    def get_business(self):
+        business = get_object_or_404(Business, id=self.kwargs['business_id'])
+        _ensure_business_admin(self.request.user, business)
+        return business
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        context['business'] = self.get_business()
+        return context
+
+    def get_queryset(self):
+        business = self.get_business()
+        queryset = BusinessInvitation.objects.filter(business=business).order_by('-created_at')
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            queryset = queryset.filter(status=status_param.upper())
+        return queryset
+
+    def perform_create(self, serializer):
+        invitation = serializer.save()
+        if not serializer._send_email:
+            serializer.context['show_token'] = True
+        elif serializer._send_email:
+            try:
+                send_business_invitation_email(invitation)
+            except EmailDeliveryError as exc:
+                raise ValidationError({'email': str(exc)}) from exc
+
+
+class BusinessInvitationResendView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, invitation_id):
+        invitation = get_object_or_404(BusinessInvitation, id=invitation_id)
+        _ensure_business_admin(request.user, invitation.business)
+
+        if invitation.status == BusinessInvitation.STATUS_ACCEPTED:
+            return Response({'detail': 'Invitation already accepted.'}, status=status.HTTP_409_CONFLICT)
+        if invitation.status == BusinessInvitation.STATUS_REVOKED:
+            return Response({'detail': 'Invitation has been revoked.'}, status=status.HTTP_410_GONE)
+
+        invitation.initialize_token()
+        invitation.save(update_fields=['token', 'expires_at', 'updated_at'])
+
+        try:
+            send_business_invitation_email(invitation)
+        except EmailDeliveryError as exc:
+            raise ValidationError({'email': str(exc)}) from exc
+
+        return Response({'detail': 'Invitation email resent.'}, status=status.HTTP_202_ACCEPTED)
+
+
+class BusinessInvitationRevokeView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, invitation_id):
+        invitation = get_object_or_404(BusinessInvitation, id=invitation_id)
+        _ensure_business_admin(request.user, invitation.business)
+
+        if invitation.status == BusinessInvitation.STATUS_ACCEPTED:
+            return Response({'detail': 'Cannot revoke an accepted invitation.'}, status=status.HTTP_409_CONFLICT)
+
+        invitation.mark_revoked()
+        return Response({'detail': 'Invitation revoked.'}, status=status.HTTP_200_OK)
+
+
+class BusinessMembershipListView(generics.ListAPIView):
+    serializer_class = BusinessMembershipDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = CustomPageNumberPagination
+
+    def get_business(self):
+        business = get_object_or_404(Business, id=self.kwargs['business_id'])
+        _ensure_business_admin(self.request.user, business)
+        return business
+
+    def get_queryset(self):
+        business = self.get_business()
+        queryset = BusinessMembership.objects.filter(business=business).select_related('user').order_by('-created_at')
+
+        role = self.request.query_params.get('role')
+        if role:
+            queryset = queryset.filter(role=role)
+
+        status_param = self.request.query_params.get('status')
+        if status_param:
+            status_upper = status_param.upper()
+            if status_upper == 'ACTIVE':
+                queryset = queryset.filter(is_active=True)
+            elif status_upper == 'SUSPENDED':
+                queryset = queryset.filter(is_active=False)
+
+        search = self.request.query_params.get('search')
+        if search:
+            queryset = queryset.filter(
+                Q(user__name__icontains=search) | Q(user__email__icontains=search)
+            )
+
+        return queryset
+
+
+class BusinessMembershipDetailView(generics.RetrieveUpdateDestroyAPIView):
+    serializer_class = BusinessMembershipDetailSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    lookup_url_kwarg = 'membership_id'
+
+    def get_queryset(self):
+        return BusinessMembership.objects.select_related('business', 'user')
+
+    def get_object(self):
+        membership = super().get_object()
+        _ensure_business_admin(self.request.user, membership.business)
+        return membership
+
+    def get_serializer_class(self):
+        if self.request.method in ['PUT', 'PATCH']:
+            return BusinessMembershipUpdateSerializer
+        return BusinessMembershipDetailSerializer
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        membership = self.get_object()
+        context['membership'] = membership
+        return context
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        if request.method == 'PATCH':
+            partial = True
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        detail_serializer = BusinessMembershipDetailSerializer(instance, context={'request': request})
+        return Response(detail_serializer.data)
+
+    def delete(self, request, *args, **kwargs):
+        membership = self.get_object()
+        membership.is_active = False
+        membership.save(update_fields=['is_active', 'updated_at'])
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class BusinessMembershipStorefrontAssignmentView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def put(self, request, membership_id):
+        membership = get_object_or_404(BusinessMembership.objects.select_related('business', 'user'), id=membership_id)
+        _ensure_business_admin(request.user, membership.business)
+
+        serializer = MembershipStorefrontAssignmentSerializer(data=request.data, context={'membership': membership, 'request': request})
+        serializer.is_valid(raise_exception=True)
+        storefront_ids = set(serializer.validated_data['storefronts'])
+
+        now = timezone.now()
+        with transaction.atomic():
+            existing_assignments = list(StoreFrontEmployee.objects.filter(business=membership.business, user=membership.user))
+            existing_ids = {assignment.storefront_id for assignment in existing_assignments}
+
+            for assignment in existing_assignments:
+                if assignment.storefront_id in storefront_ids:
+                    if not assignment.is_active:
+                        assignment.is_active = True
+                        assignment.removed_at = None
+                        assignment.assigned_at = now
+                        assignment.save(update_fields=['is_active', 'removed_at', 'assigned_at'])
+                else:
+                    if assignment.is_active:
+                        assignment.is_active = False
+                        assignment.removed_at = now
+                        assignment.save(update_fields=['is_active', 'removed_at'])
+
+            to_create = storefront_ids - existing_ids
+            for storefront_id in to_create:
+                StoreFrontEmployee.objects.create(
+                    business=membership.business,
+                    storefront_id=storefront_id,
+                    user=membership.user,
+                    role=membership.role,
+                    is_active=True,
+                )
+
+        detail_serializer = BusinessMembershipDetailSerializer(membership, context={'request': request})
+        return Response(detail_serializer.data, status=status.HTTP_200_OK)
 
 
 class StockViewSet(viewsets.ModelViewSet):

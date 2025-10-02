@@ -6,7 +6,7 @@ from django.contrib.auth import get_user_model
 from django.core.mail import send_mail
 from django.urls import reverse
 
-from .models import AuditLog
+from .models import AuditLog, BusinessInvitation
 
 logger = logging.getLogger(__name__)
 
@@ -211,3 +211,30 @@ def send_password_reset_email(user, token):
     except SMTPException as exc:
         logger.exception("Failed to send password reset email to %s", user.email)
         raise EmailDeliveryError("Unable to send password reset email at this time.") from exc
+
+
+def send_business_invitation_email(invitation: BusinessInvitation):
+    """Send an invitation email to join a business."""
+
+    if not invitation.token:
+        invitation.initialize_token()
+        invitation.save(update_fields=["token", "expires_at", "updated_at"])
+
+    frontend_base = getattr(settings, "FRONTEND_URL", "").rstrip('/') or 'http://localhost:3000'
+    accept_url = f"{frontend_base}/accept-invite?token={invitation.token}"
+
+    subject = f"You're invited to join {invitation.business.name}"
+    message = (
+        f"Hello,\n\n"
+        f"You've been invited to join {invitation.business.name} on the POS platform as {invitation.role}.\n\n"
+        f"Accept invitation: {accept_url}\n\n"
+        f"If the link above doesn't work, copy this token: {invitation.token}\n\n"
+        "If you weren't expecting this invitation, you can ignore this email.\n\n"
+        "Best regards,\nPOS Platform Team"
+    )
+
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [invitation.email], fail_silently=False)
+    except SMTPException as exc:
+        logger.exception("Failed to send business invitation email to %s", invitation.email)
+        raise EmailDeliveryError("Unable to send the invitation email at this time.") from exc

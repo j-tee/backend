@@ -12,7 +12,9 @@ from django.conf import settings
 from django.http import HttpResponseRedirect
 from urllib.parse import urlencode
 from rest_framework.exceptions import PermissionDenied
-from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership
+from django.shortcuts import get_object_or_404
+from .models import Role, User, UserProfile, AuditLog, Business, BusinessMembership, BusinessInvitation
+from inventory.models import StoreFront
 from .serializers import (
     RoleSerializer,
     UserSerializer,
@@ -27,7 +29,10 @@ from .serializers import (
     OwnerBusinessRegistrationSerializer,
     PasswordResetRequestSerializer,
     PasswordResetConfirmSerializer,
+    BusinessInvitationAcceptSerializer,
+    BusinessMembershipDetailSerializer,
 )
+from .utils import send_business_invitation_email, EmailDeliveryError
 
 
 def get_managed_business_ids(user):
@@ -419,6 +424,84 @@ class VerifyEmailView(APIView):
                 status=status.HTTP_200_OK,
             )
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class BusinessInvitationInfoView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, token):
+        invitation = get_object_or_404(BusinessInvitation, token=token)
+
+        if invitation.status == BusinessInvitation.STATUS_ACCEPTED:
+            return Response({'detail': 'Invitation already accepted.'}, status=status.HTTP_409_CONFLICT)
+        if invitation.status == BusinessInvitation.STATUS_REVOKED:
+            return Response({'detail': 'Invitation has been revoked.'}, status=status.HTTP_410_GONE)
+        if invitation.is_expired:
+            invitation.mark_expired()
+            return Response({'detail': 'Invitation has expired.'}, status=status.HTTP_410_GONE)
+
+        storefronts = []
+        ids = invitation.get_storefront_ids()
+        if ids:
+            store_map = {
+                store.id: store for store in StoreFront.objects.filter(id__in=ids)
+            }
+            for identifier in ids:
+                store = store_map.get(identifier)
+                if store:
+                    storefronts.append({
+                        'id': str(store.id),
+                        'name': store.name,
+                        'location': store.location,
+                    })
+
+        return Response(
+            {
+                'email': invitation.email,
+                'business': {
+                    'id': str(invitation.business.id),
+                    'name': invitation.business.name,
+                },
+                'role': invitation.role,
+                'status': invitation.status,
+                'expires_at': invitation.expires_at,
+                'storefronts': storefronts,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class BusinessInvitationAcceptView(APIView):
+    authentication_classes = []
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request, token):
+        invitation = get_object_or_404(BusinessInvitation, token=token)
+
+        if invitation.status == BusinessInvitation.STATUS_ACCEPTED:
+            return Response({'detail': 'Invitation already accepted.'}, status=status.HTTP_409_CONFLICT)
+        if invitation.status == BusinessInvitation.STATUS_REVOKED:
+            return Response({'detail': 'Invitation has been revoked.'}, status=status.HTTP_410_GONE)
+        if invitation.is_expired:
+            invitation.mark_expired()
+            return Response({'detail': 'Invitation has expired.'}, status=status.HTTP_410_GONE)
+
+        serializer = BusinessInvitationAcceptSerializer(data=request.data, context={'invitation': invitation, 'request': request})
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        user_data = UserSerializer(serializer.user, context={'request': request}).data
+        membership_data = BusinessMembershipDetailSerializer(serializer.membership, context={'request': request}).data
+
+        return Response(
+            {
+                'user': user_data,
+                'membership': membership_data,
+                'auth': {'token': serializer.token.key},
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class RegisterBusinessView(APIView):

@@ -318,10 +318,12 @@ class BusinessInvitation(models.Model):
     STATUS_PENDING = 'PENDING'
     STATUS_ACCEPTED = 'ACCEPTED'
     STATUS_EXPIRED = 'EXPIRED'
+    STATUS_REVOKED = 'REVOKED'
     STATUS_CHOICES = [
         (STATUS_PENDING, 'Pending'),
         (STATUS_ACCEPTED, 'Accepted'),
         (STATUS_EXPIRED, 'Expired'),
+        (STATUS_REVOKED, 'Revoked'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -334,6 +336,7 @@ class BusinessInvitation(models.Model):
     expires_at = models.DateTimeField(null=True, blank=True)
     accepted_at = models.DateTimeField(null=True, blank=True)
     accepted_by = models.ForeignKey('accounts.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='accepted_business_invitations')
+    payload = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -361,7 +364,7 @@ class BusinessInvitation(models.Model):
 
     @property
     def is_expired(self) -> bool:
-        return self.status == self.STATUS_EXPIRED or (self.expires_at and timezone.now() > self.expires_at)
+        return self.status in {self.STATUS_EXPIRED, self.STATUS_REVOKED} or (self.expires_at and timezone.now() > self.expires_at)
 
     def mark_accepted(self, accepted_by: 'User'):
         self.status = self.STATUS_ACCEPTED
@@ -372,6 +375,19 @@ class BusinessInvitation(models.Model):
     def mark_expired(self):
         self.status = self.STATUS_EXPIRED
         self.save(update_fields=['status', 'updated_at'])
+
+    def mark_revoked(self):
+        self.status = self.STATUS_REVOKED
+        self.save(update_fields=['status', 'updated_at'])
+
+    def get_storefront_ids(self):
+        return self.payload.get('storefront_ids', [])
+
+    def set_storefront_ids(self, storefront_ids):
+        payload = dict(self.payload or {})
+        payload['storefront_ids'] = list(storefront_ids)
+        self.payload = payload
+        self.save(update_fields=['payload', 'updated_at'])
 
 
 class UserProfile(models.Model):

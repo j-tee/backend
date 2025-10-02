@@ -5,6 +5,7 @@ from django.contrib import admin
 from django.urls import path, include
 from django.conf import settings
 from django.conf.urls.static import static
+from accounts.views import BusinessInvitationInfoView, BusinessInvitationAcceptView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
@@ -14,6 +15,8 @@ urlpatterns = [
     path('bookkeeping/', include('bookkeeping.urls')),
     path('subscriptions/', include('subscriptions.urls')),
     path('reports/', include('reports.urls')),
+    path('auth/invitations/<str:token>/', BusinessInvitationInfoView.as_view(), name='invitation-info'),
+    path('auth/invitations/<str:token>/accept/', BusinessInvitationAcceptView.as_view(), name='invitation-accept'),
 ]
 
 # Serve media files during development

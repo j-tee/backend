@@ -15,6 +15,8 @@ from .views import (
     RegisterUserView,
     VerifyEmailView,
     RegisterBusinessView,
+    BusinessInvitationInfoView,
+    BusinessInvitationAcceptView,
 )
 
 router = DefaultRouter()
@@ -35,4 +37,6 @@ urlpatterns = [
     path('api/auth/register/', RegisterUserView.as_view(), name='register-user'),
     path('api/auth/verify-email/', VerifyEmailView.as_view(), name='verify-email'),
     path('api/auth/register-business/', RegisterBusinessView.as_view(), name='register-business'),
+    path('api/auth/invitations/<str:token>/', BusinessInvitationInfoView.as_view(), name='business-invitation-info'),
+    path('api/auth/invitations/<str:token>/accept/', BusinessInvitationAcceptView.as_view(), name='business-invitation-accept'),
 ]

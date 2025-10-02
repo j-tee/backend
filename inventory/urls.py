@@ -5,7 +5,9 @@ from .views import (
     ProductViewSet, StockViewSet, StockProductViewSet, SupplierViewSet, InventoryViewSet, TransferViewSet,
     StockAlertViewSet, BusinessWarehouseViewSet, BusinessStoreFrontViewSet,
     StoreFrontEmployeeViewSet, WarehouseEmployeeViewSet,
-    InventorySummaryView, StockArrivalReportView, OwnerWorkspaceView, ProfitProjectionViewSet
+    InventorySummaryView, StockArrivalReportView, OwnerWorkspaceView, ProfitProjectionViewSet,
+    BusinessInvitationListCreateView, BusinessInvitationResendView, BusinessInvitationRevokeView,
+    BusinessMembershipListView, BusinessMembershipDetailView, BusinessMembershipStorefrontAssignmentView,
 )
 
 router = DefaultRouter()
@@ -27,6 +29,36 @@ router.register(r'suppliers', SupplierViewSet)
 
 urlpatterns = [
     path('api/', include(router.urls)),
+    path(
+        'api/businesses/<uuid:business_id>/invitations/',
+        BusinessInvitationListCreateView.as_view(),
+        name='business-invitations'
+    ),
+    path(
+        'api/invitations/<uuid:invitation_id>/resend/',
+        BusinessInvitationResendView.as_view(),
+        name='business-invitations-resend'
+    ),
+    path(
+        'api/invitations/<uuid:invitation_id>/revoke/',
+        BusinessInvitationRevokeView.as_view(),
+        name='business-invitations-revoke'
+    ),
+    path(
+        'api/businesses/<uuid:business_id>/memberships/',
+        BusinessMembershipListView.as_view(),
+        name='business-memberships'
+    ),
+    path(
+        'api/memberships/<uuid:membership_id>/',
+        BusinessMembershipDetailView.as_view(),
+        name='business-membership-detail'
+    ),
+    path(
+        'api/memberships/<uuid:membership_id>/storefronts/',
+        BusinessMembershipStorefrontAssignmentView.as_view(),
+        name='business-membership-storefronts'
+    ),
     path('api/reports/inventory-summary/', InventorySummaryView.as_view(), name='inventory-summary'),
     path('api/reports/stock-arrivals/', StockArrivalReportView.as_view(), name='stock-arrivals'),
     path('api/owner/workspace/', OwnerWorkspaceView.as_view(), name='owner-workspace'),

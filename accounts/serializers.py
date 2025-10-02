@@ -17,6 +17,7 @@ from .models import (
 from rest_framework.authtoken.models import Token
 
 from .utils import send_verification_email, send_password_reset_email, EmailDeliveryError
+from inventory.models import BusinessStoreFront, StoreFront, StoreFrontEmployee
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -146,6 +147,285 @@ class BusinessMembershipSerializer(serializers.ModelSerializer):
             'role', 'is_admin', 'is_active', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'user_name']
+
+
+class MembershipUserSummarySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = ['id', 'name', 'email', 'is_active']
+        read_only_fields = fields
+
+
+class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
+    user = MembershipUserSummarySerializer(read_only=True)
+    assigned_storefronts = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
+
+    class Meta:
+        model = BusinessMembership
+        fields = [
+            'id', 'business', 'user', 'role', 'is_admin', 'is_active', 'status',
+            'assigned_storefronts', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'business', 'user', 'is_admin', 'created_at', 'updated_at', 'status']
+
+    def get_assigned_storefronts(self, obj):
+        assignments = StoreFrontEmployee.objects.filter(
+            business=obj.business,
+            user=obj.user,
+            is_active=True,
+        ).select_related('storefront')
+
+        return [
+            {
+                'id': assignment.storefront.id,
+                'name': assignment.storefront.name,
+                'location': assignment.storefront.location,
+            }
+            for assignment in assignments
+        ]
+
+    def get_status(self, obj):
+        return 'ACTIVE' if obj.is_active else 'SUSPENDED'
+
+
+class BusinessMembershipUpdateSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BusinessMembership
+        fields = ['role', 'is_active']
+
+    def update(self, instance, validated_data):
+        role = validated_data.get('role', instance.role)
+        instance.role = role
+        if 'is_active' in validated_data:
+            instance.is_active = validated_data['is_active']
+        instance.is_admin = role in {BusinessMembership.OWNER, BusinessMembership.ADMIN}
+        instance.save(update_fields=['role', 'is_active', 'is_admin', 'updated_at'])
+        return instance
+
+
+class MembershipStorefrontAssignmentSerializer(serializers.Serializer):
+    storefronts = serializers.ListField(
+        child=serializers.UUIDField(),
+        allow_empty=True,
+    )
+
+    def validate_storefronts(self, value):
+        request = self.context.get('request')
+        membership: BusinessMembership = self.context['membership']
+        allowed_storefront_ids = set(
+            BusinessStoreFront.objects.filter(
+                business=membership.business,
+                is_active=True,
+            ).values_list('storefront_id', flat=True)
+        )
+        invalid_ids = [str(item) for item in value if item not in allowed_storefront_ids]
+        if invalid_ids:
+            raise serializers.ValidationError(
+                f"Storefront(s) {', '.join(invalid_ids)} do not belong to this business."
+            )
+        return value
+
+
+class BusinessInvitationSerializer(serializers.ModelSerializer):
+    invited_by_name = serializers.CharField(source='invited_by.name', read_only=True)
+    storefronts = serializers.SerializerMethodField()
+    storefront_ids = serializers.ListField(
+        child=serializers.UUIDField(),
+        write_only=True,
+        required=False,
+    )
+    send_email = serializers.BooleanField(write_only=True, default=True)
+
+    class Meta:
+        model = BusinessInvitation
+        fields = [
+            'id', 'business', 'email', 'role', 'status', 'token', 'expires_at',
+            'invited_by', 'invited_by_name', 'created_at', 'updated_at',
+            'storefronts', 'storefront_ids', 'send_email', 'accepted_at'
+        ]
+        read_only_fields = [
+            'id', 'business', 'status', 'token', 'invited_by', 'invited_by_name',
+            'created_at', 'updated_at', 'storefronts', 'accepted_at'
+        ]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._send_email = True
+        self._storefront_ids = []
+
+    def validate_email(self, value):
+        business = self.context['business']
+        normalized = value.lower()
+        if BusinessInvitation.objects.filter(
+            business=business,
+            email__iexact=normalized,
+            status=BusinessInvitation.STATUS_PENDING,
+        ).exists():
+            raise serializers.ValidationError('This email already has a pending invitation for this business.')
+
+        if BusinessMembership.objects.filter(
+            business=business,
+            user__email__iexact=normalized,
+            is_active=True,
+        ).exists():
+            raise serializers.ValidationError('This user is already a member of the business.')
+
+        return normalized
+
+    def validate_storefront_ids(self, value):
+        business = self.context['business']
+        if not value:
+            return []
+
+        valid_ids = set(
+            BusinessStoreFront.objects.filter(
+                business=business,
+                storefront_id__in=value,
+                is_active=True,
+            ).values_list('storefront_id', flat=True)
+        )
+        requested_ids = set(value)
+        missing = requested_ids - valid_ids
+        if missing:
+            missing_str = ', '.join(str(item) for item in missing)
+            raise serializers.ValidationError(f"Storefront(s) {missing_str} do not belong to the business or are inactive.")
+        return list(requested_ids)
+
+    def create(self, validated_data):
+        storefront_ids = validated_data.pop('storefront_ids', [])
+        send_email = validated_data.pop('send_email', True)
+        business = self.context['business']
+
+        invitation = BusinessInvitation(
+            business=business,
+            **validated_data,
+        )
+        invitation.invited_by = self.context['request'].user
+        invitation.initialize_token()
+        invitation.payload = {'storefront_ids': storefront_ids}
+        invitation.save()
+
+        self._send_email = send_email
+        self._storefront_ids = storefront_ids
+
+        return invitation
+
+    def get_storefronts(self, obj):
+        ids = obj.get_storefront_ids()
+        if not ids:
+            return []
+
+        storefronts = StoreFront.objects.filter(id__in=ids)
+        store_map = {store.id: store for store in storefronts}
+        ordered = []
+        for identifier in ids:
+            store = store_map.get(identifier)
+            if store:
+                ordered.append({
+                    'id': store.id,
+                    'name': store.name,
+                    'location': store.location,
+                })
+        return ordered
+
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        request = self.context.get('request')
+        show_token = self.context.get('show_token', False)
+        if not show_token:
+            if not request or not request.user.is_superuser:
+                data['token'] = None
+        return data
+
+
+class BusinessInvitationAcceptSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    name = serializers.CharField(max_length=255)
+    password = serializers.CharField(write_only=True, min_length=8)
+    phone = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        invitation: BusinessInvitation = self.context['invitation']
+        supplied_email = attrs['email'].lower()
+
+        if invitation.status == BusinessInvitation.STATUS_REVOKED:
+            raise serializers.ValidationError({'email': 'This invitation has been revoked.'})
+
+        if invitation.is_expired:
+            invitation.mark_expired()
+            raise serializers.ValidationError({'email': 'The invitation for this email has expired. Request a new invitation.'})
+
+        if invitation.email.lower() != supplied_email:
+            raise serializers.ValidationError({'email': 'Invitation email does not match the provided address.'})
+
+        if User.objects.filter(email__iexact=supplied_email).exists():
+            raise serializers.ValidationError({'email': 'A user with this email already exists.'})
+
+        attrs['email'] = supplied_email
+        return attrs
+
+    def save(self, **kwargs):
+        invitation: BusinessInvitation = self.context['invitation']
+        business = invitation.business
+        email = self.validated_data['email']
+        name = self.validated_data['name']
+        password = self.validated_data['password']
+        phone = self.validated_data.get('phone')
+
+        with transaction.atomic():
+            user = User.objects.create_user(
+                email=email,
+                password=password,
+                name=name,
+                account_type=User.ACCOUNT_EMPLOYEE,
+                is_active=True,
+            )
+            user.email_verified = True
+            user.save(update_fields=['email_verified', 'is_active', 'updated_at'])
+
+            if phone:
+                UserProfile.objects.update_or_create(user=user, defaults={'phone': phone})
+
+            membership, _ = BusinessMembership.objects.update_or_create(
+                business=business,
+                user=user,
+                defaults={
+                    'role': invitation.role,
+                    'is_admin': invitation.role in {BusinessMembership.OWNER, BusinessMembership.ADMIN},
+                    'invited_by': invitation.invited_by,
+                    'is_active': True,
+                },
+            )
+
+            now = timezone.now()
+            storefront_ids = invitation.get_storefront_ids()
+            if storefront_ids:
+                for storefront_id in storefront_ids:
+                    assignment, created = StoreFrontEmployee.objects.get_or_create(
+                        business=business,
+                        storefront_id=storefront_id,
+                        user=user,
+                        defaults={
+                            'role': invitation.role,
+                            'is_active': True,
+                        },
+                    )
+                    if not created:
+                        assignment.role = invitation.role
+                        assignment.is_active = True
+                        assignment.removed_at = None
+                        assignment.assigned_at = now
+                        assignment.save(update_fields=['role', 'is_active', 'removed_at', 'assigned_at'])
+
+            invitation.mark_accepted(user)
+            token, _ = Token.objects.get_or_create(user=user)
+
+        self.user = user
+        self.membership = membership
+        self.token = token
+        return invitation
+
 
 
 class BusinessSerializer(serializers.ModelSerializer):
