@@ -71,6 +71,16 @@ class User(AbstractBaseUser, PermissionsMixin):
         (ACCOUNT_OWNER, 'Business Owner'),
         (ACCOUNT_EMPLOYEE, 'Employee'),
     ]
+    PLATFORM_SUPER_ADMIN = 'SUPER_ADMIN'
+    PLATFORM_SAAS_ADMIN = 'SAAS_ADMIN'
+    PLATFORM_SAAS_STAFF = 'SAAS_STAFF'
+    PLATFORM_NONE = 'NONE'
+    PLATFORM_ROLE_CHOICES = [
+        (PLATFORM_NONE, 'None'),
+        (PLATFORM_SUPER_ADMIN, 'Super Admin'),
+        (PLATFORM_SAAS_ADMIN, 'SaaS Admin'),
+        (PLATFORM_SAAS_STAFF, 'SaaS Staff'),
+    ]
     SUBSCRIPTION_STATUS_CHOICES = [
         ('Active', 'Active'),
         ('Inactive', 'Inactive'),
@@ -88,6 +98,7 @@ class User(AbstractBaseUser, PermissionsMixin):
         default='Inactive'
     )
     account_type = models.CharField(max_length=20, choices=ACCOUNT_TYPE_CHOICES, default=ACCOUNT_OWNER)
+    platform_role = models.CharField(max_length=20, choices=PLATFORM_ROLE_CHOICES, default=PLATFORM_NONE)
     email_verified = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)
     is_staff = models.BooleanField(default=False)
@@ -129,9 +140,34 @@ class User(AbstractBaseUser, PermissionsMixin):
 
     @property
     def primary_business(self):
-        """Return the first active business membership's business, if any."""
-        membership = self.active_business_memberships().order_by('created_at').first()
+        """Return the most recently updated active business membership's business, if any."""
+        membership = (
+            self.active_business_memberships()
+            .order_by('-updated_at', '-created_at')
+            .first()
+        )
         return membership.business if membership else None
+
+    def has_platform_role(self, *roles):
+        if not self.platform_role:
+            return False
+        return self.platform_role in roles
+
+    @property
+    def is_platform_super_admin(self):
+        return self.has_platform_role(self.PLATFORM_SUPER_ADMIN) or self.is_superuser
+
+    @property
+    def is_platform_admin(self):
+        return self.has_platform_role(self.PLATFORM_SUPER_ADMIN, self.PLATFORM_SAAS_ADMIN)
+
+    @property
+    def is_platform_staff(self):
+        return self.has_platform_role(
+            self.PLATFORM_SUPER_ADMIN,
+            self.PLATFORM_SAAS_ADMIN,
+            self.PLATFORM_SAAS_STAFF,
+        )
 
     def add_business_membership(self, business, role='STAFF', is_admin=False, invited_by=None):
         """Helper to create or update a business membership for this user."""

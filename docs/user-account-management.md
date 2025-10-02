@@ -10,7 +10,7 @@ This guide explains how the backend handles user registration, invitations, prof
 | --- | --- |
 | **Account Type** | Either `OWNER` (business owner) or `EMPLOYEE`. Provided at registration and stored on `accounts.User.account_type`. |
 | **Role** | Optional fine-grained platform role (`Admin`, `Manager`, `Cashier`, etc.) referenced through `accounts.Role`. |
-| **Business Membership** | Active association between a user and a business (`accounts.BusinessMembership`). Roles `OWNER` and `ADMIN` are considered **business managers** and can administer employee accounts within their business. |
+| **Business Membership** | Active association between a user and a business (`accounts.BusinessMembership`). Roles `OWNER` and `ADMIN` are considered **business managers** and can administer employee accounts within their business. Membership detail responses now include the member's `platform_role` and a combined `role_matrix` block so clients can render business vs platform capabilities side by side. |
 
 ---
 
@@ -64,6 +64,8 @@ This guide explains how the backend handles user registration, invitations, prof
 | `/accounts/api/auth/login/` | POST | Returns auth token when email verified & account active. |
 | `/accounts/api/auth/logout/` | POST | Deletes the user’s auth tokens. |
 | `/accounts/api/auth/change-password/` | POST | Authenticated users change their own password (requires old password). |
+
+> ℹ️ When an employee signs in successfully, the response includes an `employment` block describing their most recently updated active business membership (and associated business details) so the frontend can bootstrap RBAC context without extra requests.
 
 ---
 

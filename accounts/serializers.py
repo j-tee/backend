@@ -1,7 +1,10 @@
+import rules  # type: ignore[import]
+
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from django.utils import timezone
 from django.db import transaction
+from rest_framework.exceptions import PermissionDenied
 
 from .models import (
     Role,
@@ -43,7 +46,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = [
             'id', 'name', 'email', 'role', 'role_name', 'picture_url',
-            'subscription_status', 'account_type', 'email_verified', 'is_active',
+            'subscription_status', 'account_type', 'platform_role', 'email_verified', 'is_active',
             'profile', 'password', 'created_at', 'updated_at'
         ]
         read_only_fields = ['id', 'email_verified', 'created_at', 'updated_at']
@@ -139,20 +142,42 @@ class AuditLogSerializer(serializers.ModelSerializer):
 class BusinessMembershipSerializer(serializers.ModelSerializer):
     user_name = serializers.CharField(source='user.name', read_only=True)
     business_name = serializers.CharField(source='business.name', read_only=True)
+    platform_role = serializers.CharField(source='user.platform_role', read_only=True)
     
     class Meta:
         model = BusinessMembership
         fields = [
             'id', 'business', 'business_name', 'user', 'user_name',
-            'role', 'is_admin', 'is_active', 'created_at', 'updated_at'
+            'role', 'is_admin', 'is_active', 'platform_role', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'user_name']
+        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'user_name', 'platform_role']
+
+
+class BusinessSummarySerializer(serializers.ModelSerializer):
+    owner_name = serializers.CharField(source='owner.name', read_only=True)
+
+    class Meta:
+        model = Business
+        fields = [
+            'id', 'name', 'tin', 'email', 'address', 'website', 'phone_numbers',
+            'social_handles', 'is_active', 'owner', 'owner_name', 'created_at', 'updated_at'
+        ]
+        read_only_fields = fields
+
+
+class BusinessMembershipSummarySerializer(serializers.ModelSerializer):
+    business = BusinessSummarySerializer(read_only=True)
+
+    class Meta:
+        model = BusinessMembership
+        fields = ['id', 'role', 'is_admin', 'is_active', 'business', 'created_at', 'updated_at']
+        read_only_fields = fields
 
 
 class MembershipUserSummarySerializer(serializers.ModelSerializer):
     class Meta:
         model = User
-        fields = ['id', 'name', 'email', 'is_active']
+        fields = ['id', 'name', 'email', 'is_active', 'platform_role']
         read_only_fields = fields
 
 
@@ -160,14 +185,16 @@ class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
     user = MembershipUserSummarySerializer(read_only=True)
     assigned_storefronts = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
+    platform_role = serializers.CharField(source='user.platform_role', read_only=True)
+    role_matrix = serializers.SerializerMethodField()
 
     class Meta:
         model = BusinessMembership
         fields = [
             'id', 'business', 'user', 'role', 'is_admin', 'is_active', 'status',
-            'assigned_storefronts', 'created_at', 'updated_at'
+            'platform_role', 'role_matrix', 'assigned_storefronts', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'business', 'user', 'is_admin', 'created_at', 'updated_at', 'status']
+        read_only_fields = ['id', 'business', 'user', 'is_admin', 'created_at', 'updated_at', 'status', 'platform_role', 'role_matrix']
 
     def get_assigned_storefronts(self, obj):
         assignments = StoreFrontEmployee.objects.filter(
@@ -188,19 +215,68 @@ class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
     def get_status(self, obj):
         return 'ACTIVE' if obj.is_active else 'SUSPENDED'
 
+    def get_role_matrix(self, obj):
+        user = obj.user
+        business_role = obj.role
+        return {
+            'business': {
+                'role': business_role,
+                'is_owner': business_role == BusinessMembership.OWNER,
+                'is_admin': obj.is_admin,
+                'is_manager': business_role == BusinessMembership.MANAGER,
+                'is_staff': business_role == BusinessMembership.STAFF,
+            },
+            'platform': {
+                'role': user.platform_role,
+                'is_platform_super_admin': user.is_platform_super_admin,
+                'is_platform_admin': user.is_platform_admin,
+                'is_platform_staff': user.is_platform_staff,
+            }
+        }
+
 
 class BusinessMembershipUpdateSerializer(serializers.ModelSerializer):
+    platform_role = serializers.ChoiceField(
+        choices=[choice[0] for choice in User.PLATFORM_ROLE_CHOICES],
+        required=False,
+        allow_null=True,
+    )
+
     class Meta:
         model = BusinessMembership
-        fields = ['role', 'is_active']
+        fields = ['role', 'is_active', 'platform_role']
 
     def update(self, instance, validated_data):
-        role = validated_data.get('role', instance.role)
-        instance.role = role
+        request = self.context.get('request')
+        platform_role_value = validated_data.pop('platform_role', serializers.empty)
+
+        if platform_role_value is not serializers.empty:
+            if request is None or not rules.has_perm('accounts.assign_platform_roles', request.user):
+                raise PermissionDenied('You do not have permission to assign platform roles.')
+
+            target_user = instance.user
+            normalized_role = platform_role_value or User.PLATFORM_NONE
+            if normalized_role not in dict(User.PLATFORM_ROLE_CHOICES):
+                raise serializers.ValidationError({'platform_role': 'Invalid platform role.'})
+            target_user.platform_role = normalized_role
+            target_user.save(update_fields=['platform_role', 'updated_at'])
+
+        update_fields = []
+        if 'role' in validated_data:
+            role = validated_data['role']
+            instance.role = role
+            instance.is_admin = role in {BusinessMembership.OWNER, BusinessMembership.ADMIN}
+            update_fields.extend(['role', 'is_admin'])
         if 'is_active' in validated_data:
             instance.is_active = validated_data['is_active']
-        instance.is_admin = role in {BusinessMembership.OWNER, BusinessMembership.ADMIN}
-        instance.save(update_fields=['role', 'is_active', 'is_admin', 'updated_at'])
+            update_fields.append('is_active')
+
+        if update_fields:
+            update_fields.append('updated_at')
+            instance.save(update_fields=update_fields)
+        elif platform_role_value is not serializers.empty:
+            instance.save(update_fields=['updated_at'])
+
         return instance
 
 

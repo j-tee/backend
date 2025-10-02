@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from django.test import TestCase, override_settings
 from django.contrib.auth import get_user_model
 from django.urls import reverse
@@ -331,6 +333,124 @@ class AuthenticationAPITest(APITestCase):
         }
         response = self.client.post('/accounts/api/auth/change-password/', password_data)
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_login_employee_includes_business_context(self):
+        owner = User.objects.create_user(
+            email='owner@example.com',
+            password='ownerpass123',
+            name='Owner User',
+            account_type=User.ACCOUNT_OWNER,
+            email_verified=True,
+        )
+
+        business = Business.objects.create(
+            owner=owner,
+            name='Context Biz',
+            tin='TIN-CONTEXT-001',
+            email='biz@example.com',
+            address='123 Market Street',
+            phone_numbers=['+233123456789'],
+            website='https://context.example.com',
+            social_handles={'instagram': '@contextbiz'},
+        )
+
+        employee = User.objects.create_user(
+            email='employee@example.com',
+            password='employeepass123',
+            name='Employee User',
+            account_type=User.ACCOUNT_EMPLOYEE,
+            email_verified=True,
+        )
+
+        BusinessMembership.objects.create(
+            business=business,
+            user=employee,
+            role=BusinessMembership.STAFF,
+            is_admin=False,
+            is_active=True,
+        )
+
+        login_data = {
+            'email': 'employee@example.com',
+            'password': 'employeepass123',
+        }
+        response = self.client.post('/accounts/api/auth/login/', login_data)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('employment', response.data)
+        employment = response.data['employment']
+        self.assertIsNotNone(employment)
+        self.assertEqual(employment['role'], BusinessMembership.STAFF)
+        self.assertEqual(employment['business']['id'], str(business.id))
+        self.assertEqual(employment['business']['name'], business.name)
+
+    def test_login_employee_prefers_most_recent_membership(self):
+        owner = User.objects.create_user(
+            email='owner@example.com',
+            password='ownerpass123',
+            name='Owner User',
+            account_type=User.ACCOUNT_OWNER,
+            email_verified=True,
+        )
+
+        older_business = Business.objects.create(
+            owner=owner,
+            name='API Biz 07d7a8',
+            tin='TIN-OLD-001',
+            email='oldbiz@example.com',
+            address='Old Address',
+            phone_numbers=['+233101010101'],
+        )
+
+        newer_business = Business.objects.create(
+            owner=owner,
+            name='DataLogique System',
+            tin='TIN-NEW-002',
+            email='newbiz@example.com',
+            address='New Address',
+            phone_numbers=['+233202020202'],
+        )
+
+        employee = User.objects.create_user(
+            email='employee2@example.com',
+            password='employeePass321',
+            name='Employee Two',
+            account_type=User.ACCOUNT_EMPLOYEE,
+            email_verified=True,
+        )
+
+        old_membership = BusinessMembership.objects.create(
+            business=older_business,
+            user=employee,
+            role=BusinessMembership.STAFF,
+            is_admin=False,
+            is_active=True,
+        )
+
+        # Simulate an older membership by adjusting timestamps
+        BusinessMembership.objects.filter(id=old_membership.id).update(
+            created_at=timezone.now() - timedelta(days=30),
+            updated_at=timezone.now() - timedelta(days=30),
+        )
+
+        BusinessMembership.objects.create(
+            business=newer_business,
+            user=employee,
+            role=BusinessMembership.STAFF,
+            is_admin=False,
+            is_active=True,
+        )
+
+        login_data = {
+            'email': 'employee2@example.com',
+            'password': 'employeePass321',
+        }
+        response = self.client.post('/accounts/api/auth/login/', login_data)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        employment = response.data['employment']
+        self.assertIsNotNone(employment)
+        self.assertEqual(employment['business']['name'], 'DataLogique System')
 
 
 class RoleAPITest(APITestCase):

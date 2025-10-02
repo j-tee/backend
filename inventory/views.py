@@ -127,7 +127,7 @@ def _get_primary_business_for_owner(user):
 
 
 def _ensure_business_admin(user, business):
-    if user.is_superuser:
+    if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
         return
 
     membership = BusinessMembership.objects.filter(
@@ -658,6 +658,28 @@ class InventoryViewSet(viewsets.ModelViewSet):
     serializer_class = InventorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        queryset = Inventory.objects.select_related(
+            'product',
+            'warehouse',
+            'stock__supplier',
+            'stock__stock',
+            'stock__warehouse',
+        )
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(
+            Q(product__business_id__in=business_ids) |
+            Q(warehouse__business_link__business_id__in=business_ids) |
+            Q(stock__warehouse__business_link__business_id__in=business_ids)
+        ).distinct()
+
 
 class TransferViewSet(viewsets.ModelViewSet):
     """ViewSet for managing transfers"""
@@ -668,12 +690,51 @@ class TransferViewSet(viewsets.ModelViewSet):
     serializer_class = TransferSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        queryset = Transfer.objects.select_related(
+            'product',
+            'stock__stock',
+            'stock__supplier',
+            'from_warehouse',
+            'to_storefront',
+            'requested_by',
+            'approved_by',
+        )
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(
+            Q(product__business_id__in=business_ids) |
+            Q(from_warehouse__business_link__business_id__in=business_ids) |
+            Q(to_storefront__business_link__business_id__in=business_ids)
+        ).distinct()
+
 
 class StockAlertViewSet(viewsets.ModelViewSet):
     """ViewSet for managing stock alerts"""
     queryset = StockAlert.objects.all()
     serializer_class = StockAlertSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = StockAlert.objects.select_related('product', 'warehouse')
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(
+            Q(product__business_id__in=business_ids) |
+            Q(warehouse__business_link__business_id__in=business_ids)
+        ).distinct()
 
 
 class BusinessWarehouseViewSet(viewsets.ModelViewSet):
@@ -682,12 +743,36 @@ class BusinessWarehouseViewSet(viewsets.ModelViewSet):
     serializer_class = BusinessWarehouseSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        queryset = BusinessWarehouse.objects.select_related('business', 'warehouse')
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(business_id__in=business_ids)
+
 
 class BusinessStoreFrontViewSet(viewsets.ModelViewSet):
     """Manage storefront-business associations"""
     queryset = BusinessStoreFront.objects.select_related('business', 'storefront', 'storefront__user').all()
     serializer_class = BusinessStoreFrontSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = BusinessStoreFront.objects.select_related('business', 'storefront', 'storefront__user')
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(business_id__in=business_ids)
 
 
 class StoreFrontEmployeeViewSet(viewsets.ModelViewSet):
@@ -696,12 +781,36 @@ class StoreFrontEmployeeViewSet(viewsets.ModelViewSet):
     serializer_class = StoreFrontEmployeeSerializer
     permission_classes = [permissions.IsAuthenticated]
 
+    def get_queryset(self):
+        queryset = StoreFrontEmployee.objects.select_related('business', 'storefront', 'user')
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(business_id__in=business_ids)
+
 
 class WarehouseEmployeeViewSet(viewsets.ModelViewSet):
     """Manage warehouse employee assignments"""
     queryset = WarehouseEmployee.objects.select_related('business', 'warehouse', 'user').all()
     serializer_class = WarehouseEmployeeSerializer
     permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        queryset = WarehouseEmployee.objects.select_related('business', 'warehouse', 'user')
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(business_id__in=business_ids)
 
 
 class InventorySummaryView(APIView):

@@ -687,6 +687,90 @@ class OwnerStorefrontWarehouseAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(workspace_response.data['business']['storefront_count'], 1)
 		self.assertEqual(workspace_response.data['business']['warehouse_count'], 1)
 
+
+
+class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner1, self.business1 = self.create_business(
+			name='DataLogique Systems',
+			tin='TIN-DLS-001',
+		)
+		self.owner1.email_verified = True
+		self.owner1.is_active = True
+		self.owner1.save(update_fields=['email_verified', 'is_active'])
+
+		self.owner2, self.business2 = self.create_business(
+			name='Other Biz',
+			tin='TIN-OTH-001',
+		)
+		self.owner2.email_verified = True
+		self.owner2.is_active = True
+		self.owner2.save(update_fields=['email_verified', 'is_active'])
+
+		# Storefronts and warehouses for business 1
+		self.storefront1 = StoreFront.objects.create(
+			user=self.owner1,
+			name='DataLogique Store',
+			location='Accra',
+			manager=self.owner1,
+		)
+		BusinessStoreFront.objects.create(business=self.business1, storefront=self.storefront1)
+
+		self.warehouse1 = Warehouse.objects.create(
+			name='DataLogique Warehouse',
+			location='Tema',
+			manager=self.owner1,
+		)
+		BusinessWarehouse.objects.create(business=self.business1, warehouse=self.warehouse1)
+
+		# Storefronts and warehouses for business 2
+		storefront2 = StoreFront.objects.create(
+			user=self.owner2,
+			name='Other Biz Store',
+			location='Takoradi',
+			manager=self.owner2,
+		)
+		BusinessStoreFront.objects.create(business=self.business2, storefront=storefront2)
+
+		warehouse2 = Warehouse.objects.create(
+			name='Other Biz Warehouse',
+			location='Kumasi',
+			manager=self.owner2,
+		)
+		BusinessWarehouse.objects.create(business=self.business2, warehouse=warehouse2)
+
+		self.employee = User.objects.create_user(
+			email='employee-visibility@example.com',
+			password='employeeVisibility123',
+			name='Visibility Tester',
+			account_type=User.ACCOUNT_EMPLOYEE,
+		)
+		self.employee.email_verified = True
+		self.employee.is_active = True
+		self.employee.save(update_fields=['email_verified', 'is_active'])
+
+		BusinessMembership.objects.create(
+			business=self.business1,
+			user=self.employee,
+			role=BusinessMembership.STAFF,
+			is_admin=False,
+			is_active=True,
+		)
+
+		self.token = Token.objects.create(user=self.employee)
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+
+	def test_business_storefronts_scoped_to_user(self):
+		response = self.client.get('/inventory/api/business-storefronts/')
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		storefront_names = {item['storefront_name'] for item in response.data['results']}
+		self.assertEqual(storefront_names, {'DataLogique Store'})
+
+	def test_business_warehouses_scoped_to_user(self):
+		response = self.client.get('/inventory/api/business-warehouses/')
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		warehouse_names = {item['warehouse_name'] for item in response.data['results']}
+		self.assertEqual(warehouse_names, {'DataLogique Warehouse'})
 	def test_owner_can_update_and_delete_storefront(self):
 		store_response = self.client.post(
 			'/inventory/api/storefronts/',
@@ -760,4 +844,89 @@ class OwnerStorefrontWarehouseAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
 
 		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+
+
+class BusinessMembershipPlatformRoleAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner = User.objects.create_user(
+			email='owner-platform@example.com',
+			password='testpass123',
+			name='Platform Owner'
+		)
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.email_verified = True
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		_, self.business = self.create_business(owner=self.owner, name='Platform Biz', tin='TIN-PLATFORM-001')
+
+		self.employee = User.objects.create_user(
+			email='platform-employee@example.com',
+			password='employee123',
+			name='Platform Employee'
+		)
+		self.employee.account_type = User.ACCOUNT_EMPLOYEE
+		self.employee.email_verified = True
+		self.employee.is_active = True
+		self.employee.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		self.membership = BusinessMembership.objects.create(
+			business=self.business,
+			user=self.employee,
+			role=BusinessMembership.STAFF,
+			is_admin=False,
+		)
+
+		self.owner_token = Token.objects.create(user=self.owner)
+
+		self.super_admin = User.objects.create_user(
+			email='super-admin@example.com',
+			password='superpass123',
+			name='Super Admin'
+		)
+		self.super_admin.platform_role = User.PLATFORM_SUPER_ADMIN
+		self.super_admin.email_verified = True
+		self.super_admin.is_active = True
+		self.super_admin.save(update_fields=['platform_role', 'email_verified', 'is_active'])
+		self.super_token = Token.objects.create(user=self.super_admin)
+
+		self.url = f'/inventory/api/memberships/{self.membership.id}/'
+
+	def test_owner_cannot_assign_platform_role(self):
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.owner_token.key)
+		response = self.client.patch(
+			self.url,
+			{'platform_role': User.PLATFORM_SAAS_STAFF},
+			format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+		self.membership.user.refresh_from_db()
+		self.assertEqual(self.membership.user.platform_role, User.PLATFORM_NONE)
+
+	def test_platform_super_admin_can_assign_platform_role(self):
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.super_token.key)
+		response = self.client.patch(
+			self.url,
+			{'platform_role': User.PLATFORM_SAAS_ADMIN},
+			format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.membership.user.refresh_from_db()
+		self.assertEqual(self.membership.user.platform_role, User.PLATFORM_SAAS_ADMIN)
+		self.assertIn('role_matrix', response.data)
+		self.assertEqual(response.data['role_matrix']['platform']['role'], User.PLATFORM_SAAS_ADMIN)
+		self.assertEqual(response.data['user']['platform_role'], User.PLATFORM_SAAS_ADMIN)
+
+	def test_platform_super_admin_can_clear_platform_role(self):
+		self.membership.user.platform_role = User.PLATFORM_SAAS_STAFF
+		self.membership.user.save(update_fields=['platform_role', 'updated_at'])
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.super_token.key)
+		response = self.client.patch(
+			self.url,
+			{'platform_role': User.PLATFORM_NONE},
+			format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.membership.user.refresh_from_db()
+		self.assertEqual(self.membership.user.platform_role, User.PLATFORM_NONE)
 

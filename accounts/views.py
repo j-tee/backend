@@ -24,6 +24,7 @@ from .serializers import (
     ChangePasswordSerializer,
     BusinessSerializer,
     BusinessMembershipSerializer,
+    BusinessMembershipSummarySerializer,
     UserRegistrationSerializer,
     EmailVerificationSerializer,
     OwnerBusinessRegistrationSerializer,
@@ -288,11 +289,25 @@ class LoginView(APIView):
         if serializer.is_valid():
             user = serializer.validated_data['user']
             token, created = Token.objects.get_or_create(user=user)
-            
-            return Response({
+
+            employment_data = None
+            if user.account_type == User.ACCOUNT_EMPLOYEE:
+                membership = (
+                    user.business_memberships.select_related('business')
+                    .filter(is_active=True)
+                    .order_by('-updated_at', '-created_at')
+                    .first()
+                )
+                if membership:
+                    employment_data = BusinessMembershipSummarySerializer(membership).data
+
+            response_payload = {
                 'token': token.key,
-                'user': UserSerializer(user).data
-            }, status=status.HTTP_200_OK)
+                'user': UserSerializer(user, context={'request': request}).data,
+                'employment': employment_data,
+            }
+
+            return Response(response_payload, status=status.HTTP_200_OK)
         
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
