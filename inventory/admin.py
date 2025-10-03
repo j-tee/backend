@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
-    Inventory, Transfer, StockAlert
+    Inventory, StoreFrontInventory, Transfer, TransferLineItem, TransferAuditEntry, StockAlert
 )
 
 
@@ -107,26 +107,58 @@ class InventoryAdmin(admin.ModelAdmin):
         return super().get_queryset(request).select_related('product', 'warehouse', 'stock')
 
 
+@admin.register(StoreFrontInventory)
+class StoreFrontInventoryAdmin(admin.ModelAdmin):
+    list_display = ['product', 'storefront', 'quantity', 'updated_at']
+    search_fields = ['product__name', 'product__sku', 'storefront__name']
+    list_filter = ['storefront', 'updated_at']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['product__name']
+
+    def get_queryset(self, request):
+        return super().get_queryset(request).select_related('product', 'storefront')
+
+
+class TransferLineItemInline(admin.TabularInline):
+    model = TransferLineItem
+    extra = 0
+    fields = ['product', 'requested_quantity', 'approved_quantity', 'fulfilled_quantity', 'unit_of_measure', 'notes']
+    readonly_fields = ['created_at', 'updated_at']
+    show_change_link = True
+
+
+class TransferAuditEntryInline(admin.TabularInline):
+    model = TransferAuditEntry
+    extra = 0
+    fields = ['action', 'actor', 'remarks', 'created_at']
+    readonly_fields = ['action', 'actor', 'remarks', 'created_at']
+    can_delete = False
+    ordering = ['created_at']
+
+
 @admin.register(Transfer)
 class TransferAdmin(admin.ModelAdmin):
-    list_display = ['product', 'stock', 'from_warehouse', 'to_storefront', 'quantity', 'status', 'created_at']
-    search_fields = ['product__name', 'product__sku', 'stock__product__name', 'from_warehouse__name', 'to_storefront__name']
-    list_filter = ['status', 'from_warehouse', 'to_storefront', 'created_at']
-    readonly_fields = ['id', 'created_at', 'updated_at']
+    list_display = ['reference', 'business', 'source_warehouse', 'destination_storefront', 'status', 'submitted_at', 'approved_at', 'dispatched_at', 'completed_at']
+    search_fields = ['reference', 'business__name', 'source_warehouse__name', 'destination_storefront__name']
+    list_filter = ['status', 'source_warehouse', 'destination_storefront', 'created_at']
+    readonly_fields = [
+        'id', 'reference', 'business', 'status', 'requested_by', 'approved_by', 'fulfilled_by',
+        'submitted_at', 'approved_at', 'dispatched_at', 'completed_at', 'rejected_at', 'cancelled_at',
+        'created_at', 'updated_at'
+    ]
     ordering = ['-created_at']
-    
+    inlines = [TransferLineItemInline, TransferAuditEntryInline]
+
     fieldsets = (
         ('Transfer Details', {
-            'fields': ('id', 'product', 'stock', 'quantity', 'status')
+            'fields': ('id', 'reference', 'business', 'status', 'notes')
         }),
-        ('Location', {
-            'fields': ('from_warehouse', 'to_storefront')
+        ('Participants', {
+            'fields': ('source_warehouse', 'destination_storefront', 'requested_by', 'approved_by', 'fulfilled_by')
         }),
-        ('Authorization', {
-            'fields': ('requested_by', 'approved_by')
-        }),
-        ('Additional Info', {
-            'fields': ('note', 'created_at', 'updated_at')
+        ('Timeline', {
+            'fields': ('submitted_at', 'approved_at', 'dispatched_at', 'completed_at', 'rejected_at', 'cancelled_at', 'created_at', 'updated_at'),
+            'classes': ('collapse',)
         }),
     )
 

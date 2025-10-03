@@ -20,7 +20,12 @@ from .models import (
 from rest_framework.authtoken.models import Token
 
 from .utils import send_verification_email, send_password_reset_email, EmailDeliveryError
-from inventory.models import BusinessStoreFront, StoreFront, StoreFrontEmployee
+from inventory.models import (
+    BusinessStoreFront,
+    StoreFront,
+    StoreFrontEmployee,
+    WarehouseEmployee,
+)
 
 
 class RoleSerializer(serializers.ModelSerializer):
@@ -129,6 +134,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 class AuditLogSerializer(serializers.ModelSerializer):
     user_name = serializers.CharField(source='user.name', read_only=True)
+    ip_address = serializers.CharField(read_only=True, allow_blank=True, allow_null=True)
     
     class Meta:
         model = AuditLog
@@ -167,11 +173,59 @@ class BusinessSummarySerializer(serializers.ModelSerializer):
 
 class BusinessMembershipSummarySerializer(serializers.ModelSerializer):
     business = BusinessSummarySerializer(read_only=True)
+    storefronts = serializers.SerializerMethodField()
+    warehouses = serializers.SerializerMethodField()
 
     class Meta:
         model = BusinessMembership
-        fields = ['id', 'role', 'is_admin', 'is_active', 'business', 'created_at', 'updated_at']
+        fields = [
+            'id',
+            'role',
+            'is_admin',
+            'is_active',
+            'business',
+            'storefronts',
+            'warehouses',
+            'created_at',
+            'updated_at',
+        ]
         read_only_fields = fields
+
+    def get_storefronts(self, obj):
+        assignments = (
+            StoreFrontEmployee.objects.filter(
+                business=obj.business,
+                user=obj.user,
+                is_active=True,
+            )
+            .select_related('storefront')
+        )
+        return [
+            {
+                'id': str(assignment.storefront.id),
+                'name': assignment.storefront.name,
+                'location': assignment.storefront.location,
+            }
+            for assignment in assignments
+        ]
+
+    def get_warehouses(self, obj):
+        assignments = (
+            WarehouseEmployee.objects.filter(
+                business=obj.business,
+                user=obj.user,
+                is_active=True,
+            )
+            .select_related('warehouse')
+        )
+        return [
+            {
+                'id': str(assignment.warehouse.id),
+                'name': assignment.warehouse.name,
+                'location': assignment.warehouse.location,
+            }
+            for assignment in assignments
+        ]
 
 
 class MembershipUserSummarySerializer(serializers.ModelSerializer):
@@ -184,6 +238,7 @@ class MembershipUserSummarySerializer(serializers.ModelSerializer):
 class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
     user = MembershipUserSummarySerializer(read_only=True)
     assigned_storefronts = serializers.SerializerMethodField()
+    assigned_warehouses = serializers.SerializerMethodField()
     status = serializers.SerializerMethodField()
     platform_role = serializers.CharField(source='user.platform_role', read_only=True)
     role_matrix = serializers.SerializerMethodField()
@@ -192,9 +247,22 @@ class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
         model = BusinessMembership
         fields = [
             'id', 'business', 'user', 'role', 'is_admin', 'is_active', 'status',
-            'platform_role', 'role_matrix', 'assigned_storefronts', 'created_at', 'updated_at'
+            'platform_role', 'role_matrix', 'assigned_storefronts', 'assigned_warehouses',
+            'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'business', 'user', 'is_admin', 'created_at', 'updated_at', 'status', 'platform_role', 'role_matrix']
+        read_only_fields = [
+            'id',
+            'business',
+            'user',
+            'is_admin',
+            'created_at',
+            'updated_at',
+            'status',
+            'platform_role',
+            'role_matrix',
+            'assigned_storefronts',
+            'assigned_warehouses',
+        ]
 
     def get_assigned_storefronts(self, obj):
         assignments = StoreFrontEmployee.objects.filter(
@@ -208,6 +276,22 @@ class BusinessMembershipDetailSerializer(serializers.ModelSerializer):
                 'id': assignment.storefront.id,
                 'name': assignment.storefront.name,
                 'location': assignment.storefront.location,
+            }
+            for assignment in assignments
+        ]
+
+    def get_assigned_warehouses(self, obj):
+        assignments = WarehouseEmployee.objects.filter(
+            business=obj.business,
+            user=obj.user,
+            is_active=True,
+        ).select_related('warehouse')
+
+        return [
+            {
+                'id': assignment.warehouse.id,
+                'name': assignment.warehouse.name,
+                'location': assignment.warehouse.location,
             }
             for assignment in assignments
         ]

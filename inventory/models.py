@@ -1,9 +1,14 @@
 import uuid
-from django.db import models
+from typing import Optional
+
+from django.db import models, transaction
+from django.db.models import Sum
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
+from django.utils import timezone
 from decimal import Decimal
+
 from accounts.models import Business, BusinessMembership
 
 
@@ -489,43 +494,556 @@ class Inventory(models.Model):
         return f"{self.product.name} - {self.warehouse.name} ({arrival}) Qty: {self.quantity}"
 
 
-class Transfer(models.Model):
-    """Transfers from warehouse to storefront"""
-    STATUS_CHOICES = [
-        ('PENDING', 'Pending'),
-        ('IN_TRANSIT', 'In Transit'),
-        ('COMPLETED', 'Completed'),
-        ('CANCELLED', 'Cancelled'),
-    ]
-    
+class StoreFrontInventory(models.Model):
+    """Inventory levels tracked at the storefront level."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
-    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='transfers')
-    stock = models.ForeignKey(StockProduct, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfers')
-    from_warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='outbound_transfers')
-    to_storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='inbound_transfers')
-    quantity = models.PositiveIntegerField()
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
-    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='requested_transfers')
-    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_transfers')
-    note = models.TextField(blank=True, null=True)
+    storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='inventory_entries')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='storefront_inventory_entries')
+    quantity = models.IntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    
+
+    class Meta:
+        db_table = 'storefront_inventory'
+        unique_together = ['storefront', 'product']
+        indexes = [
+            models.Index(fields=['storefront', 'product']),
+            models.Index(fields=['product']),
+        ]
+
+    def __str__(self):
+        return f"{self.product.name} - {self.storefront.name} Qty: {self.quantity}"
+
+
+def _generate_transfer_reference() -> str:
+    date_fragment = timezone.now().strftime('%Y%m%d')
+    random_part = uuid.uuid4().hex[:6].upper()
+    return f"TRF-{date_fragment}-{random_part}"
+
+
+class Transfer(models.Model):
+    """Transfers from warehouse to storefront with lifecycle management."""
+
+    STATUS_DRAFT = 'DRAFT'
+    STATUS_REQUESTED = 'REQUESTED'
+    STATUS_APPROVED = 'APPROVED'
+    STATUS_IN_TRANSIT = 'IN_TRANSIT'
+    STATUS_COMPLETED = 'COMPLETED'
+    STATUS_REJECTED = 'REJECTED'
+    STATUS_CANCELLED = 'CANCELLED'
+
+    STATUS_CHOICES = [
+        (STATUS_DRAFT, 'Draft'),
+        (STATUS_REQUESTED, 'Requested'),
+        (STATUS_APPROVED, 'Approved'),
+        (STATUS_IN_TRANSIT, 'In transit'),
+        (STATUS_COMPLETED, 'Completed'),
+        (STATUS_REJECTED, 'Rejected'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='transfers')
+    reference = models.CharField(max_length=32, unique=True, default=_generate_transfer_reference)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT)
+    source_warehouse = models.ForeignKey(Warehouse, on_delete=models.CASCADE, related_name='outbound_transfer_orders')
+    destination_storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='inbound_transfer_orders')
+    notes = models.TextField(blank=True, null=True)
+    request = models.OneToOneField('inventory.TransferRequest', on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer')
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='requested_transfers')
+    approved_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='approved_transfers')
+    fulfilled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='fulfilled_transfers')
+    received_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='received_transfers')
+    submitted_at = models.DateTimeField(blank=True, null=True)
+    approved_at = models.DateTimeField(blank=True, null=True)
+    dispatched_at = models.DateTimeField(blank=True, null=True)
+    completed_at = models.DateTimeField(blank=True, null=True)
+    received_at = models.DateTimeField(blank=True, null=True)
+    rejected_at = models.DateTimeField(blank=True, null=True)
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
     class Meta:
         db_table = 'transfers'
         ordering = ['-created_at']
         indexes = [
-            models.Index(fields=['from_warehouse', 'status']),
-            models.Index(fields=['to_storefront', 'status']),
-            models.Index(fields=['created_at']),
+            models.Index(fields=['business', 'status']),
+            models.Index(fields=['source_warehouse', 'status']),
+            models.Index(fields=['destination_storefront', 'status']),
+            models.Index(fields=['reference']),
         ]
-    
+
     def __str__(self):
-        if self.stock and self.stock.stock:
-            arrival = self.stock.stock.arrival_date.isoformat() if self.stock.stock.arrival_date else 'unscheduled'
-        else:
-            arrival = 'unscheduled'
-        return f"{self.product.name} ({arrival}) - {self.from_warehouse.name} to {self.to_storefront.name} - Qty: {self.quantity}"
+        return f"{self.reference} ({self.get_status_display()})"
+
+    # ---- validation helpers ---------------------------------------------
+
+    def touch_business(self):
+        if self.business_id:
+            return
+        if self.request_id and getattr(self, 'request', None):
+            self.business = self.request.business
+            return
+        link = getattr(self.source_warehouse, 'business_link', None)
+        if link:
+            self.business = link.business
+
+    def clean(self):
+        self.touch_business()
+        if not self.business_id:
+            raise ValidationError('Transfers must belong to a business.')
+
+        warehouse_business = getattr(self.source_warehouse, 'business_link', None)
+        storefront_business = getattr(self.destination_storefront, 'business_link', None)
+
+        if not warehouse_business or warehouse_business.business_id != self.business_id:
+            raise ValidationError({'source_warehouse': 'Source warehouse must belong to the transfer business.'})
+        if not storefront_business or storefront_business.business_id != self.business_id:
+            raise ValidationError({'destination_storefront': 'Destination storefront must belong to the transfer business.'})
+
+        if self.request_id:
+            request = getattr(self, 'request', None)
+            if not request:
+                raise ValidationError({'request_id': 'Linked request was not found.'})
+            if request.business_id != self.business_id:
+                raise ValidationError({'request_id': 'Request must belong to the transfer business.'})
+            if request.storefront_id != self.destination_storefront_id:
+                raise ValidationError({'request_id': 'Request storefront must match the transfer destination storefront.'})
+
+    def save(self, *args, **kwargs):
+        self.touch_business()
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    @property
+    def is_editable(self) -> bool:
+        return self.status in {self.STATUS_DRAFT, self.STATUS_REJECTED}
+
+    @staticmethod
+    def available_quantity(warehouse: Warehouse, product: Product, exclude_transfer: Optional['Transfer'] = None) -> int:
+        """Calculate available quantity for a product at a warehouse, accounting for reserved transfers."""
+        on_hand = Inventory.objects.filter(warehouse=warehouse, product=product).aggregate(total=Sum('quantity'))['total'] or 0
+
+        reserved_qs = TransferLineItem.objects.filter(
+            transfer__source_warehouse=warehouse,
+            product=product,
+            transfer__status__in=[Transfer.STATUS_REQUESTED, Transfer.STATUS_APPROVED],
+        )
+        if exclude_transfer:
+            reserved_qs = reserved_qs.exclude(transfer=exclude_transfer)
+
+        reserved = 0
+        for line in reserved_qs.select_related('transfer'):
+            reserved += line.transfer._required_quantity_for_line(line)
+
+        available = int(on_hand) - reserved
+        return available if available > 0 else 0
+
+    # ---- stock helpers ---------------------------------------------------
+
+    def _required_quantity_for_line(self, line: 'TransferLineItem') -> int:
+        if line.fulfilled_quantity is not None:
+            return line.fulfilled_quantity
+        if line.approved_quantity is not None:
+            return line.approved_quantity
+        return line.requested_quantity
+
+    def _deduct_warehouse_quantities(self):
+        for line in self.line_items.select_related('product'):
+            required = self._required_quantity_for_line(line)
+            if required <= 0:
+                continue
+            self._adjust_warehouse_inventory(line.product, required)
+
+    def _return_warehouse_quantities(self):
+        for line in self.line_items.select_related('product'):
+            required = self._required_quantity_for_line(line)
+            if required <= 0:
+                continue
+            self._adjust_warehouse_inventory(line.product, -required)
+
+    def _adjust_warehouse_inventory(self, product: 'Product', delta: int):
+        with transaction.atomic():
+            entries = list(
+                Inventory.objects.select_for_update().filter(
+                    warehouse=self.source_warehouse,
+                    product=product,
+                ).order_by('-updated_at', 'id')
+            )
+            total = sum(entry.quantity for entry in entries)
+
+            if delta > 0 and total < delta:
+                raise ValidationError({'line_items': f'Insufficient stock for {product.name} at {self.source_warehouse.name}.'})
+
+            if delta > 0:
+                remaining = delta
+                for entry in entries:
+                    if remaining == 0:
+                        break
+                    take = min(entry.quantity, remaining)
+                    entry.quantity -= take
+                    remaining -= take
+                    entry.save(update_fields=['quantity', 'updated_at'])
+                if remaining > 0:
+                    raise ValidationError({'line_items': f'Insufficient stock for {product.name} at {self.source_warehouse.name}.'})
+            elif delta < 0:
+                remaining = abs(delta)
+                if entries:
+                    entry = entries[0]
+                    entry.quantity += remaining
+                    entry.save(update_fields=['quantity', 'updated_at'])
+                else:
+                    Inventory.objects.create(
+                        product=product,
+                        warehouse=self.source_warehouse,
+                        quantity=remaining,
+                    )
+
+    def _increment_storefront_quantities(self):
+        with transaction.atomic():
+            for line in self.line_items.select_related('product'):
+                qty = self._required_quantity_for_line(line)
+                if qty <= 0:
+                    continue
+                entry, created = StoreFrontInventory.objects.select_for_update().get_or_create(
+                    storefront=self.destination_storefront,
+                    product=line.product,
+                    defaults={'quantity': 0},
+                )
+                entry.quantity += qty
+                entry.save(update_fields=['quantity', 'updated_at'])
+
+    # ---- audit + lifecycle ----------------------------------------------
+
+    def add_audit(self, action: str, actor: User | None, remarks: str | None = None):
+        TransferAuditEntry.objects.create(
+            transfer=self,
+            action=action,
+            actor=actor,
+            remarks=remarks,
+        )
+
+    def ensure_state(self, *allowed: str):
+        if self.status not in allowed:
+            allowed_str = ', '.join(allowed)
+            raise ValidationError({'status': f'Invalid transition from {self.status}. Expected: {allowed_str}.'})
+
+    def submit(self, actor: User | None):
+        self.ensure_state(self.STATUS_DRAFT, self.STATUS_REJECTED)
+        if not self.line_items.exists():
+            raise ValidationError({'line_items': 'At least one line item is required before submission.'})
+        self.status = self.STATUS_REQUESTED
+        self.submitted_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_SUBMITTED, actor)
+        self.save(update_fields=['status', 'submitted_at', 'updated_at'])
+
+    def approve(self, actor: User | None):
+        self.ensure_state(self.STATUS_REQUESTED)
+        self.status = self.STATUS_APPROVED
+        self.approved_by = actor
+        self.approved_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_APPROVED, actor)
+        self.save(update_fields=['status', 'approved_by', 'approved_at', 'updated_at'])
+
+    def reject(self, actor: User | None, reason: str | None = None):
+        self.ensure_state(self.STATUS_REQUESTED)
+        self.status = self.STATUS_REJECTED
+        self.rejected_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_REJECTED, actor, reason)
+        request = getattr(self, 'request', None)
+        if request:
+            request.clear_assignment()
+            self.request = None
+        self.save(update_fields=['status', 'rejected_at', 'updated_at', 'request'])
+
+    def cancel(self, actor: User | None, reason: str | None = None):
+        self.ensure_state(self.STATUS_REQUESTED, self.STATUS_APPROVED, self.STATUS_IN_TRANSIT)
+        if self.status == self.STATUS_IN_TRANSIT:
+            self._return_warehouse_quantities()
+        self.status = self.STATUS_CANCELLED
+        self.cancelled_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_CANCELLED, actor, reason)
+        request = getattr(self, 'request', None)
+        if request:
+            request.clear_assignment()
+            self.request = None
+        self.save(update_fields=['status', 'cancelled_at', 'updated_at', 'request'])
+
+    def dispatch(self, actor: User | None):
+        self.ensure_state(self.STATUS_APPROVED)
+        self._deduct_warehouse_quantities()
+        self.status = self.STATUS_IN_TRANSIT
+        self.fulfilled_by = actor
+        self.dispatched_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_DISPATCHED, actor)
+        self.save(update_fields=['status', 'fulfilled_by', 'dispatched_at', 'updated_at'])
+
+    def complete(self, actor: User | None):
+        self.ensure_state(self.STATUS_IN_TRANSIT)
+        self._increment_storefront_quantities()
+        self.status = self.STATUS_COMPLETED
+        self.completed_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_COMPLETED, actor)
+        self.save(update_fields=['status', 'completed_at', 'updated_at'])
+
+    def confirm_receipt(self, actor: User | None, notes: str | None = None):
+        self.ensure_state(self.STATUS_IN_TRANSIT, self.STATUS_COMPLETED)
+        if self.received_at is not None:
+            raise ValidationError({'detail': 'Receipt already confirmed for this transfer.'})
+        self.received_by = actor
+        self.received_at = timezone.now()
+        self.add_audit(TransferAuditEntry.ACTION_RECEIPT_CONFIRMED, actor, notes)
+        self.save(update_fields=['received_by', 'received_at', 'updated_at'])
+        request = getattr(self, 'request', None)
+        if request:
+            request.mark_fulfilled(actor)
+
+
+class TransferLineItem(models.Model):
+    """Individual product movements within a transfer."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name='line_items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='transfer_line_items')
+    requested_quantity = models.PositiveIntegerField()
+    approved_quantity = models.PositiveIntegerField(null=True, blank=True)
+    fulfilled_quantity = models.PositiveIntegerField(null=True, blank=True)
+    unit_of_measure = models.CharField(max_length=50, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'transfer_line_items'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['transfer']),
+            models.Index(fields=['product']),
+        ]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.requested_quantity}"
+
+    def clean(self):
+        if self.requested_quantity <= 0:
+            raise ValidationError({'requested_quantity': 'Requested quantity must be greater than zero.'})
+        if self.approved_quantity is not None and self.approved_quantity < 0:
+            raise ValidationError({'approved_quantity': 'Approved quantity cannot be negative.'})
+        if self.fulfilled_quantity is not None and self.fulfilled_quantity < 0:
+            raise ValidationError({'fulfilled_quantity': 'Fulfilled quantity cannot be negative.'})
+
+        transfer_business_id = self.transfer.business_id if self.transfer_id else None
+        if transfer_business_id and self.product.business_id != transfer_business_id:
+            raise ValidationError({'product': 'Product must belong to the transfer business.'})
+
+
+class TransferRequest(models.Model):
+    """Storefront-originated stock requests that can be linked to transfers."""
+
+    PRIORITY_LOW = 'LOW'
+    PRIORITY_MEDIUM = 'MEDIUM'
+    PRIORITY_HIGH = 'HIGH'
+    PRIORITY_CHOICES = [
+        (PRIORITY_LOW, 'Low'),
+        (PRIORITY_MEDIUM, 'Medium'),
+        (PRIORITY_HIGH, 'High'),
+    ]
+
+    STATUS_NEW = 'NEW'
+    STATUS_ASSIGNED = 'ASSIGNED'
+    STATUS_FULFILLED = 'FULFILLED'
+    STATUS_CANCELLED = 'CANCELLED'
+    STATUS_CHOICES = [
+        (STATUS_NEW, 'New'),
+        (STATUS_ASSIGNED, 'Assigned'),
+        (STATUS_FULFILLED, 'Fulfilled'),
+        (STATUS_CANCELLED, 'Cancelled'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='transfer_requests')
+    storefront = models.ForeignKey(StoreFront, on_delete=models.CASCADE, related_name='transfer_requests')
+    requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_requests')
+    priority = models.CharField(max_length=16, choices=PRIORITY_CHOICES, default=PRIORITY_MEDIUM)
+    status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_NEW)
+    notes = models.TextField(blank=True, null=True)
+    linked_transfer_reference = models.CharField(max_length=32, blank=True, null=True)
+    assigned_at = models.DateTimeField(blank=True, null=True)
+    fulfilled_at = models.DateTimeField(blank=True, null=True)
+    fulfilled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='fulfilled_transfer_requests')
+    cancelled_at = models.DateTimeField(blank=True, null=True)
+    cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_transfer_requests')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'transfer_requests'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['business', 'status']),
+            models.Index(fields=['storefront', 'status']),
+        ]
+
+    def __str__(self):
+        return f"Request {self.id} ({self.get_status_display()})"
+
+    def clean(self):
+        link = getattr(self.storefront, 'business_link', None)
+        if not link:
+            raise ValidationError({'storefront': 'Storefront must be linked to a business.'})
+        if self.business_id and link.business_id != self.business_id:
+            raise ValidationError({'storefront': 'Storefront must belong to the specified business.'})
+        self.business = link.business
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def _current_transfer(self) -> Transfer | None:
+        try:
+            return self.transfer
+        except Transfer.DoesNotExist:
+            return None
+
+    @property
+    def linked_transfer_id(self) -> uuid.UUID | None:
+        transfer = self._current_transfer()
+        return transfer.id if transfer else None
+
+    def mark_assigned(self, transfer: Transfer):
+        if self.status not in {self.STATUS_NEW, self.STATUS_ASSIGNED}:
+            raise ValidationError({'status': 'Request is already fulfilled or cancelled.'})
+        existing = self._current_transfer()
+        if existing and existing != transfer:
+            raise ValidationError({'linked_transfer': 'Request is already linked to another transfer.'})
+        self.status = self.STATUS_ASSIGNED
+        self.assigned_at = timezone.now()
+        self.linked_transfer_reference = transfer.reference
+        self.save(update_fields=['status', 'assigned_at', 'linked_transfer_reference', 'updated_at'])
+
+    def clear_assignment(self):
+        updated_fields = []
+        if self.status not in {self.STATUS_CANCELLED, self.STATUS_FULFILLED}:
+            if self.status != self.STATUS_NEW:
+                self.status = self.STATUS_NEW
+                updated_fields.append('status')
+            if self.linked_transfer_reference:
+                self.linked_transfer_reference = None
+                updated_fields.append('linked_transfer_reference')
+        if self.assigned_at is not None:
+            self.assigned_at = None
+            updated_fields.append('assigned_at')
+        if updated_fields:
+            updated_fields.append('updated_at')
+            self.save(update_fields=updated_fields)
+
+    def mark_cancelled(self, actor: User | None):
+        if self.status == self.STATUS_CANCELLED:
+            return
+        if self.status == self.STATUS_FULFILLED:
+            raise ValidationError({'status': 'Fulfilled requests cannot be cancelled.'})
+        self.status = self.STATUS_CANCELLED
+        self.cancelled_at = timezone.now()
+        self.cancelled_by = actor
+        self.linked_transfer_reference = None
+        self.assigned_at = None
+        self.save(update_fields=['status', 'cancelled_at', 'cancelled_by', 'linked_transfer_reference', 'assigned_at', 'updated_at'])
+        transfer = self._current_transfer()
+        if transfer:
+            transfer.request = None
+            transfer.save(update_fields=['request', 'updated_at'])
+
+    def mark_fulfilled(self, actor: User | None):
+        if self.status == self.STATUS_FULFILLED:
+            return
+        if self.status != self.STATUS_ASSIGNED:
+            raise ValidationError({'status': 'Only assigned requests can be fulfilled.'})
+        transfer = self._current_transfer()
+        if not transfer:
+            raise ValidationError({'linked_transfer': 'Request is not linked to a transfer.'})
+        if transfer.status != Transfer.STATUS_COMPLETED and transfer.status != Transfer.STATUS_IN_TRANSIT:
+            raise ValidationError({'linked_transfer': 'Linked transfer must be in transit or completed before fulfilling the request.'})
+        self.status = self.STATUS_FULFILLED
+        self.fulfilled_at = timezone.now()
+        self.fulfilled_by = actor
+        self.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+
+
+class TransferRequestLineItem(models.Model):
+    """Line items requested by storefront staff before transfer creation."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    request = models.ForeignKey(TransferRequest, on_delete=models.CASCADE, related_name='line_items')
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name='transfer_request_line_items')
+    requested_quantity = models.PositiveIntegerField()
+    unit_of_measure = models.CharField(max_length=50, blank=True, null=True)
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'transfer_request_line_items'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['request']),
+            models.Index(fields=['product']),
+        ]
+
+    def __str__(self):
+        return f"{self.product.name} x{self.requested_quantity} (request)"
+
+    def clean(self):
+        if self.requested_quantity <= 0:
+            raise ValidationError({'requested_quantity': 'Requested quantity must be greater than zero.'})
+        request_business_id = self.request.business_id if self.request_id else None
+        if request_business_id and self.product.business_id != request_business_id:
+            raise ValidationError({'product': 'Product must belong to the same business as the request.'})
+
+
+class TransferAuditEntry(models.Model):
+    """Audit trail for transfer lifecycle changes."""
+
+    ACTION_CREATED = 'CREATED'
+    ACTION_SUBMITTED = 'SUBMITTED'
+    ACTION_APPROVED = 'APPROVED'
+    ACTION_REJECTED = 'REJECTED'
+    ACTION_CANCELLED = 'CANCELLED'
+    ACTION_DISPATCHED = 'DISPATCHED'
+    ACTION_COMPLETED = 'COMPLETED'
+    ACTION_UPDATED = 'UPDATED'
+    ACTION_RECEIPT_CONFIRMED = 'RECEIPT_CONFIRMED'
+
+    ACTION_CHOICES = [
+        (ACTION_CREATED, 'Created'),
+        (ACTION_SUBMITTED, 'Submitted'),
+        (ACTION_APPROVED, 'Approved'),
+        (ACTION_REJECTED, 'Rejected'),
+        (ACTION_CANCELLED, 'Cancelled'),
+        (ACTION_DISPATCHED, 'Dispatched'),
+        (ACTION_COMPLETED, 'Completed'),
+        (ACTION_UPDATED, 'Updated'),
+        (ACTION_RECEIPT_CONFIRMED, 'Receipt confirmed'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    transfer = models.ForeignKey(Transfer, on_delete=models.CASCADE, related_name='audit_entries')
+    action = models.CharField(max_length=20, choices=ACTION_CHOICES)
+    actor = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_audit_entries')
+    remarks = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'transfer_audit_entries'
+        ordering = ['created_at']
+        indexes = [
+            models.Index(fields=['transfer']),
+            models.Index(fields=['action']),
+        ]
+
+    def __str__(self):
+        return f"{self.transfer.reference} - {self.action}"
 
 
 class StockAlert(models.Model):

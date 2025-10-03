@@ -1,3 +1,6 @@
+from collections import defaultdict
+from uuid import UUID
+
 from rest_framework import viewsets, status, permissions, generics
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -22,13 +25,13 @@ from accounts.serializers import (
 from accounts.utils import send_business_invitation_email, EmailDeliveryError
 from .models import (
     Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
-    Inventory, Transfer, StockAlert,
+    Inventory, StoreFrontInventory, Transfer, TransferLineItem, TransferAuditEntry, TransferRequest, StockAlert,
     BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 from .serializers import (
     CategorySerializer, WarehouseSerializer, StoreFrontSerializer, 
     StockSerializer, StockProductSerializer, SupplierSerializer, ProductSerializer,
-    InventorySerializer, TransferSerializer, StockAlertSerializer,
+    InventorySerializer, TransferSerializer, TransferRequestSerializer, StockAlertSerializer,
     InventorySummarySerializer, StockArrivalReportSerializer,
     BusinessWarehouseSerializer, BusinessStoreFrontSerializer,
     StoreFrontEmployeeSerializer, WarehouseEmployeeSerializer,
@@ -111,13 +114,46 @@ class StockFilter(FilterSet):
 
 
 def _business_ids_for_user(user):
+    if not getattr(user, 'is_authenticated', False):
+        return []
+
     ids = set()
-    if getattr(user, 'account_type', None) == getattr(User, 'ACCOUNT_OWNER', 'OWNER'):
-        ids.update(user.owned_businesses.values_list('id', flat=True))
-    ids.update(
-        user.business_memberships.filter(is_active=True).values_list('business_id', flat=True)
-    )
+
+    owned_qs = getattr(user, 'owned_businesses', None)
+    if owned_qs is not None and getattr(user, 'account_type', None) == getattr(User, 'ACCOUNT_OWNER', 'OWNER'):
+        ids.update(owned_qs.values_list('id', flat=True))
+
+    memberships_qs = getattr(user, 'business_memberships', None)
+    if memberships_qs is not None:
+        ids.update(
+            memberships_qs.filter(is_active=True).values_list('business_id', flat=True)
+        )
+
     return list(ids)
+
+
+def _filter_queryset_by_business(queryset, request, business_lookup, allowed_business_ids=None):
+    business_param = request.query_params.get('business') or request.query_params.get('business_id')
+
+    if business_param:
+        try:
+            business_uuid = UUID(business_param)
+        except (TypeError, ValueError):
+            raise ValidationError({'business': 'Invalid business id supplied.'})
+
+        if allowed_business_ids is not None:
+            normalized_allowed = {str(bid) for bid in allowed_business_ids}
+            if str(business_uuid) not in normalized_allowed:
+                return queryset.none()
+
+        return queryset.filter(**{business_lookup: business_uuid})
+
+    if allowed_business_ids is not None:
+        if not allowed_business_ids:
+            return queryset.none()
+        return queryset.filter(**{f'{business_lookup}__in': allowed_business_ids})
+
+    return queryset
 
 
 def _get_primary_business_for_owner(user):
@@ -156,13 +192,19 @@ class WarehouseViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = Warehouse.objects.select_related('manager', 'business_link__business')
         user = self.request.user
-        if user.is_superuser:
-            return queryset
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return _filter_queryset_by_business(queryset, self.request, 'business_link__business_id')
 
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return queryset.none()
-        return queryset.filter(business_link__business_id__in=business_ids)
+
+        return _filter_queryset_by_business(
+            queryset,
+            self.request,
+            'business_link__business_id',
+            allowed_business_ids=business_ids,
+        )
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -212,13 +254,19 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         queryset = StoreFront.objects.select_related('user', 'manager', 'business_link__business')
         user = self.request.user
-        if user.is_superuser:
-            return queryset
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return _filter_queryset_by_business(queryset, self.request, 'business_link__business_id')
 
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return queryset.none()
-        return queryset.filter(business_link__business_id__in=business_ids)
+
+        return _filter_queryset_by_business(
+            queryset,
+            self.request,
+            'business_link__business_id',
+            allowed_business_ids=business_ids,
+        )
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -682,24 +730,22 @@ class InventoryViewSet(viewsets.ModelViewSet):
 
 
 class TransferViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing transfers"""
+    """Manage warehouse → storefront transfers with workflow actions."""
+
     queryset = Transfer.objects.select_related(
-        'product', 'stock__stock', 'stock__supplier', 'from_warehouse', 'to_storefront',
-        'requested_by', 'approved_by'
-    ).all()
+        'business', 'source_warehouse', 'destination_storefront',
+        'requested_by', 'approved_by', 'fulfilled_by'
+    ).prefetch_related('line_items__product', 'audit_entries__actor')
     serializer_class = TransferSerializer
     permission_classes = [permissions.IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['status', 'source_warehouse', 'destination_storefront']
+    search_fields = ['reference', 'line_items__product__name', 'line_items__product__sku']
+    ordering_fields = ['created_at', 'updated_at', 'reference']
+    ordering = ['-created_at']
 
     def get_queryset(self):
-        queryset = Transfer.objects.select_related(
-            'product',
-            'stock__stock',
-            'stock__supplier',
-            'from_warehouse',
-            'to_storefront',
-            'requested_by',
-            'approved_by',
-        )
+        queryset = super().get_queryset()
         user = self.request.user
         if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
             return queryset
@@ -708,11 +754,335 @@ class TransferViewSet(viewsets.ModelViewSet):
         if not business_ids:
             return queryset.none()
 
-        return queryset.filter(
-            Q(product__business_id__in=business_ids) |
-            Q(from_warehouse__business_link__business_id__in=business_ids) |
-            Q(to_storefront__business_link__business_id__in=business_ids)
-        ).distinct()
+        return queryset.filter(business_id__in=business_ids)
+
+    def perform_create(self, serializer):
+        warehouse = serializer.validated_data.get('source_warehouse')
+        link = getattr(warehouse, 'business_link', None)
+        business = link.business if link else serializer.validated_data.get('business')
+        self._ensure_membership(business)
+        serializer.save(requested_by=self.request.user, business=business)
+
+    def perform_update(self, serializer):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business)
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        transfer = self.get_object()
+        if not transfer.is_editable:
+            raise ValidationError('Only draft or rejected transfers can be deleted.')
+        self._ensure_membership(
+            transfer.business,
+            allowed_roles={BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
+        )
+        transfer.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def _ensure_membership(self, business: Business | None, allowed_roles: set[str] | None = None):
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return None
+
+        if business is None:
+            raise PermissionDenied('Unable to resolve business context for this transfer.')
+
+        membership = BusinessMembership.objects.filter(
+            business=business,
+            user=user,
+            is_active=True,
+        ).first()
+
+        if not membership:
+            raise PermissionDenied('You are not a member of this business.')
+
+        if allowed_roles and membership.role not in allowed_roles:
+            raise PermissionDenied('You do not have the required role for this action.')
+
+        return membership
+
+    def _apply_line_item_updates(self, transfer: Transfer, payload, field_name: str):
+        if not payload:
+            return
+
+        line_map = {str(item.id): item for item in transfer.line_items.all()}
+        updates = []
+
+        for item in payload:
+            item_id = item.get('id')
+            if not item_id:
+                raise ValidationError({'line_items': 'Each adjustment must include an "id" field.'})
+            line = line_map.get(str(item_id))
+            if not line:
+                raise ValidationError({'line_items': f'Line item {item_id} was not found for this transfer.'})
+            if field_name not in item:
+                continue
+            value = item[field_name]
+            if value is None:
+                continue
+            if int(value) < 0:
+                raise ValidationError({'line_items': f'{field_name} cannot be negative.'})
+            setattr(line, field_name, int(value))
+            updates.append(line)
+
+        for line in updates:
+            line.save(update_fields=[field_name, 'updated_at'])
+
+    def _manager_roles(self):
+        return {BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
+
+    def _confirm_roles(self):
+        return self._manager_roles()
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business)
+        transfer.submit(request.user)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
+        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'approved_quantity')
+        transfer.approve(request.user)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def reject(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
+        reason = request.data.get('reason')
+        if not reason:
+            raise ValidationError({'reason': 'This field is required.'})
+        transfer.reject(request.user, reason)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='dispatch')
+    def dispatch_transfer(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
+        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'fulfilled_quantity')
+        with transaction.atomic():
+            transfer.dispatch(request.user)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
+        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'fulfilled_quantity')
+        with transaction.atomic():
+            transfer.complete(request.user)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        transfer = self.get_object()
+        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
+        reason = request.data.get('reason')
+        transfer.cancel(request.user, reason)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='confirm-receipt')
+    def confirm_receipt(self, request, pk=None):
+        transfer = self.get_object()
+        request_link = getattr(transfer, 'request', None)
+        if request_link and request.user == request_link.requested_by:
+            self._ensure_membership(transfer.business)
+        elif request.user == transfer.requested_by:
+            self._ensure_membership(transfer.business)
+        else:
+            self._ensure_membership(transfer.business, allowed_roles=self._confirm_roles())
+        notes = request.data.get('notes')
+        transfer.confirm_receipt(request.user, notes)
+        transfer.refresh_from_db()
+        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
+
+
+class TransferRequestViewSet(viewsets.ModelViewSet):
+    """Manage storefront-originated transfer requests."""
+
+    queryset = TransferRequest.objects.select_related(
+        'business', 'storefront', 'storefront__business_link__business',
+        'requested_by', 'fulfilled_by', 'cancelled_by'
+    ).prefetch_related('line_items__product')
+    serializer_class = TransferRequestSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = CustomPageNumberPagination
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ['status', 'storefront', 'priority']
+    search_fields = ['notes', 'line_items__product__name', 'line_items__product__sku']
+    ordering_fields = ['created_at', 'updated_at', 'priority']
+    ordering = ['-created_at']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return queryset
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return queryset.none()
+
+        return queryset.filter(business_id__in=business_ids)
+
+    def _creator_roles(self):
+        return {
+            BusinessMembership.OWNER,
+            BusinessMembership.ADMIN,
+            BusinessMembership.MANAGER,
+            BusinessMembership.STAFF,
+        }
+
+    def _manager_roles(self):
+        return {BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
+
+    def _ensure_membership(self, business: Business, allowed_roles: set[str] | None = None):
+        user = self.request.user
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return None
+
+        membership = BusinessMembership.objects.filter(
+            business=business,
+            user=user,
+            is_active=True,
+        ).first()
+
+        if not membership:
+            raise PermissionDenied('You are not a member of this business.')
+
+        if allowed_roles and membership.role not in allowed_roles:
+            raise PermissionDenied('You do not have the required role for this action.')
+
+        return membership
+
+    def perform_create(self, serializer):
+        storefront = serializer.validated_data.get('storefront')
+        if storefront is None:
+            raise ValidationError({'storefront': 'This field is required.'})
+
+        link = getattr(storefront, 'business_link', None)
+        if not link:
+            raise ValidationError({'storefront': 'Storefront must belong to an active business.'})
+
+        business = link.business
+        self._ensure_membership(business, allowed_roles=self._creator_roles())
+        serializer.save(business=business, requested_by=self.request.user)
+
+    def perform_update(self, serializer):
+        instance = self.get_object()
+        user = self.request.user
+        if user == instance.requested_by and instance.status == TransferRequest.STATUS_NEW:
+            self._ensure_membership(instance.business)
+        else:
+            self._ensure_membership(instance.business, allowed_roles=self._manager_roles())
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        raise ValidationError('Transfer requests cannot be deleted. Use the cancel action instead.')
+
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        transfer_request = self.get_object()
+        if transfer_request.status not in {TransferRequest.STATUS_NEW, TransferRequest.STATUS_ASSIGNED}:
+            raise ValidationError({'status': 'Only new or assigned requests can be cancelled.'})
+
+        if transfer_request.status == TransferRequest.STATUS_NEW and request.user == transfer_request.requested_by:
+            self._ensure_membership(transfer_request.business)
+        else:
+            self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
+
+        transfer_request.mark_cancelled(request.user)
+        transfer_request.refresh_from_db()
+        return Response(self.get_serializer(transfer_request).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'])
+    def fulfill(self, request, pk=None):
+        transfer_request = self.get_object()
+        if transfer_request.status != TransferRequest.STATUS_ASSIGNED:
+            raise ValidationError({'status': 'Only assigned requests can be fulfilled.'})
+
+        transfer = transfer_request._current_transfer()
+        if not transfer:
+            raise ValidationError({'linked_transfer': 'Request is not linked to a transfer.'})
+        if transfer.status not in {Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED}:
+            raise ValidationError({'linked_transfer': 'Linked transfer must be in transit or completed before fulfillment.'})
+
+        if request.user == transfer_request.requested_by:
+            self._ensure_membership(transfer_request.business)
+        else:
+            self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
+
+        transfer_request.mark_fulfilled(request.user)
+        transfer_request.refresh_from_db()
+        return Response(self.get_serializer(transfer_request).data, status=status.HTTP_200_OK)
+
+class StockAvailabilityView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        warehouse_id = request.query_params.get('warehouse')
+        product_id = request.query_params.get('product')
+        quantity_param = request.query_params.get('quantity', '0')
+
+        missing = [param for param, value in [('warehouse', warehouse_id), ('product', product_id)] if not value]
+        if missing:
+            raise ValidationError({field: 'This field is required.' for field in missing})
+
+        try:
+            requested_quantity = int(quantity_param)
+        except (TypeError, ValueError):
+            raise ValidationError({'quantity': 'Quantity must be an integer.'})
+
+        if requested_quantity < 0:
+            raise ValidationError({'quantity': 'Quantity must be zero or greater.'})
+
+        warehouse = get_object_or_404(Warehouse.objects.select_related('business_link__business'), id=warehouse_id)
+        product = get_object_or_404(Product.objects.select_related('business'), id=product_id)
+
+        link = getattr(warehouse, 'business_link', None)
+        if not link:
+            raise ValidationError({'warehouse': 'Warehouse is not linked to a business.'})
+
+        business = link.business
+
+        if product.business_id != business.id:
+            raise ValidationError({'product': 'Product does not belong to the warehouse business.'})
+
+        user = request.user
+        if not (user.is_superuser or getattr(user, 'is_platform_super_admin', False)):
+            business_ids = _business_ids_for_user(user)
+            if business.id not in business_ids:
+                raise PermissionDenied('You do not have access to this business.')
+
+        available_quantity = Transfer.available_quantity(warehouse, product)
+        is_available = available_quantity >= requested_quantity
+
+        if is_available:
+            message = 'Sufficient stock on hand.'
+        else:
+            message = f"Only {available_quantity} units available at {warehouse.name}."
+
+        return Response(
+            {
+                'warehouse': str(warehouse.id),
+                'product': str(product.id),
+                'requested_quantity': requested_quantity,
+                'available_quantity': available_quantity,
+                'is_available': is_available,
+                'message': message,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class StockAlertViewSet(viewsets.ModelViewSet):
@@ -831,6 +1201,334 @@ class StockArrivalReportView(APIView):
         # Basic implementation - can be expanded
         data = []
         return Response(data)
+
+
+class EmployeeWorkspaceView(APIView):
+    """Provide per-employee workspace data scoped by memberships and assignments."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        user = request.user
+        business_ids = _business_ids_for_user(user)
+
+        empty_response = Response(
+            {
+                'businesses': [],
+                'warehouses': [],
+                'storefronts': [],
+                'pending_approvals': [],
+                'incoming_transfers': [],
+                'my_transfer_requests': [],
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        if not business_ids:
+            return empty_response
+
+        memberships = list(
+            BusinessMembership.objects.filter(
+                business_id__in=business_ids,
+                user=user,
+                is_active=True,
+            ).select_related('business')
+        )
+
+        if not memberships:
+            return empty_response
+
+        manager_roles = {BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
+
+        warehouse_assignments = defaultdict(set)
+        for assignment in WarehouseEmployee.objects.filter(user=user, is_active=True, business_id__in=business_ids):
+            warehouse_assignments[assignment.business_id].add(assignment.warehouse_id)
+
+        storefront_assignments = defaultdict(set)
+        for assignment in StoreFrontEmployee.objects.filter(user=user, is_active=True, business_id__in=business_ids):
+            storefront_assignments[assignment.business_id].add(assignment.storefront_id)
+
+        all_warehouses = list(
+            Warehouse.objects.select_related('business_link__business').filter(
+                business_link__business_id__in=business_ids
+            )
+        )
+        warehouses_by_business = defaultdict(list)
+        for warehouse in all_warehouses:
+            link = getattr(warehouse, 'business_link', None)
+            if not link:
+                continue
+            warehouses_by_business[link.business_id].append(warehouse)
+
+        all_storefronts = list(
+            StoreFront.objects.select_related('business_link__business').filter(
+                business_link__business_id__in=business_ids
+            )
+        )
+        storefronts_by_business = defaultdict(list)
+        for storefront in all_storefronts:
+            link = getattr(storefront, 'business_link', None)
+            if not link:
+                continue
+            storefronts_by_business[link.business_id].append(storefront)
+
+        contexts: dict[str, dict] = {}
+        all_warehouse_ids: set = set()
+        all_storefront_ids: set = set()
+        non_manager_storefront_ids: set = set()
+        manager_business_ids: set = set()
+        non_manager_business_ids: set = set()
+
+        for membership in memberships:
+            business = membership.business
+            business_id = business.id
+            is_manager = membership.role in manager_roles
+
+            warehouses = list(warehouses_by_business.get(business_id, []))
+            storefronts = list(storefronts_by_business.get(business_id, []))
+
+            if is_manager:
+                manager_business_ids.add(business_id)
+            else:
+                non_manager_business_ids.add(business_id)
+                assigned_warehouses = warehouse_assignments.get(business_id, set())
+                assigned_storefronts = storefront_assignments.get(business_id, set())
+                warehouses = [warehouse for warehouse in warehouses if warehouse.id in assigned_warehouses]
+                storefronts = [storefront for storefront in storefronts if storefront.id in assigned_storefronts]
+                non_manager_storefront_ids.update(storefront.id for storefront in storefronts)
+
+            warehouse_ids = [warehouse.id for warehouse in warehouses]
+            storefront_ids = [storefront.id for storefront in storefronts]
+
+            all_warehouse_ids.update(warehouse_ids)
+            all_storefront_ids.update(storefront_ids)
+
+            contexts[business_id] = {
+                'membership': membership,
+                'warehouses': warehouses,
+                'storefronts': storefronts,
+                'warehouse_ids': warehouse_ids,
+                'storefront_ids': storefront_ids,
+                'is_manager': is_manager,
+            }
+
+        if not contexts:
+            return empty_response
+
+        warehouse_stock_map = {}
+        if all_warehouse_ids:
+            for row in Inventory.objects.filter(warehouse_id__in=all_warehouse_ids).values('warehouse_id').annotate(total=Sum('quantity')):
+                warehouse_stock_map[row['warehouse_id']] = int(row['total'] or 0)
+
+        storefront_stock_map = {}
+        if all_storefront_ids:
+            for row in StoreFrontInventory.objects.filter(storefront_id__in=all_storefront_ids).values('storefront_id').annotate(total=Sum('quantity')):
+                storefront_stock_map[row['storefront_id']] = int(row['total'] or 0)
+
+        storefront_pending_map = {}
+        if all_storefront_ids:
+            pending_qs = TransferRequest.objects.filter(
+                storefront_id__in=all_storefront_ids,
+                status__in=[TransferRequest.STATUS_NEW, TransferRequest.STATUS_ASSIGNED],
+            )
+            for row in pending_qs.values('storefront_id').annotate(total=Count('id')):
+                storefront_pending_map[row['storefront_id']] = int(row['total'] or 0)
+
+        def _build_status_counts(queryset):
+            counts = defaultdict(dict)
+            for row in queryset.values('business_id', 'status').annotate(total=Count('id')):
+                counts[row['business_id']][row['status']] = int(row['total'] or 0)
+            return counts
+
+        manager_request_counts = {}
+        if manager_business_ids:
+            manager_request_counts = _build_status_counts(
+                TransferRequest.objects.filter(business_id__in=manager_business_ids)
+            )
+
+        non_manager_request_counts = {}
+        if non_manager_business_ids:
+            request_filter = Q(requested_by=user)
+            if non_manager_storefront_ids:
+                request_filter |= Q(storefront_id__in=non_manager_storefront_ids)
+            non_manager_request_counts = _build_status_counts(
+                TransferRequest.objects.filter(business_id__in=non_manager_business_ids).filter(request_filter)
+            )
+
+        manager_transfer_counts = {}
+        if manager_business_ids:
+            manager_transfer_counts = _build_status_counts(
+                Transfer.objects.filter(business_id__in=manager_business_ids)
+            )
+
+        non_manager_transfer_counts = {}
+        if non_manager_business_ids and non_manager_storefront_ids:
+            non_manager_transfer_counts = _build_status_counts(
+                Transfer.objects.filter(
+                    business_id__in=non_manager_business_ids,
+                    destination_storefront_id__in=non_manager_storefront_ids,
+                )
+            )
+
+        my_transfer_requests = [
+            {
+                'id': str(request_obj.id),
+                'status': request_obj.status,
+                'priority': request_obj.priority,
+                'storefront': str(request_obj.storefront_id),
+                'storefront_name': request_obj.storefront.name,
+                'linked_transfer_reference': request_obj.linked_transfer_reference,
+                'created_at': request_obj.created_at.isoformat(),
+            }
+            for request_obj in TransferRequest.objects.filter(requested_by=user)
+            .select_related('storefront')
+            .order_by('-created_at')[:10]
+        ]
+
+        pending_approvals = []
+        if manager_business_ids:
+            pending_approvals = [
+                {
+                    'id': str(transfer.id),
+                    'reference': transfer.reference,
+                    'status': transfer.status,
+                    'destination_storefront': str(transfer.destination_storefront_id),
+                    'destination_storefront_name': transfer.destination_storefront.name,
+                    'created_at': transfer.created_at.isoformat(),
+                }
+                for transfer in Transfer.objects.filter(
+                    business_id__in=manager_business_ids,
+                    status=Transfer.STATUS_REQUESTED,
+                )
+                .select_related('destination_storefront')
+                .order_by('created_at')[:10]
+            ]
+
+        incoming_transfers = []
+        incoming_storefront_ids = all_storefront_ids
+        if incoming_storefront_ids:
+            incoming_transfers = [
+                {
+                    'id': str(transfer.id),
+                    'reference': transfer.reference,
+                    'status': transfer.status,
+                    'destination_storefront': str(transfer.destination_storefront_id),
+                    'destination_storefront_name': transfer.destination_storefront.name,
+                    'completed_at': transfer.completed_at.isoformat() if transfer.completed_at else None,
+                    'received_at': transfer.received_at.isoformat() if transfer.received_at else None,
+                }
+                for transfer in Transfer.objects.filter(
+                    destination_storefront_id__in=incoming_storefront_ids,
+                    status__in=[Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED],
+                )
+                .select_related('destination_storefront')
+                .order_by('-created_at')[:10]
+            ]
+
+        businesses_payload = []
+        warehouses_payload = []
+        storefronts_payload = []
+        seen_warehouse_ids = set()
+        seen_storefront_ids = set()
+
+        request_status_template = {status: 0 for status, _ in TransferRequest.STATUS_CHOICES}
+        transfer_status_template = {
+            Transfer.STATUS_DRAFT: 0,
+            Transfer.STATUS_REQUESTED: 0,
+            Transfer.STATUS_APPROVED: 0,
+            Transfer.STATUS_IN_TRANSIT: 0,
+            Transfer.STATUS_COMPLETED: 0,
+            Transfer.STATUS_REJECTED: 0,
+            Transfer.STATUS_CANCELLED: 0,
+        }
+
+        for business_id, context in contexts.items():
+            membership = context['membership']
+            business = membership.business
+            is_manager = context['is_manager']
+
+            request_counts = request_status_template.copy()
+            source_counts = manager_request_counts if is_manager else non_manager_request_counts
+            for status_key, total in source_counts.get(business_id, {}).items():
+                request_counts[status_key] = total
+
+            transfer_counts = transfer_status_template.copy()
+            transfer_source_counts = manager_transfer_counts if is_manager else non_manager_transfer_counts
+            for status_key, total in transfer_source_counts.get(business_id, {}).items():
+                if status_key in transfer_counts:
+                    transfer_counts[status_key] = total
+
+            warehouse_stock_total = sum(warehouse_stock_map.get(warehouse_id, 0) for warehouse_id in context['warehouse_ids'])
+            storefront_stock_total = sum(storefront_stock_map.get(storefront_id, 0) for storefront_id in context['storefront_ids'])
+
+            businesses_payload.append(
+                {
+                    'id': str(business.id),
+                    'name': business.name,
+                    'role': membership.role,
+                    'storefront_count': len(context['storefronts']),
+                    'warehouse_count': len(context['warehouses']),
+                    'transfer_requests': {
+                        'by_status': request_counts,
+                    },
+                    'transfers': {
+                        'by_status': transfer_counts,
+                    },
+                    'stock': {
+                        'warehouse_on_hand': warehouse_stock_total,
+                        'storefront_on_hand': storefront_stock_total,
+                    },
+                }
+            )
+
+            scope_label = 'manager' if is_manager else 'assigned'
+
+            for warehouse in context['warehouses']:
+                if warehouse.id in seen_warehouse_ids:
+                    continue
+                link = getattr(warehouse, 'business_link', None)
+                business_name = link.business.name if link and link.business else None
+                warehouses_payload.append(
+                    {
+                        'id': str(warehouse.id),
+                        'name': warehouse.name,
+                        'business': str(link.business_id) if link else None,
+                        'business_name': business_name,
+                        'scope': scope_label,
+                        'stock_on_hand': warehouse_stock_map.get(warehouse.id, 0),
+                    }
+                )
+                seen_warehouse_ids.add(warehouse.id)
+
+            for storefront in context['storefronts']:
+                if storefront.id in seen_storefront_ids:
+                    continue
+                link = getattr(storefront, 'business_link', None)
+                business_name = link.business.name if link and link.business else None
+                storefronts_payload.append(
+                    {
+                        'id': str(storefront.id),
+                        'name': storefront.name,
+                        'business': str(link.business_id) if link else None,
+                        'business_name': business_name,
+                        'scope': scope_label,
+                        'inventory_on_hand': storefront_stock_map.get(storefront.id, 0),
+                        'pending_requests': storefront_pending_map.get(storefront.id, 0),
+                    }
+                )
+                seen_storefront_ids.add(storefront.id)
+
+        return Response(
+            {
+                'businesses': businesses_payload,
+                'warehouses': warehouses_payload,
+                'storefronts': storefronts_payload,
+                'pending_approvals': pending_approvals,
+                'incoming_transfers': incoming_transfers,
+                'my_transfer_requests': my_transfer_requests,
+            },
+            status=status.HTTP_200_OK,
+        )
 
 
 class OwnerWorkspaceView(APIView):

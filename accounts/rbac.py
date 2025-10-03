@@ -33,7 +33,10 @@ def _get_business_from_object(obj: Model | None) -> Business | None:
             BusinessWarehouse,
             WarehouseEmployee,
             Inventory,
+            StoreFrontInventory,
             Transfer,
+            TransferLineItem,
+            TransferAuditEntry,
         )
     except Exception:  # pragma: no cover - during migrations inventory may be unavailable
         return None
@@ -69,13 +72,24 @@ def _get_business_from_object(obj: Model | None) -> Business | None:
         return None
 
     if isinstance(obj, Transfer):
-        storefront = getattr(obj, 'to_storefront', None)
+        if obj.business_id:
+            return obj.business
+        storefront = getattr(obj, 'destination_storefront', None)
         if storefront:
             return _get_business_from_object(storefront)
-        warehouse = getattr(obj, 'from_warehouse', None)
+        warehouse = getattr(obj, 'source_warehouse', None)
         if warehouse:
             return _get_business_from_object(warehouse)
         return None
+
+    if isinstance(obj, TransferLineItem):
+        return _get_business_from_object(getattr(obj, 'transfer', None))
+
+    if isinstance(obj, TransferAuditEntry):
+        return _get_business_from_object(getattr(obj, 'transfer', None))
+
+    if isinstance(obj, StoreFrontInventory):
+        return _get_business_from_object(getattr(obj, 'storefront', None))
 
     return None
 
@@ -241,6 +255,15 @@ rules.add_perm(
     'inventory.delete_warehouse',
     is_super_admin | is_saas_admin | is_business_owner | is_business_admin,
 )
+
+TRANSFER_VIEWERS = is_super_admin | is_saas_admin | is_saas_staff | is_business_member
+TRANSFER_CREATORS = is_super_admin | is_saas_admin | is_business_owner | is_business_admin | is_business_manager | is_business_staff
+TRANSFER_APPROVERS = is_super_admin | is_saas_admin | is_business_owner | is_business_admin | is_business_manager
+
+rules.add_perm('inventory.view_transfer', TRANSFER_VIEWERS)
+rules.add_perm('inventory.add_transfer', TRANSFER_CREATORS)
+rules.add_perm('inventory.change_transfer', TRANSFER_APPROVERS)
+rules.add_perm('inventory.delete_transfer', TRANSFER_APPROVERS)
 
 # Business invitation / membership management -----------------------------
 

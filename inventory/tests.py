@@ -13,7 +13,8 @@ from rest_framework.authtoken.models import Token
 
 from .models import (
 	Warehouse, StoreFront, BusinessWarehouse, BusinessStoreFront,
-	StoreFrontEmployee, WarehouseEmployee, Category, Product, Supplier, Stock, StockProduct
+	StoreFrontEmployee, WarehouseEmployee, Category, Product, Supplier, Stock, StockProduct,
+	Inventory, StoreFrontInventory, Transfer, TransferRequest
 )
 from accounts.models import Business, BusinessMembership
 
@@ -707,6 +708,8 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		self.owner2.is_active = True
 		self.owner2.save(update_fields=['email_verified', 'is_active'])
 
+		self.business = self.business1
+
 		# Storefronts and warehouses for business 1
 		self.storefront1 = StoreFront.objects.create(
 			user=self.owner1,
@@ -758,7 +761,14 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		)
 
 		self.token = Token.objects.create(user=self.employee)
+		self.owner_token = Token.objects.create(user=self.owner1)
 		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
+
+	def _get_results(self, response):
+		data = response.data
+		if isinstance(data, dict) and 'results' in data:
+			return data['results']
+		return data
 
 	def test_business_storefronts_scoped_to_user(self):
 		response = self.client.get('/inventory/api/business-storefronts/')
@@ -771,7 +781,83 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		warehouse_names = {item['warehouse_name'] for item in response.data['results']}
 		self.assertEqual(warehouse_names, {'DataLogique Warehouse'})
+
+	def test_employee_business_filter_respects_scope_for_unassigned_business(self):
+		response = self.client.get(
+			'/inventory/api/warehouses/',
+			{'business': str(self.business2.id)}
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(self._get_results(response), [])
+
+		storefront_response = self.client.get(
+			'/inventory/api/storefronts/',
+			{'business': str(self.business2.id)}
+		)
+		self.assertEqual(storefront_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(self._get_results(storefront_response), [])
+
+	def test_employee_can_filter_locations_when_in_multiple_businesses(self):
+		BusinessMembership.objects.create(
+			business=self.business2,
+			user=self.employee,
+			role=BusinessMembership.STAFF,
+			is_admin=False,
+			is_active=True,
+		)
+
+		warehouse_response = self.client.get('/inventory/api/warehouses/')
+		self.assertEqual(warehouse_response.status_code, status.HTTP_200_OK)
+		warehouse_names = {item['name'] for item in self._get_results(warehouse_response)}
+		self.assertEqual(warehouse_names, {'DataLogique Warehouse', 'Other Biz Warehouse'})
+
+		warehouse_filtered = self.client.get(
+			'/inventory/api/warehouses/',
+			{'business': str(self.business1.id)}
+		)
+		self.assertEqual(warehouse_filtered.status_code, status.HTTP_200_OK)
+		warehouse_filtered_names = {item['name'] for item in self._get_results(warehouse_filtered)}
+		self.assertEqual(warehouse_filtered_names, {'DataLogique Warehouse'})
+
+		warehouse_filtered_alias = self.client.get(
+			'/inventory/api/warehouses/',
+			{'business_id': str(self.business2.id)}
+		)
+		self.assertEqual(warehouse_filtered_alias.status_code, status.HTTP_200_OK)
+		warehouse_filtered_alias_names = {item['name'] for item in self._get_results(warehouse_filtered_alias)}
+		self.assertEqual(warehouse_filtered_alias_names, {'Other Biz Warehouse'})
+
+		storefront_response = self.client.get('/inventory/api/storefronts/')
+		self.assertEqual(storefront_response.status_code, status.HTTP_200_OK)
+		storefront_names = {item['name'] for item in self._get_results(storefront_response)}
+		self.assertEqual(storefront_names, {'DataLogique Store', 'Other Biz Store'})
+
+		storefront_filtered = self.client.get(
+			'/inventory/api/storefronts/',
+			{'business': str(self.business1.id)}
+		)
+		self.assertEqual(storefront_filtered.status_code, status.HTTP_200_OK)
+		storefront_filtered_names = {item['name'] for item in self._get_results(storefront_filtered)}
+		self.assertEqual(storefront_filtered_names, {'DataLogique Store'})
+
+		storefront_filtered_alias = self.client.get(
+			'/inventory/api/storefronts/',
+			{'business_id': str(self.business2.id)}
+		)
+		self.assertEqual(storefront_filtered_alias.status_code, status.HTTP_200_OK)
+		storefront_filtered_alias_names = {item['name'] for item in self._get_results(storefront_filtered_alias)}
+		self.assertEqual(storefront_filtered_alias_names, {'Other Biz Store'})
+
+	def test_business_filter_requires_valid_uuid(self):
+		response = self.client.get('/inventory/api/warehouses/', {'business': 'not-a-uuid'})
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('business', response.data)
+
+		storefront_response = self.client.get('/inventory/api/storefronts/', {'business': 'not-a-uuid'})
+		self.assertEqual(storefront_response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('business', storefront_response.data)
 	def test_owner_can_update_and_delete_storefront(self):
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.owner_token.key)
 		store_response = self.client.post(
 			'/inventory/api/storefronts/',
 			{'name': 'Popup Store', 'location': 'Old Town'},
@@ -792,8 +878,10 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		delete_response = self.client.delete(f'/inventory/api/storefronts/{storefront_id}/')
 		self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
 		self.assertFalse(StoreFront.objects.filter(id=storefront_id).exists())
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
 
 	def test_owner_can_update_and_delete_warehouse(self):
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.owner_token.key)
 		warehouse_response = self.client.post(
 			'/inventory/api/warehouses/',
 			{'name': 'Secondary Warehouse', 'location': 'Zone 3'},
@@ -814,6 +902,7 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		delete_response = self.client.delete(f'/inventory/api/warehouses/{warehouse_id}/')
 		self.assertEqual(delete_response.status_code, status.HTTP_204_NO_CONTENT)
 		self.assertFalse(Warehouse.objects.filter(id=warehouse_id).exists())
+		self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.token.key)
 
 	def test_employee_cannot_create_storefront(self):
 		employee = User.objects.create_user(
@@ -827,7 +916,7 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		employee.save(update_fields=['email_verified', 'is_active'])
 
 		BusinessMembership.objects.create(
-			business=self.business,
+			business=self.business1,
 			user=employee,
 			role=BusinessMembership.STAFF,
 			is_admin=False
@@ -929,4 +1018,308 @@ class BusinessMembershipPlatformRoleAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_200_OK)
 		self.membership.user.refresh_from_db()
 		self.assertEqual(self.membership.user.platform_role, User.PLATFORM_NONE)
+
+
+class TransferAvailabilityValidationTest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner, self.business = self.create_business()
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.email_verified = True
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		BusinessMembership.objects.get_or_create(
+			business=self.business,
+			user=self.owner,
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+		)
+
+		self.category = Category.objects.create(name=f'Availability {uuid.uuid4().hex[:8]}')
+		self.product = Product.objects.create(
+			business=self.business,
+			name='Availability Widget',
+			sku=f'AVL-{uuid.uuid4().hex[:6]}',
+			category=self.category
+		)
+		self.warehouse = Warehouse.objects.create(name='Source Warehouse', location='Test City')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+
+		self.storefront = StoreFront.objects.create(user=self.owner, name='Main Store', location='Downtown')
+		BusinessStoreFront.objects.create(business=self.business, storefront=self.storefront)
+
+		Inventory.objects.create(product=self.product, warehouse=self.warehouse, quantity=10)
+
+		self.client.force_authenticate(self.owner)
+
+	def test_stock_availability_endpoint_reports_on_hand_stock(self):
+		response = self.client.get(
+			'/inventory/api/stock/availability/',
+			{'warehouse': str(self.warehouse.id), 'product': str(self.product.id), 'quantity': 5}
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['available_quantity'], 10)
+		self.assertTrue(response.data['is_available'])
+		self.assertEqual(response.data['requested_quantity'], 5)
+
+	def test_transfer_creation_fails_when_stock_insufficient(self):
+		payload = {
+			'source_warehouse': str(self.warehouse.id),
+			'destination_storefront': str(self.storefront.id),
+			'notes': 'Request beyond available stock',
+			'line_items': [
+				{
+					'product': str(self.product.id),
+					'requested_quantity': 15
+				}
+			]
+		}
+		response = self.client.post('/inventory/api/transfers/', payload, format='json')
+		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('line_items', response.data)
+		line_errors = response.data['line_items']
+		self.assertIn('0', line_errors)
+		self.assertIn('Only', line_errors['0'])
+
+	def test_transfer_creation_succeeds_when_stock_sufficient(self):
+		payload = {
+			'source_warehouse': str(self.warehouse.id),
+			'destination_storefront': str(self.storefront.id),
+			'notes': 'Within allocation',
+			'line_items': [
+				{
+					'product': str(self.product.id),
+					'requested_quantity': 4
+				}
+			]
+		}
+		response = self.client.post('/inventory/api/transfers/', payload, format='json')
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(Transfer.objects.filter(business=self.business).count(), 1)
+		self.assertEqual(response.data['line_items'][0]['requested_quantity'], 4)
+
+		# Availability check should now reflect the remaining stock (still 10, reservation happens later in workflow)
+		recheck = self.client.get(
+			'/inventory/api/stock/availability/',
+			{'warehouse': str(self.warehouse.id), 'product': str(self.product.id), 'quantity': 4}
+		)
+		self.assertEqual(recheck.status_code, status.HTTP_200_OK)
+		self.assertTrue(recheck.data['is_available'])
+
+
+class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner, self.business = self.create_business()
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.email_verified = True
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		BusinessMembership.objects.get_or_create(
+			business=self.business,
+			user=self.owner,
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+		)
+
+		self.staff = User.objects.create_user(
+			email='staff-request@example.com',
+			password='testpass123',
+			name='Store Staff'
+		)
+		self.staff.account_type = User.ACCOUNT_EMPLOYEE
+		self.staff.email_verified = True
+		self.staff.is_active = True
+		self.staff.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		BusinessMembership.objects.create(
+			business=self.business,
+			user=self.staff,
+			role=BusinessMembership.STAFF,
+			is_admin=False,
+			is_active=True
+		)
+
+		self.category = Category.objects.create(name='Transfers Category')
+		self.product = Product.objects.create(
+			business=self.business,
+			name='Transfer Gadget',
+			sku='TRF-GDG-001',
+			category=self.category
+		)
+
+		self.warehouse = Warehouse.objects.create(name='Transfer Warehouse', location='Warehouse District')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+
+		self.storefront = StoreFront.objects.create(user=self.owner, name='Transfer Storefront', location='Retail Park')
+		BusinessStoreFront.objects.create(business=self.business, storefront=self.storefront)
+		StoreFrontEmployee.objects.create(
+			business=self.business,
+			storefront=self.storefront,
+			user=self.staff,
+			role=BusinessMembership.STAFF,
+			is_active=True
+		)
+
+		Inventory.objects.create(product=self.product, warehouse=self.warehouse, quantity=20)
+
+		self.client.force_authenticate(self.staff)
+
+	def _create_request(self, quantity=3):
+		payload = {
+			'storefront': str(self.storefront.id),
+			'priority': TransferRequest.PRIORITY_HIGH,
+			'notes': 'Need quick restock',
+			'line_items': [
+				{
+					'product': str(self.product.id),
+					'requested_quantity': quantity
+				}
+			]
+		}
+		response = self.client.post('/inventory/api/transfer-requests/', payload, format='json')
+		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+		return response.data
+
+	def test_staff_can_create_transfer_request(self):
+		request_data = self._create_request(quantity=5)
+		self.assertEqual(request_data['status'], TransferRequest.STATUS_NEW)
+		self.assertIsNone(request_data['linked_transfer'])
+		self.assertEqual(len(request_data['line_items']), 1)
+		self.assertEqual(request_data['line_items'][0]['requested_quantity'], 5)
+
+	def test_transfer_creation_links_request_and_clones_line_items(self):
+		request_data = self._create_request(quantity=4)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		transfer_payload = {
+			'source_warehouse': str(self.warehouse.id),
+			'destination_storefront': str(self.storefront.id),
+			'request_id': request_id
+		}
+		transfer_response = self.client.post('/inventory/api/transfers/', transfer_payload, format='json')
+		self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+		self.assertEqual(transfer_response.data['request_id'], request_id)
+		self.assertEqual(len(transfer_response.data['line_items']), 1)
+		self.assertEqual(transfer_response.data['line_items'][0]['requested_quantity'], 4)
+
+		transfer_request = TransferRequest.objects.get(id=request_id)
+		self.assertEqual(transfer_request.status, TransferRequest.STATUS_ASSIGNED)
+		self.assertEqual(str(transfer_request.linked_transfer_id), transfer_response.data['id'])
+		self.assertEqual(transfer_request.linked_transfer_reference, transfer_response.data['reference'])
+
+	def test_confirm_receipt_marks_transfer_and_request(self):
+		request_data = self._create_request(quantity=2)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		transfer_payload = {
+			'source_warehouse': str(self.warehouse.id),
+			'destination_storefront': str(self.storefront.id),
+			'request_id': request_id
+		}
+		transfer_response = self.client.post('/inventory/api/transfers/', transfer_payload, format='json')
+		self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+		transfer_id = transfer_response.data['id']
+
+		submit_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/submit/')
+		self.assertEqual(submit_response.status_code, status.HTTP_200_OK)
+		approve_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/approve/')
+		self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+		dispatch_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/dispatch/')
+		self.assertEqual(dispatch_response.status_code, status.HTTP_200_OK)
+
+		self.client.force_authenticate(self.staff)
+		confirm_response = self.client.post(
+			f'/inventory/api/transfers/{transfer_id}/confirm-receipt/',
+			{'notes': 'Everything arrived intact'},
+			format='json'
+		)
+		self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(str(confirm_response.data['received_by']), str(self.staff.id))
+		self.assertIsNotNone(confirm_response.data['received_at'])
+
+		transfer_request = TransferRequest.objects.get(id=request_id)
+		self.assertEqual(transfer_request.status, TransferRequest.STATUS_FULFILLED)
+		self.assertEqual(transfer_request.fulfilled_by_id, self.staff.id)
+
+	def test_manager_approval_updates_stock_and_employee_workspace(self):
+		request_data = self._create_request(quantity=3)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		transfer_payload = {
+			'source_warehouse': str(self.warehouse.id),
+			'destination_storefront': str(self.storefront.id),
+			'request_id': request_id
+		}
+		transfer_response = self.client.post('/inventory/api/transfers/', transfer_payload, format='json')
+		self.assertEqual(transfer_response.status_code, status.HTTP_201_CREATED)
+		transfer_id = transfer_response.data['id']
+
+		submit_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/submit/')
+		self.assertEqual(submit_response.status_code, status.HTTP_200_OK)
+
+		approve_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/approve/')
+		self.assertEqual(approve_response.status_code, status.HTTP_200_OK)
+
+		dispatch_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/dispatch/')
+		self.assertEqual(dispatch_response.status_code, status.HTTP_200_OK)
+
+		warehouse_stock = Inventory.objects.get(warehouse=self.warehouse, product=self.product)
+		self.assertEqual(warehouse_stock.quantity, 17)
+
+		complete_response = self.client.post(f'/inventory/api/transfers/{transfer_id}/complete/')
+		self.assertEqual(complete_response.status_code, status.HTTP_200_OK)
+
+		storefront_stock = StoreFrontInventory.objects.get(storefront=self.storefront, product=self.product)
+		self.assertEqual(storefront_stock.quantity, 3)
+
+		self.client.force_authenticate(self.staff)
+		confirm_response = self.client.post(
+			f'/inventory/api/transfers/{transfer_id}/confirm-receipt/',
+			{'notes': 'Received as expected'},
+			format='json'
+		)
+		self.assertEqual(confirm_response.status_code, status.HTTP_200_OK)
+
+		transfer_request = TransferRequest.objects.get(id=request_id)
+		self.assertEqual(transfer_request.status, TransferRequest.STATUS_FULFILLED)
+		self.assertEqual(transfer_request.fulfilled_by_id, self.staff.id)
+
+		self.client.force_authenticate(self.owner)
+		manager_workspace = self.client.get('/inventory/api/employee/workspace/')
+		self.assertEqual(manager_workspace.status_code, status.HTTP_200_OK)
+		self.assertEqual(len(manager_workspace.data['businesses']), 1)
+		manager_summary = manager_workspace.data['businesses'][0]
+		self.assertEqual(manager_summary['transfer_requests']['by_status'][TransferRequest.STATUS_FULFILLED], 1)
+		self.assertEqual(manager_summary['transfers']['by_status'][Transfer.STATUS_COMPLETED], 1)
+		self.assertEqual(manager_summary['stock']['warehouse_on_hand'], 17)
+		self.assertEqual(manager_summary['stock']['storefront_on_hand'], 3)
+		self.assertEqual(manager_workspace.data['pending_approvals'], [])
+
+		self.client.force_authenticate(self.staff)
+		staff_workspace = self.client.get('/inventory/api/employee/workspace/')
+		self.assertEqual(staff_workspace.status_code, status.HTTP_200_OK)
+		self.assertEqual(len(staff_workspace.data['businesses']), 1)
+		staff_summary = staff_workspace.data['businesses'][0]
+		self.assertEqual(staff_summary['transfer_requests']['by_status'][TransferRequest.STATUS_FULFILLED], 1)
+		self.assertEqual(staff_summary['stock']['storefront_on_hand'], 3)
+		self.assertEqual(staff_summary['transfers']['by_status'][Transfer.STATUS_COMPLETED], 1)
+		self.assertEqual(len(staff_workspace.data['incoming_transfers']), 1)
+		self.assertEqual(staff_workspace.data['incoming_transfers'][0]['status'], Transfer.STATUS_COMPLETED)
+		self.assertEqual(staff_workspace.data['incoming_transfers'][0]['reference'], transfer_response.data['reference'])
+		self.assertEqual(staff_workspace.data['my_transfer_requests'][0]['status'], TransferRequest.STATUS_FULFILLED)
+
+	def test_manager_can_cancel_request(self):
+		request_data = self._create_request(quantity=6)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		cancel_response = self.client.post(f'/inventory/api/transfer-requests/{request_id}/cancel/', format='json')
+		self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(cancel_response.data['status'], TransferRequest.STATUS_CANCELLED)
+
+		transfer_request = TransferRequest.objects.get(id=request_id)
+		self.assertEqual(transfer_request.status, TransferRequest.STATUS_CANCELLED)
+		self.assertIsNone(transfer_request.linked_transfer_id)
 

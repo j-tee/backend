@@ -26,10 +26,13 @@ from inventory.models import (
     StockAlert,
     StoreFront,
     StoreFrontEmployee,
+    StoreFrontInventory,
     Warehouse,
     WarehouseEmployee,
     Product,
     Transfer,
+    TransferLineItem,
+    TransferAuditEntry,
 )
 from sales.models import (
     CreditTransaction,
@@ -654,24 +657,57 @@ class Command(BaseCommand):
         # pick first product entry
         product_entry = next(iter(inventory_map[source_warehouse.id].values()))
         stock = product_entry["stock"]
-        quantity = min(10, product_entry["available_quantity"])
+        product = stock.product
+        quantity = max(1, min(10, product_entry["available_quantity"]))
 
-        Transfer.objects.get_or_create(
-            product=stock.product,
-            stock=stock,
-            from_warehouse=source_warehouse,
-            to_storefront=target_storefront,
-            defaults={
-                "quantity": quantity,
-                "status": "COMPLETED",
-                "requested_by": owner,
-                "approved_by": owner,
-                "note": "Demo transfer for seeded data",
-            },
+        now = timezone.now()
+        submitted_at = now - timedelta(days=2)
+        approved_at = submitted_at + timedelta(hours=4)
+        dispatched_at = approved_at + timedelta(hours=6)
+        completed_at = dispatched_at + timedelta(hours=12)
+
+        transfer = Transfer.objects.create(
+            business=business,
+            source_warehouse=source_warehouse,
+            destination_storefront=target_storefront,
+            status=Transfer.STATUS_COMPLETED,
+            notes="Demo transfer for seeded data",
+            requested_by=owner,
+            approved_by=owner,
+            fulfilled_by=owner,
+            submitted_at=submitted_at,
+            approved_at=approved_at,
+            dispatched_at=dispatched_at,
+            completed_at=completed_at,
         )
 
+        TransferLineItem.objects.create(
+            transfer=transfer,
+            product=product,
+            requested_quantity=quantity,
+            approved_quantity=quantity,
+            fulfilled_quantity=quantity,
+        )
+
+        transfer.add_audit(TransferAuditEntry.ACTION_CREATED, owner, "Seeded transfer")
+        transfer.add_audit(TransferAuditEntry.ACTION_COMPLETED, owner, "Seeded transfer")
+
+        inventory_entry = product_entry["inventory"]
+        inventory_entry.quantity = max(0, inventory_entry.quantity - quantity)
+        inventory_entry.save()
+
+        product_entry["available_quantity"] = max(0, product_entry["available_quantity"] - quantity)
+
+        storefront_inventory, _ = StoreFrontInventory.objects.get_or_create(
+            storefront=target_storefront,
+            product=product,
+            defaults={"quantity": 0},
+        )
+        storefront_inventory.quantity += quantity
+        storefront_inventory.save()
+
         StockAlert.objects.get_or_create(
-            product=stock.product,
+            product=product,
             warehouse=source_warehouse,
             alert_type="LOW_STOCK",
             defaults={

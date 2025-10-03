@@ -9,6 +9,14 @@ from rest_framework import status
 from rest_framework.authtoken.models import Token
 from unittest.mock import patch
 from .models import Role, UserProfile, AuditLog, Business, BusinessMembership, BusinessInvitation
+from inventory.models import (
+    Warehouse,
+    StoreFront,
+    BusinessWarehouse,
+    BusinessStoreFront,
+    StoreFrontEmployee,
+    WarehouseEmployee,
+)
 from .signals import ensure_default_roles, promote_platform_owner
 from .utils import log_user_action, track_model_changes
 
@@ -383,6 +391,85 @@ class AuthenticationAPITest(APITestCase):
         self.assertEqual(employment['role'], BusinessMembership.STAFF)
         self.assertEqual(employment['business']['id'], str(business.id))
         self.assertEqual(employment['business']['name'], business.name)
+
+    def test_login_employee_includes_location_assignments(self):
+        owner = User.objects.create_user(
+            email='owner@example.com',
+            password='ownerpass123',
+            name='Owner User',
+            account_type=User.ACCOUNT_OWNER,
+            email_verified=True,
+        )
+
+        business = Business.objects.create(
+            owner=owner,
+            name='Assignment Biz',
+            tin='TIN-ASSIGN-001',
+            email='biz@example.com',
+            address='123 Market Street',
+            phone_numbers=['+233123456789'],
+        )
+
+        warehouse = Warehouse.objects.create(
+            name='Central Warehouse',
+            location='Industrial Zone',
+            manager=owner,
+        )
+        BusinessWarehouse.objects.create(business=business, warehouse=warehouse)
+
+        storefront = StoreFront.objects.create(
+            user=owner,
+            name='Downtown Store',
+            location='Central Avenue',
+            manager=owner,
+        )
+        BusinessStoreFront.objects.create(business=business, storefront=storefront)
+
+        employee = User.objects.create_user(
+            email='employee@example.com',
+            password='employeepass123',
+            name='Employee User',
+            account_type=User.ACCOUNT_EMPLOYEE,
+            email_verified=True,
+        )
+
+        membership = BusinessMembership.objects.create(
+            business=business,
+            user=employee,
+            role=BusinessMembership.STAFF,
+            is_admin=False,
+            is_active=True,
+        )
+
+        StoreFrontEmployee.objects.create(
+            business=business,
+            storefront=storefront,
+            user=employee,
+            role=membership.role,
+            is_active=True,
+        )
+        WarehouseEmployee.objects.create(
+            business=business,
+            warehouse=warehouse,
+            user=employee,
+            role=membership.role,
+            is_active=True,
+        )
+
+        login_data = {
+            'email': 'employee@example.com',
+            'password': 'employeepass123',
+        }
+        response = self.client.post('/accounts/api/auth/login/', login_data)
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        employment = response.data['employment']
+        self.assertEqual(len(employment['storefronts']), 1)
+        self.assertEqual(employment['storefronts'][0]['id'], str(storefront.id))
+        self.assertEqual(employment['storefronts'][0]['name'], storefront.name)
+        self.assertEqual(len(employment['warehouses']), 1)
+        self.assertEqual(employment['warehouses'][0]['id'], str(warehouse.id))
+        self.assertEqual(employment['warehouses'][0]['name'], warehouse.name)
 
     def test_login_employee_prefers_most_recent_membership(self):
         owner = User.objects.create_user(

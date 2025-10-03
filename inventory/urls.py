@@ -3,11 +3,13 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CategoryViewSet, WarehouseViewSet, StoreFrontViewSet,
     ProductViewSet, StockViewSet, StockProductViewSet, SupplierViewSet, InventoryViewSet, TransferViewSet,
+    TransferRequestViewSet,
     StockAlertViewSet, BusinessWarehouseViewSet, BusinessStoreFrontViewSet,
     StoreFrontEmployeeViewSet, WarehouseEmployeeViewSet,
-    InventorySummaryView, StockArrivalReportView, OwnerWorkspaceView, ProfitProjectionViewSet,
+    InventorySummaryView, StockArrivalReportView, EmployeeWorkspaceView, OwnerWorkspaceView, ProfitProjectionViewSet,
     BusinessInvitationListCreateView, BusinessInvitationResendView, BusinessInvitationRevokeView,
     BusinessMembershipListView, BusinessMembershipDetailView, BusinessMembershipStorefrontAssignmentView,
+    StockAvailabilityView,
 )
 
 router = DefaultRouter()
@@ -19,6 +21,7 @@ router.register(r'stock', StockViewSet)
 router.register(r'stock-products', StockProductViewSet)
 router.register(r'inventory', InventoryViewSet)
 router.register(r'transfers', TransferViewSet)
+router.register(r'transfer-requests', TransferRequestViewSet)
 router.register(r'stock-alerts', StockAlertViewSet)
 router.register(r'business-warehouses', BusinessWarehouseViewSet)
 router.register(r'business-storefronts', BusinessStoreFrontViewSet)
@@ -28,6 +31,7 @@ router.register(r'profit-projections', ProfitProjectionViewSet, basename='profit
 router.register(r'suppliers', SupplierViewSet)
 
 urlpatterns = [
+    path('api/stock/availability/', StockAvailabilityView.as_view(), name='stock-availability'),
     path('api/', include(router.urls)),
     path(
         'api/businesses/<uuid:business_id>/invitations/',
@@ -61,5 +65,6 @@ urlpatterns = [
     ),
     path('api/reports/inventory-summary/', InventorySummaryView.as_view(), name='inventory-summary'),
     path('api/reports/stock-arrivals/', StockArrivalReportView.as_view(), name='stock-arrivals'),
+    path('api/employee/workspace/', EmployeeWorkspaceView.as_view(), name='employee-workspace'),
     path('api/owner/workspace/', OwnerWorkspaceView.as_view(), name='owner-workspace'),
 ]
