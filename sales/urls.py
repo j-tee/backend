@@ -2,21 +2,18 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
     CustomerViewSet, SaleViewSet, SaleItemViewSet, PaymentViewSet,
-    RefundViewSet, RefundItemViewSet, CreditTransactionViewSet,
-    SalesReportView, CustomerCreditReportView
+    RefundViewSet, CreditTransactionViewSet, AuditLogViewSet
 )
 
 router = DefaultRouter()
-router.register(r'customers', CustomerViewSet)
-router.register(r'sales', SaleViewSet)
-router.register(r'sale-items', SaleItemViewSet)
-router.register(r'payments', PaymentViewSet)
-router.register(r'refunds', RefundViewSet)
-router.register(r'refund-items', RefundItemViewSet)
-router.register(r'credit-transactions', CreditTransactionViewSet)
+router.register(r'customers', CustomerViewSet, basename='customer')
+router.register(r'sales', SaleViewSet, basename='sale')
+router.register(r'sale-items', SaleItemViewSet, basename='saleitem')
+router.register(r'payments', PaymentViewSet, basename='payment')
+router.register(r'refunds', RefundViewSet, basename='refund')
+router.register(r'credit-transactions', CreditTransactionViewSet, basename='credittransaction')
+router.register(r'audit-logs', AuditLogViewSet, basename='auditlog')
 
 urlpatterns = [
-    path('api/', include(router.urls)),
-    path('api/reports/sales/', SalesReportView.as_view(), name='sales-report'),
-    path('api/reports/customer-credit/', CustomerCreditReportView.as_view(), name='customer-credit-report'),
+    path('', include(router.urls)),
 ]
