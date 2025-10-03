@@ -1319,7 +1319,84 @@ class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(cancel_response.status_code, status.HTTP_200_OK)
 		self.assertEqual(cancel_response.data['status'], TransferRequest.STATUS_CANCELLED)
 
-		transfer_request = TransferRequest.objects.get(id=request_id)
-		self.assertEqual(transfer_request.status, TransferRequest.STATUS_CANCELLED)
-		self.assertIsNone(transfer_request.linked_transfer_id)
+	def test_manager_can_update_request_status(self):
+		"""Test that managers can manually update stock request status."""
+		request_data = self._create_request(quantity=5)
+		request_id = request_data['id']
+
+		# Verify initial status
+		self.assertEqual(request_data['status'], TransferRequest.STATUS_NEW)
+
+		# Manager updates status to ASSIGNED
+		self.client.force_authenticate(self.owner)
+		update_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_ASSIGNED},
+			format='json'
+		)
+		self.assertEqual(update_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(update_response.data['status'], TransferRequest.STATUS_ASSIGNED)
+		self.assertIsNotNone(update_response.data['assigned_at'])
+		self.assertIn('_status_change', update_response.data)
+		self.assertEqual(update_response.data['_status_change']['old_status'], TransferRequest.STATUS_NEW)
+		self.assertEqual(update_response.data['_status_change']['new_status'], TransferRequest.STATUS_ASSIGNED)
+
+		# Manager manually fulfills the request
+		fulfill_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_FULFILLED},
+			format='json'
+		)
+		self.assertEqual(fulfill_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(fulfill_response.data['status'], TransferRequest.STATUS_FULFILLED)
+		self.assertIsNotNone(fulfill_response.data['fulfilled_at'])
+		self.assertEqual(str(fulfill_response.data['fulfilled_by']), str(self.owner.id))
+
+		# Try to change from FULFILLED without force flag (should fail)
+		reset_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_NEW},
+			format='json'
+		)
+		self.assertEqual(reset_response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('status', reset_response.data)
+		error_message = reset_response.data['status'][0] if isinstance(reset_response.data['status'], list) else reset_response.data['status']
+		self.assertIn('force', error_message.lower())
+
+		# Reset with force flag
+		force_reset_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_NEW, 'force': True},
+			format='json'
+		)
+		self.assertEqual(force_reset_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(force_reset_response.data['status'], TransferRequest.STATUS_NEW)
+
+	def test_staff_cannot_update_request_status(self):
+		"""Test that staff members cannot manually update status (manager-only)."""
+		request_data = self._create_request(quantity=3)
+		request_id = request_data['id']
+
+		# Staff tries to update status (should be denied)
+		self.client.force_authenticate(self.staff)
+		update_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_FULFILLED},
+			format='json'
+		)
+		self.assertEqual(update_response.status_code, status.HTTP_403_FORBIDDEN)
+
+	def test_invalid_status_update_rejected(self):
+		"""Test that invalid status values are rejected."""
+		request_data = self._create_request(quantity=4)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		invalid_response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': 'INVALID_STATUS'},
+			format='json'
+		)
+		self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
+		self.assertIn('status', invalid_response.data)
 

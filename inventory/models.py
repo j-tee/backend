@@ -992,7 +992,7 @@ class TransferRequestLineItem(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.product.name} x{self.requested_quantity} (request)"
+        return f"{self.product.name} x{self.requested_quantity}"
 
     def clean(self):
         if self.requested_quantity <= 0:

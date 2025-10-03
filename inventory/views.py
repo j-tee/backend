@@ -981,10 +981,14 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
     def perform_update(self, serializer):
         instance = self.get_object()
         user = self.request.user
+        
+        # Staff can only edit their own NEW requests
         if user == instance.requested_by and instance.status == TransferRequest.STATUS_NEW:
             self._ensure_membership(instance.business)
         else:
+            # Managers can edit any request, including FULFILLED ones
             self._ensure_membership(instance.business, allowed_roles=self._manager_roles())
+        
         serializer.save()
 
     def destroy(self, request, *args, **kwargs):
@@ -1025,6 +1029,75 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         transfer_request.mark_fulfilled(request.user)
         transfer_request.refresh_from_db()
         return Response(self.get_serializer(transfer_request).data, status=status.HTTP_200_OK)
+
+    @action(detail=True, methods=['post'], url_path='update-status')
+    def update_status(self, request, pk=None):
+        """Allow managers to manually update stock request status when needed."""
+        transfer_request = self.get_object()
+        self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
+        
+        new_status = request.data.get('status')
+        if not new_status:
+            raise ValidationError({'status': 'This field is required.'})
+        
+        valid_statuses = {
+            TransferRequest.STATUS_NEW,
+            TransferRequest.STATUS_ASSIGNED,
+            TransferRequest.STATUS_FULFILLED,
+            TransferRequest.STATUS_CANCELLED,
+        }
+        
+        if new_status not in valid_statuses:
+            raise ValidationError({
+                'status': f'Invalid status. Must be one of: {", ".join(valid_statuses)}'
+            })
+        
+        # Prevent moving from terminal states unless explicitly clearing them
+        if transfer_request.status == TransferRequest.STATUS_FULFILLED and new_status != TransferRequest.STATUS_FULFILLED:
+            if not request.data.get('force', False):
+                raise ValidationError({
+                    'status': 'Cannot change status from FULFILLED. Use force=true to override.'
+                })
+        
+        old_status = transfer_request.status
+        
+        # Handle status-specific logic
+        if new_status == TransferRequest.STATUS_CANCELLED:
+            transfer_request.mark_cancelled(request.user)
+        elif new_status == TransferRequest.STATUS_FULFILLED:
+            # Allow manual fulfillment override
+            if transfer_request.status != TransferRequest.STATUS_FULFILLED:
+                transfer_request.status = TransferRequest.STATUS_FULFILLED
+                transfer_request.fulfilled_at = timezone.now()
+                transfer_request.fulfilled_by = request.user
+                transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+        elif new_status == TransferRequest.STATUS_NEW:
+            # Reset to NEW (clear assignment)
+            transfer_request.clear_assignment()
+            if transfer_request.status != TransferRequest.STATUS_NEW:
+                transfer_request.status = TransferRequest.STATUS_NEW
+                transfer_request.save(update_fields=['status', 'updated_at'])
+        elif new_status == TransferRequest.STATUS_ASSIGNED:
+            # Managers can mark as assigned without a transfer link (manual override)
+            if transfer_request.status != TransferRequest.STATUS_ASSIGNED:
+                transfer_request.status = TransferRequest.STATUS_ASSIGNED
+                if not transfer_request.assigned_at:
+                    transfer_request.assigned_at = timezone.now()
+                transfer_request.save(update_fields=['status', 'assigned_at', 'updated_at'])
+        
+        transfer_request.refresh_from_db()
+        
+        return Response(
+            {
+                **self.get_serializer(transfer_request).data,
+                '_status_change': {
+                    'old_status': old_status,
+                    'new_status': transfer_request.status,
+                    'changed_by': request.user.name if hasattr(request.user, 'name') else str(request.user),
+                }
+            },
+            status=status.HTTP_200_OK
+        )
 
 class StockAvailabilityView(APIView):
     permission_classes = [permissions.IsAuthenticated]

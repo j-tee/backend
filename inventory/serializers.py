@@ -230,29 +230,34 @@ class TransferRequestLineItemSerializer(serializers.ModelSerializer):
 class TransferRequestSerializer(serializers.ModelSerializer):
     storefront_name = serializers.CharField(source='storefront.name', read_only=True)
     requested_by_name = serializers.CharField(source='requested_by.name', read_only=True)
+    cancelled_by_name = serializers.CharField(source='cancelled_by.name', read_only=True, allow_null=True)
     linked_transfer = serializers.UUIDField(source='linked_transfer_id', allow_null=True, required=False)
     line_items = TransferRequestLineItemSerializer(many=True)
 
     class Meta:
         model = TransferRequest
         fields = [
-            'id', 'business', 'storefront', 'storefront_name', 'requested_by', 'requested_by_name',
+            'id', 'business', 'storefront', 'storefront_name',
+            'requested_by', 'requested_by_name',
             'priority', 'status', 'notes', 'linked_transfer', 'linked_transfer_reference',
-            'assigned_at', 'fulfilled_at', 'fulfilled_by', 'cancelled_at', 'cancelled_by',
+            'assigned_at', 'fulfilled_at', 'fulfilled_by', 'cancelled_at', 'cancelled_by', 'cancelled_by_name',
             'created_at', 'updated_at', 'line_items'
         ]
         read_only_fields = [
-            'id', 'business', 'requested_by', 'requested_by_name', 'status', 'linked_transfer_reference',
-            'assigned_at', 'fulfilled_at', 'fulfilled_by', 'cancelled_at', 'cancelled_by', 'created_at', 'updated_at'
+            'id', 'business', 'requested_by', 'requested_by_name', 'cancelled_by_name', 'status',
+            'linked_transfer_reference', 'assigned_at', 'fulfilled_at', 'fulfilled_by',
+            'cancelled_at', 'cancelled_by', 'created_at', 'updated_at'
         ]
 
     def validate(self, attrs):
         storefront = attrs.get('storefront') or getattr(self.instance, 'storefront', None)
+
         if storefront:
             link = getattr(storefront, 'business_link', None)
             if not link:
                 raise serializers.ValidationError({'storefront': 'Storefront must belong to an active business.'})
             attrs['business'] = link.business
+
         return super().validate(attrs)
 
     def _sync_line_items(self, request: TransferRequest, line_items_data):
