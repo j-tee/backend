@@ -310,6 +310,25 @@ class StockProduct(models.Model):
         """Expected total profit if all units sold at retail price"""
         return self.expected_profit_amount * self.quantity
 
+    def get_available_quantity(self) -> Decimal:
+        """
+        Get available quantity considering active reservations
+        
+        Returns:
+            Decimal: Quantity available for new reservations/sales
+        """
+        from django.db.models import Sum
+        
+        # Get total reserved quantity
+        reserved = self.reservations.filter(
+            status='ACTIVE'
+        ).aggregate(
+            total=Sum('quantity')
+        )['total'] or Decimal('0.00')
+        
+        available = Decimal(str(self.quantity)) - reserved
+        return max(Decimal('0.00'), available)
+    
     def get_expected_profit_scenarios(self) -> dict:
         """
         Calculate expected profit projections for different sales scenarios.
