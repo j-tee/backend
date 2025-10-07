@@ -113,10 +113,47 @@ class User(AbstractBaseUser, PermissionsMixin):
     
     class Meta:
         db_table = 'users'
-        ordering = ['-created_at']
-    
+        ordering = ['name']
+
     def __str__(self):
         return f"{self.name} ({self.email})"
+    
+    def get_accessible_storefronts(self):
+        """Return QuerySet of storefronts user can access based on role and assignments."""
+        from inventory.models import StoreFront, StoreFrontEmployee, BusinessStoreFront
+        
+        # Super admins can access all storefronts
+        if self.is_superuser or self.platform_role == self.PLATFORM_SUPER_ADMIN:
+            return StoreFront.objects.all()
+        
+        # Get user's active business membership
+        membership = self.business_memberships.filter(is_active=True).first()
+        if not membership:
+            return StoreFront.objects.none()
+        
+        business = membership.business
+        
+        # Business owners and admins can access all business storefronts
+        if membership.role in [BusinessMembership.OWNER, BusinessMembership.ADMIN]:
+            # Get all storefronts for this business
+            business_storefronts = BusinessStoreFront.objects.filter(
+                business=business,
+                is_active=True
+            ).values_list('storefront', flat=True)
+            return StoreFront.objects.filter(id__in=business_storefronts)
+        
+        # Managers and staff see their assigned storefronts
+        assigned_storefronts = StoreFrontEmployee.objects.filter(
+            user=self,
+            business=business,
+            is_active=True
+        ).values_list('storefront', flat=True)
+        
+        return StoreFront.objects.filter(id__in=assigned_storefronts)
+    
+    def can_access_storefront(self, storefront_id):
+        """Check if user can access a specific storefront."""
+        return self.get_accessible_storefronts().filter(id=storefront_id).exists()
     
     def has_role(self, role_name):
         """Check if user has a specific role"""

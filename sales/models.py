@@ -300,7 +300,7 @@ class Sale(models.Model):
     customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='sales')
     
     # Sale identification
-    receipt_number = models.CharField(max_length=100, unique=True, db_index=True)
+    receipt_number = models.CharField(max_length=100, unique=True, db_index=True, null=True, blank=True)
     
     # Sale type and status
     type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='RETAIL')
@@ -474,6 +474,10 @@ class Sale(models.Model):
             if not self.sale_items.exists():
                 raise ValidationError("Cannot complete sale without items")
             
+            # Generate receipt number if not set
+            if not self.receipt_number:
+                self.receipt_number = self.generate_receipt_number()
+            
             # Commit stock
             self.commit_stock()
             
@@ -499,9 +503,7 @@ class Sale(models.Model):
                 )
     
     def save(self, *args, **kwargs):
-        """Generate receipt number if not set"""
-        if not self.receipt_number:
-            self.receipt_number = self.generate_receipt_number()
+        """Override save - receipt number only generated on completion"""
         super().save(*args, **kwargs)
 
 
@@ -900,7 +902,8 @@ class AuditLog(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save to make audit logs immutable after creation"""
-        if self.pk:
+        # Check if this is an update (record exists in DB)
+        if self.pk and AuditLog.objects.filter(pk=self.pk).exists():
             raise ValidationError("Audit logs cannot be modified")
         super().save(*args, **kwargs)
     

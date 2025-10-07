@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     'bookkeeping',
     'subscriptions',
     'reports',
+    'settings.apps.SettingsConfig',
 ]
 
 MIDDLEWARE = [

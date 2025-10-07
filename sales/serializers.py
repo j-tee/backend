@@ -20,7 +20,8 @@ class CustomerSerializer(serializers.ModelSerializer):
     available_credit = serializers.DecimalField(
         max_digits=12, 
         decimal_places=2, 
-        read_only=True
+        read_only=True,
+        coerce_to_string=False
     )
     overdue_balance = serializers.SerializerMethodField()
     
@@ -52,42 +53,85 @@ class CustomerSerializer(serializers.ModelSerializer):
 
 class SaleItemSerializer(serializers.ModelSerializer):
     """Serializer for SaleItem model"""
-    product_name = serializers.CharField(read_only=True)
-    product_sku = serializers.CharField(read_only=True)
-    base_amount = serializers.DecimalField(
-        max_digits=12, 
-        decimal_places=2, 
-        read_only=True
+    product_name = serializers.CharField(source='product.name', read_only=True)
+    product_sku = serializers.CharField(source='product.sku', read_only=True)
+    product_category = serializers.CharField(source='product.category.name', read_only=True, allow_null=True)
+    
+    # ✅ FIX: Return numeric fields as numbers, not strings
+    quantity = serializers.DecimalField(
+        max_digits=10, 
+        decimal_places=2,
+        coerce_to_string=False  # Return as number for frontend
     )
-    gross_amount = serializers.DecimalField(
-        max_digits=12, 
-        decimal_places=2, 
-        read_only=True
+    unit_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
     )
-    profit_amount = serializers.DecimalField(
-        max_digits=12, 
-        decimal_places=2, 
-        read_only=True
+    discount_percentage = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    discount_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    subtotal = serializers.DecimalField(
+        source='base_amount',
+        max_digits=12,
+        decimal_places=2,
+        read_only=True,
+        coerce_to_string=False
+    )
+    tax_rate = serializers.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    tax_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    total_price = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
     )
     profit_margin = serializers.DecimalField(
-        max_digits=5, 
-        decimal_places=2, 
-        read_only=True
+        max_digits=5,
+        decimal_places=2,
+        allow_null=True,
+        coerce_to_string=False
     )
+    
+    cost_price = serializers.SerializerMethodField()
+    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
     
     class Meta:
         model = SaleItem
         fields = [
             'id', 'sale', 'product', 'stock', 'stock_product',
+            'product_name', 'product_sku', 'product_category',
             'quantity', 'unit_price', 'discount_percentage', 'discount_amount',
-            'tax_rate', 'tax_amount', 'total_price', 'product_name',
-            'product_sku', 'base_amount', 'gross_amount', 'profit_amount',
-            'profit_margin', 'created_at', 'updated_at'
+            'subtotal', 'tax_rate', 'tax_amount', 'total_price',
+            'cost_price', 'profit_margin', 'notes',
+            'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'total_price', 'product_name', 'product_sku',
             'tax_amount', 'created_at', 'updated_at'
         ]
+    
+    def get_cost_price(self, obj):
+        """Get cost price from stock_product or return None"""
+        if obj.stock_product:
+            cost = obj.stock_product.unit_cost
+            # Convert Decimal to float for JSON serialization
+            return float(cost) if cost is not None else None
+        return None
     
     def validate(self, data):
         """Validate sale item"""
@@ -120,12 +164,114 @@ class SaleItemSerializer(serializers.ModelSerializer):
         return data
 
 
+class PaymentSerializer(serializers.ModelSerializer):
+    """Serializer for Payment model"""
+    transaction_reference = serializers.CharField(source='transaction_id', read_only=True, allow_null=True)
+    phone_number = serializers.SerializerMethodField()
+    card_last_4 = serializers.SerializerMethodField()
+    card_brand = serializers.SerializerMethodField()
+    processed_at = serializers.DateTimeField(source='payment_date', read_only=True, allow_null=True)
+    failed_at = serializers.SerializerMethodField()
+    error_message = serializers.SerializerMethodField()
+    
+    # ✅ FIX: Return amount_paid as number
+    amount_paid = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    
+    class Meta:
+        model = Payment
+        fields = [
+            'id', 'sale', 'customer', 'payment_method', 'amount_paid',
+            'status', 'transaction_reference', 'phone_number',
+            'card_last_4', 'card_brand', 'notes',
+            'created_at', 'processed_at', 'failed_at', 'error_message'
+        ]
+        read_only_fields = ['id', 'created_at']
+    
+    def get_phone_number(self, obj):
+        """Extract phone number for mobile money payments"""
+        if obj.payment_method == 'MOBILE' and obj.reference_number:
+            # Assuming reference_number contains phone for mobile payments
+            return obj.reference_number
+        return None
+    
+    def get_card_last_4(self, obj):
+        """Extract last 4 digits for card payments"""
+        if obj.payment_method == 'CARD' and obj.reference_number:
+            # Assuming reference_number contains card info
+            parts = obj.reference_number.split('_')
+            if len(parts) > 1:
+                return parts[-1][-4:] if len(parts[-1]) >= 4 else None
+        return None
+    
+    def get_card_brand(self, obj):
+        """Extract card brand for card payments"""
+        if obj.payment_method == 'CARD' and obj.reference_number:
+            # Assuming reference_number contains brand info
+            parts = obj.reference_number.split('_')
+            if len(parts) > 0:
+                return parts[0].upper() if parts[0] in ['visa', 'mastercard', 'amex'] else None
+        return None
+    
+    def get_failed_at(self, obj):
+        """Return timestamp if payment failed"""
+        if obj.status == 'FAILED':
+            return obj.updated_at
+        return None
+    
+    def get_error_message(self, obj):
+        """Return error message if payment failed"""
+        if obj.status == 'FAILED' and obj.notes:
+            return obj.notes
+        return None
+
+
 class SaleSerializer(serializers.ModelSerializer):
     """Serializer for Sale model"""
-    sale_items = SaleItemSerializer(many=True, read_only=True)
+    line_items = SaleItemSerializer(many=True, read_only=True, source='sale_items')
+    payments = PaymentSerializer(many=True, read_only=True)
     storefront_name = serializers.CharField(source='storefront.name', read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True, allow_null=True)
-    user_name = serializers.CharField(source='user.name', read_only=True, allow_null=True)
+    user_name = serializers.SerializerMethodField()
+    
+    # ✅ FIX: Return monetary amounts as numbers
+    subtotal = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    discount_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    tax_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    total_amount = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    amount_paid = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    amount_due = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
+    
+    # Credit payment tracking fields
+    payment_status = serializers.SerializerMethodField()
+    payment_completion_percentage = serializers.SerializerMethodField()
     
     class Meta:
         model = Sale
@@ -135,20 +281,56 @@ class SaleSerializer(serializers.ModelSerializer):
             'subtotal', 'discount_amount', 'tax_amount', 'total_amount',
             'amount_paid', 'amount_due', 'payment_type', 'manager_override',
             'override_reason', 'override_by', 'notes', 'cart_session_id',
-            'created_at', 'updated_at', 'completed_at', 'sale_items'
+            'created_at', 'updated_at', 'completed_at', 'line_items', 'payments',
+            'payment_status', 'payment_completion_percentage'
         ]
         read_only_fields = [
             'id', 'receipt_number', 'subtotal', 'total_amount', 'amount_due',
             'created_at', 'updated_at', 'completed_at'
         ]
     
+    def get_user_name(self, obj):
+        """Get user name"""
+        if obj.user:
+            return obj.user.name if hasattr(obj.user, 'name') else str(obj.user)
+        return None
+    
+    def get_payment_status(self, obj):
+        """
+        Return user-friendly payment status for credit sales
+        """
+        if obj.payment_type != 'CREDIT':
+            return None  # Not applicable for non-credit sales
+        
+        if obj.amount_due == Decimal('0.00'):
+            return 'Fully Paid'
+        elif obj.amount_paid > Decimal('0.00'):
+            return f'Partially Paid ({obj.amount_paid}/{obj.total_amount})'
+        else:
+            return 'Unpaid'
+    
+    def get_payment_completion_percentage(self, obj):
+        """
+        Calculate payment completion percentage
+        """
+        if obj.total_amount == Decimal('0.00'):
+            return 100.0
+        
+        percentage = (obj.amount_paid / obj.total_amount) * Decimal('100.0')
+        return round(float(percentage), 2)
+    
     def validate(self, data):
         """Validate sale data"""
-        # Ensure business is set from request user if not provided
+        # Ensure business is set from request user's BusinessMembership if not provided
         request = self.context.get('request')
         if request and not data.get('business'):
-            if hasattr(request.user, 'business'):
-                data['business'] = request.user.business
+            from accounts.models import BusinessMembership
+            membership = BusinessMembership.objects.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            if membership:
+                data['business'] = membership.business
         
         # Ensure user is set from request if not provided
         if request and not data.get('user'):
@@ -188,19 +370,26 @@ class SaleSerializer(serializers.ModelSerializer):
         # Log creation
         request = self.context.get('request')
         if request:
-            AuditLog.log_event(
-                event_type='sale.created',
-                user=request.user,
-                sale=sale,
-                event_data={
-                    'receipt_number': sale.receipt_number,
-                    'type': sale.type,
-                    'payment_type': sale.payment_type
-                },
-                description=f'Sale {sale.receipt_number} created',
-                ip_address=request.META.get('REMOTE_ADDR'),
-                user_agent=request.META.get('HTTP_USER_AGENT')
-            )
+            try:
+                AuditLog.log_event(
+                    event_type='sale.created',
+                    user=request.user,
+                    sale=sale,
+                    event_data={
+                        'sale_id': str(sale.id),
+                        'type': sale.type,
+                        'payment_type': sale.payment_type,
+                        'status': sale.status
+                    },
+                    description=f'Sale {sale.id} created as {sale.status}',
+                    ip_address=request.META.get('REMOTE_ADDR'),
+                    user_agent=request.META.get('HTTP_USER_AGENT')
+                )
+            except Exception as e:
+                # Log the error but don't fail the sale creation
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Failed to create audit log: {e}")
         
         return sale
 
@@ -217,21 +406,6 @@ class StockReservationSerializer(serializers.ModelSerializer):
             'released_at'
         ]
         read_only_fields = ['id', 'status', 'created_at', 'expires_at', 'released_at']
-
-
-class PaymentSerializer(serializers.ModelSerializer):
-    """Serializer for Payment model"""
-    customer_name = serializers.CharField(source='customer.name', read_only=True)
-    
-    class Meta:
-        model = Payment
-        fields = [
-            'id', 'sale', 'customer', 'customer_name', 'amount_paid',
-            'payment_date', 'payment_method', 'status', 'transaction_id',
-            'reference_number', 'processed_by', 'notes', 'created_at',
-            'updated_at'
-        ]
-        read_only_fields = ['id', 'payment_date', 'created_at', 'updated_at']
 
 
 class RefundItemSerializer(serializers.ModelSerializer):
@@ -340,6 +514,25 @@ class CompleteSaleSerializer(serializers.Serializer):
         min_value=Decimal('0')
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class RecordPaymentSerializer(serializers.Serializer):
+    """Serializer for recording a payment against a sale"""
+    amount_paid = serializers.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        min_value=Decimal('0.01')
+    )
+    payment_method = serializers.ChoiceField(choices=Payment.PAYMENT_METHOD_CHOICES)
+    reference_number = serializers.CharField(
+        max_length=100,
+        required=False,
+        allow_blank=True
+    )
+    notes = serializers.CharField(
+        required=False,
+        allow_blank=True
+    )
 
 
 class StockAvailabilitySerializer(serializers.Serializer):

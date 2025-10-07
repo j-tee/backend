@@ -15,5 +15,5 @@ router.register(r'credit-transactions', CreditTransactionViewSet, basename='cred
 router.register(r'audit-logs', AuditLogViewSet, basename='auditlog')
 
 urlpatterns = [
-    path('', include(router.urls)),
+    path('api/', include(router.urls)),
 ]

@@ -96,6 +96,7 @@ class Product(models.Model):
     business = models.ForeignKey(Business, on_delete=models.CASCADE, related_name='products')
     name = models.CharField(max_length=255)
     sku = models.CharField(max_length=100)
+    barcode = models.CharField(max_length=100, blank=True, null=True, db_index=True)  # Optional barcode
     description = models.TextField(blank=True, null=True)
     category = models.ForeignKey(Category, on_delete=models.PROTECT, related_name='products')
     unit = models.CharField(max_length=50, default='pcs')
@@ -106,9 +107,12 @@ class Product(models.Model):
     class Meta:
         db_table = 'products'
         ordering = ['name']
-        unique_together = ['business', 'sku']  # Prevent duplicate SKUs per business
+        unique_together = [
+            ['business', 'sku'],  # Prevent duplicate SKUs per business
+        ]
         indexes = [
             models.Index(fields=['business', 'sku']),
+            models.Index(fields=['business', 'barcode']),  # Index for barcode lookups
             models.Index(fields=['business', 'category', 'is_active']),
         ]
     
@@ -309,6 +313,56 @@ class StockProduct(models.Model):
     def expected_total_profit(self) -> Decimal:
         """Expected total profit if all units sold at retail price"""
         return self.expected_profit_amount * self.quantity
+    
+    def get_adjustment_summary(self):
+        """Get summary of all adjustments for this stock product"""
+        from django.db.models import Sum, Count
+        from .stock_adjustments import StockAdjustment
+        
+        adjustments = self.adjustments.filter(status='COMPLETED')
+        
+        summary = adjustments.aggregate(
+            total_adjustments=Count('id'),
+            total_increase=Sum('quantity', filter=models.Q(quantity__gt=0)),
+            total_decrease=Sum('quantity', filter=models.Q(quantity__lt=0)),
+            total_cost_impact=Sum('total_cost')
+        )
+        
+        # Get breakdown by type
+        by_type = adjustments.values('adjustment_type').annotate(
+            count=Count('id'),
+            total_quantity=Sum('quantity'),
+            total_cost=Sum('total_cost')
+        ).order_by('-total_cost')
+        
+        return {
+            'summary': summary,
+            'by_type': list(by_type)
+        }
+    
+    def get_shrinkage_total(self):
+        """Calculate total shrinkage (theft + loss + damage + spoilage)"""
+        from django.db.models import Sum
+        from .stock_adjustments import StockAdjustment
+        
+        shrinkage_types = ['THEFT', 'LOSS', 'DAMAGE', 'EXPIRED', 'SPOILAGE', 'WRITE_OFF']
+        
+        result = self.adjustments.filter(
+            status='COMPLETED',
+            adjustment_type__in=shrinkage_types
+        ).aggregate(
+            total_units=Sum('quantity'),
+            total_cost=Sum('total_cost')
+        )
+        
+        return {
+            'units': abs(result['total_units'] or 0),
+            'cost': result['total_cost'] or Decimal('0.00')
+        }
+    
+    def get_pending_adjustments(self):
+        """Get all pending adjustments that will affect this stock"""
+        return self.adjustments.filter(status__in=['PENDING', 'APPROVED']).order_by('-created_at')
 
     def get_available_quantity(self) -> Decimal:
         """

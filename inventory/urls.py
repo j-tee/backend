@@ -11,6 +11,13 @@ from .views import (
     BusinessMembershipListView, BusinessMembershipDetailView, BusinessMembershipStorefrontAssignmentView,
     StockAvailabilityView,
 )
+from .adjustment_views import (
+    StockAdjustmentViewSet,
+    StockAdjustmentPhotoViewSet,
+    StockAdjustmentDocumentViewSet,
+    StockCountViewSet,
+    StockCountItemViewSet,
+)
 
 router = DefaultRouter()
 router.register(r'categories', CategoryViewSet)
@@ -29,9 +36,17 @@ router.register(r'storefront-employees', StoreFrontEmployeeViewSet)
 router.register(r'warehouse-employees', WarehouseEmployeeViewSet)
 router.register(r'profit-projections', ProfitProjectionViewSet, basename='profit-projections')
 router.register(r'suppliers', SupplierViewSet)
+# Stock Adjustment endpoints
+router.register(r'stock-adjustments', StockAdjustmentViewSet, basename='stock-adjustments')
+router.register(r'adjustment-photos', StockAdjustmentPhotoViewSet, basename='adjustment-photos')
+router.register(r'adjustment-documents', StockAdjustmentDocumentViewSet, basename='adjustment-documents')
+router.register(r'stock-counts', StockCountViewSet, basename='stock-counts')
+router.register(r'stock-count-items', StockCountItemViewSet, basename='stock-count-items')
 
 urlpatterns = [
-    path('api/stock/availability/', StockAvailabilityView.as_view(), name='stock-availability'),
+    path('api/storefronts/<uuid:storefront_id>/stock-products/<uuid:product_id>/availability/', 
+         StockAvailabilityView.as_view(), 
+         name='stock-availability'),
     path('api/', include(router.urls)),
     path(
         'api/businesses/<uuid:business_id>/invitations/',

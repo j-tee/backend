@@ -132,6 +132,27 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(request.user)
         return Response(serializer.data)
     
+    @action(detail=False, methods=['get'])
+    def storefronts(self, request):
+        """Get user's accessible storefronts"""
+        user = request.user
+        storefronts = user.get_accessible_storefronts()
+        
+        data = [
+            {
+                'id': str(storefront.id),
+                'name': storefront.name,
+                'location': storefront.location,
+                'is_active': getattr(storefront, 'is_active', True),
+            }
+            for storefront in storefronts
+        ]
+        
+        return Response({
+            'storefronts': data,
+            'count': len(data)
+        })
+    
     @action(detail=True, methods=['post'])
     def activate(self, request, pk=None):
         """Activate a user account"""

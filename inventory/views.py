@@ -40,6 +40,13 @@ from .serializers import (
     BulkProfitProjectionSerializer, BulkProfitProjectionResponseSerializer
 )
 
+# Import StockReservation for availability calculation
+try:
+    from sales.models import StockReservation
+    SALES_APP_AVAILABLE = True
+except ImportError:
+    SALES_APP_AVAILABLE = False
+
 
 User = get_user_model()
 
@@ -315,7 +322,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
-    search_fields = ['name', 'sku']
+    search_fields = ['name', 'sku']  # General text search (name/SKU only)
     ordering_fields = ['name', 'sku', 'created_at', 'updated_at']
     ordering = ['name']  # Default ordering by name
 
@@ -329,6 +336,83 @@ class ProductViewSet(viewsets.ModelViewSet):
         if not business_ids:
             return queryset.none()
         return queryset.filter(business_id__in=business_ids)
+
+    @action(detail=False, methods=['get'], url_path='by-barcode/(?P<barcode>[^/.]+)')
+    def by_barcode(self, request, barcode=None):
+        """
+        Get product by BARCODE with available stock information
+        Optimized for POS barcode scanning
+        Only searches barcode field - separate from SKU
+        """
+        business_ids = _business_ids_for_user(request.user)
+        
+        # Find product by barcode (not SKU)
+        product = Product.objects.filter(
+            barcode=barcode,
+            business_id__in=business_ids,
+            is_active=True
+        ).select_related('category', 'business').first()
+        
+        if not product:
+            return Response(
+                {'detail': f'Product with barcode {barcode} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get available stock for this product
+        stock_products = StockProduct.objects.filter(
+            product=product,
+            quantity__gt=0
+        ).select_related('stock', 'supplier').order_by('-created_at')
+        
+        # Serialize data
+        product_data = ProductSerializer(product).data
+        stock_data = StockProductSerializer(stock_products, many=True).data
+        
+        return Response({
+            'product': product_data,
+            'stock_products': stock_data,
+            'has_stock': stock_products.exists(),
+            'total_quantity': sum(sp.quantity for sp in stock_products)
+        })
+
+    @action(detail=False, methods=['get'], url_path='by-sku/(?P<sku>[^/.]+)')
+    def by_sku(self, request, sku=None):
+        """
+        Get product by SKU with available stock information
+        Only searches SKU field - separate from barcode
+        """
+        business_ids = _business_ids_for_user(request.user)
+        
+        # Find product by SKU (not barcode)
+        product = Product.objects.filter(
+            sku=sku,
+            business_id__in=business_ids,
+            is_active=True
+        ).select_related('category', 'business').first()
+        
+        if not product:
+            return Response(
+                {'detail': f'Product with SKU {sku} not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get available stock for this product
+        stock_products = StockProduct.objects.filter(
+            product=product,
+            quantity__gt=0
+        ).select_related('stock', 'supplier').order_by('-created_at')
+        
+        # Serialize data
+        product_data = ProductSerializer(product).data
+        stock_data = StockProductSerializer(stock_products, many=True).data
+        
+        return Response({
+            'product': product_data,
+            'stock_products': stock_data,
+            'has_stock': stock_products.exists(),
+            'total_quantity': sum(sp.quantity for sp in stock_products)
+        })
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1958,3 +2042,104 @@ class ProfitProjectionViewSet(viewsets.ViewSet):
         ]
         
         return Response({'scenarios': scenarios}, status=status.HTTP_200_OK)
+
+
+class StockAvailabilityView(APIView):
+    """
+    Get detailed stock availability for a product at a storefront.
+    
+    Returns:
+    - total_available: Total quantity in all batches
+    - reserved_quantity: Quantity currently reserved in active carts
+    - unreserved_quantity: Available for new sales (total - reserved)
+    - batches: Array of all stock batches with prices
+    - reservations: Array of active reservations with cart info
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request, storefront_id, product_id):
+        try:
+            # Verify user has access to this storefront
+            storefront = get_object_or_404(StoreFront, id=storefront_id)
+            
+            # Check employment at this storefront
+            if not StoreFrontEmployee.objects.filter(
+                storefront=storefront,
+                user=request.user
+            ).exists():
+                return Response(
+                    {"detail": "You do not have access to this storefront."},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+            
+            # Get all batches for this product at this storefront
+            batches = StockProduct.objects.filter(
+                storefront_id=storefront_id,
+                product_id=product_id
+            ).order_by('-created_at')
+            
+            # Calculate total available
+            total_available = sum(batch.quantity for batch in batches)
+            
+            # Calculate reserved quantity (from active cart reservations)
+            reserved_quantity = 0
+            reservations_data = []
+            
+            if SALES_APP_AVAILABLE:
+                # Get active reservations for this product at this storefront
+                active_reservations = StockReservation.objects.filter(
+                    storefront_id=storefront_id,
+                    product_id=product_id,
+                    status='ACTIVE',
+                    expires_at__gt=timezone.now()
+                ).select_related('sale', 'sale__customer')
+                
+                reserved_quantity = active_reservations.aggregate(
+                    total=Sum('quantity')
+                )['total'] or 0
+                
+                # Build reservations array
+                for reservation in active_reservations:
+                    reservations_data.append({
+                        'id': str(reservation.id),
+                        'quantity': reservation.quantity,
+                        'sale_id': str(reservation.sale.id),
+                        'customer_name': reservation.sale.customer.name if reservation.sale.customer else None,
+                        'expires_at': reservation.expires_at.isoformat(),
+                        'created_at': reservation.created_at.isoformat()
+                    })
+            
+            # Calculate unreserved (available for new sales)
+            unreserved_quantity = max(0, total_available - reserved_quantity)
+            
+            # Build batches array with pricing
+            batches_data = []
+            for batch in batches:
+                batches_data.append({
+                    'id': str(batch.id),
+                    'batch_number': batch.batch_number,
+                    'quantity': batch.quantity,
+                    'retail_price': str(batch.retail_price),
+                    'wholesale_price': str(batch.wholesale_price) if batch.wholesale_price else None,
+                    'expiry_date': batch.expiry_date.isoformat() if batch.expiry_date else None,
+                    'created_at': batch.created_at.isoformat()
+                })
+            
+            return Response({
+                'total_available': total_available,
+                'reserved_quantity': reserved_quantity,
+                'unreserved_quantity': unreserved_quantity,
+                'batches': batches_data,
+                'reservations': reservations_data
+            }, status=status.HTTP_200_OK)
+            
+        except StoreFront.DoesNotExist:
+            return Response(
+                {"detail": "Storefront not found."},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"Error retrieving stock availability: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
