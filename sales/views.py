@@ -1,3 +1,7 @@
+from collections import defaultdict
+from datetime import datetime, time, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -7,8 +11,9 @@ from django.db.models import Sum, Q, Count, Avg
 from django.db.models.functions import TruncDate
 from django.http import HttpResponse
 from django.utils import timezone
-from decimal import Decimal, InvalidOperation
+from django.utils.dateparse import parse_date
 import csv
+from django.core.exceptions import ValidationError
 
 from .models import (
     Customer, Sale, SaleItem, Payment, Refund, RefundItem,
@@ -182,7 +187,7 @@ class SaleViewSet(viewsets.ModelViewSet):
                         cart_session_id=str(sale.id),
                         expiry_minutes=30
                     )
-                    
+
                     # Log reservation
                     AuditLog.log_event(
                         event_type='stock.reserved',
@@ -197,9 +202,26 @@ class SaleViewSet(viewsets.ModelViewSet):
                         ip_address=request.META.get('REMOTE_ADDR'),
                         user_agent=request.META.get('HTTP_USER_AGENT')
                     )
-                except Exception as e:
+                except ValidationError as exc:
+                    error_details = getattr(exc, 'params', {}) or {}
+                    developer_message = getattr(exc, 'message', None) or str(exc)
                     return Response(
-                        {'error': str(e)},
+                        {
+                            'error': 'Unable to add item due to stock restrictions.',
+                            'code': 'INSUFFICIENT_STOCK',
+                            'developer_message': developer_message,
+                            'details': error_details,
+                        },
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                except Exception as exc:
+                    return Response(
+                        {
+                            'error': 'Unable to add item at this time.',
+                            'code': 'ADD_ITEM_ERROR',
+                            'developer_message': str(exc),
+                            'details': {},
+                        },
                         status=status.HTTP_400_BAD_REQUEST
                     )
             
@@ -238,6 +260,92 @@ class SaleViewSet(viewsets.ModelViewSet):
             SaleItemSerializer(sale_item).data,
             status=status.HTTP_201_CREATED
         )
+
+    @action(detail=True, methods=['post'])
+    def abandon(self, request, pk=None):
+        """Cancel a draft sale and release any active stock reservations."""
+        sale = self.get_object()
+        allowed_statuses = {'DRAFT', 'CANCELLED'}
+
+        with transaction.atomic():
+            sale.refresh_from_db()
+
+            original_status = sale.status
+            already_finalized = original_status not in allowed_statuses
+
+            active_reservations = list(
+                StockReservation.objects.select_for_update()
+                .filter(
+                    cart_session_id=str(sale.id),
+                    status='ACTIVE'
+                )
+                .select_related('stock_product__product')
+            )
+
+            released_payload = []
+            total_released = Decimal('0.00')
+            now = timezone.now()
+
+            for reservation in active_reservations:
+                quantity = Decimal(reservation.quantity)
+                total_released += quantity
+                released_payload.append({
+                    'reservation_id': str(reservation.id),
+                    'stock_product_id': str(reservation.stock_product_id),
+                    'product_id': str(reservation.stock_product.product_id),
+                    'product_name': reservation.stock_product.product.name if reservation.stock_product and reservation.stock_product.product else None,
+                    'quantity': str(quantity),
+                    'expires_at': reservation.expires_at.isoformat() if reservation.expires_at else None,
+                })
+
+            if active_reservations:
+                reservation_ids = [reservation.id for reservation in active_reservations]
+                StockReservation.objects.filter(id__in=reservation_ids).update(
+                    status='RELEASED',
+                    released_at=now
+                )
+
+            status_changed = False
+            if not already_finalized and sale.status != 'CANCELLED':
+                sale.status = 'CANCELLED'
+                sale.completed_at = None
+                sale.save(update_fields=['status', 'completed_at', 'updated_at'])
+                status_changed = True
+
+                AuditLog.log_event(
+                    event_type='sale.cancelled',
+                    user=request.user,
+                    sale=sale,
+                    event_data={
+                        'released_reservation_count': len(released_payload),
+                        'released_quantity': str(total_released),
+                    },
+                    description=f'Sale {sale.id} cancelled and reservations released',
+                    ip_address=request.META.get('REMOTE_ADDR'),
+                    user_agent=request.META.get('HTTP_USER_AGENT')
+                )
+
+        sale_data = SaleSerializer(sale, context={'request': request}).data
+
+        if already_finalized:
+            message = 'Sale already finalized; no status change applied.'
+        elif status_changed:
+            message = 'Sale cancelled and reservations released.'
+        else:
+            message = 'Sale already cancelled; reservations released if any.'
+
+        return Response({
+            'message': message,
+            'sale': sale_data,
+            'released': {
+                'count': len(released_payload),
+                'total_quantity': str(total_released),
+                'reservations': released_payload,
+            },
+            'current_status': original_status,
+            'status_changed': status_changed,
+            'already_finalized': already_finalized,
+        })
     
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
@@ -256,11 +364,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             sale.tax_amount = data.get('tax_amount', Decimal('0'))
             if data.get('notes'):
                 sale.notes = data['notes']
-            
-            # Recalculate totals
-            sale.calculate_totals()
-            sale.save()
-            
+
             # Process payments if provided
             payments_data = data.get('payments', [])
             for payment_data in payments_data:
@@ -273,7 +377,11 @@ class SaleViewSet(viewsets.ModelViewSet):
                     processed_by=request.user
                 )
                 sale.amount_paid += payment_data['amount_paid']
-            
+
+            # Recalculate totals after payments have been applied
+            sale.calculate_totals()
+            sale.save()
+
             # Complete the sale
             try:
                 sale.complete_sale()
@@ -315,6 +423,20 @@ class SaleViewSet(viewsets.ModelViewSet):
         - Total Revenue: Total sales including both cash and credit
         """
         queryset = self.filter_queryset(self.get_queryset())
+        two_places = Decimal('0.01')
+
+        def to_decimal(value):
+            if value is None:
+                return Decimal('0.00')
+            if isinstance(value, Decimal):
+                return value
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, TypeError):
+                return Decimal('0.00')
+
+        def to_money(value):
+            return float(to_decimal(value).quantize(two_places, rounding=ROUND_HALF_UP))
         
         # Calculate aggregates
         summary = queryset.aggregate(
@@ -368,114 +490,184 @@ class SaleViewSet(viewsets.ModelViewSet):
             )),
         )
         
-        # Calculate net sales (accrual basis)
-        total_sales = summary['total_sales'] or Decimal('0')
-        total_refunds = summary['total_refunds'] or Decimal('0')
-        summary['net_sales'] = total_sales - total_refunds
-        
-        # Financial position breakdown
-        cash_at_hand = summary['cash_at_hand'] or Decimal('0')
-        accounts_receivable = summary['accounts_receivable'] or Decimal('0')
-        
-        summary['financial_position'] = {
-            'cash_at_hand': cash_at_hand,
-            'accounts_receivable': accounts_receivable,
-            'total_assets': cash_at_hand + accounts_receivable,
-            'cash_percentage': round(float((cash_at_hand / (cash_at_hand + accounts_receivable) * 100) if (cash_at_hand + accounts_receivable) > 0 else 0), 2),
-            'receivables_percentage': round(float((accounts_receivable / (cash_at_hand + accounts_receivable) * 100) if (cash_at_hand + accounts_receivable) > 0 else 0), 2),
-        }
-        
-        # Credit sales health metrics
-        credit_sales_unpaid = summary['credit_sales_unpaid'] or Decimal('0')
-        credit_sales_partial = summary['credit_sales_partial'] or Decimal('0')
-        credit_sales_paid = summary['credit_sales_paid'] or Decimal('0')
-        
-        summary['credit_health'] = {
-            'total_credit_sales': summary['credit_sales_total'] or Decimal('0'),
-            'unpaid_amount': credit_sales_unpaid,
-            'partially_paid_amount': credit_sales_partial,
-            'fully_paid_amount': credit_sales_paid,
-            'collection_rate': round(float((credit_sales_paid / summary['credit_sales_total'] * 100) if summary['credit_sales_total'] else 0), 2),
-        }
-        
-        # Calculate profit metrics
-        from django.db.models import F, Sum as SumAgg, ExpressionWrapper, DecimalField, Case, When, Value
-        from django.db.models.functions import Coalesce
-        
-        # Total profit from all completed sales
-        # Profit = (unit_price - stock_product.unit_cost) * quantity
-        # Note: Using base unit_cost. For full landed cost, would need unit_cost + unit_tax_amount + unit_additional_cost
-        completed_sales_ids = queryset.filter(status='COMPLETED').values_list('id', flat=True)
-        
-        # Calculate using stock_product__unit_cost (base cost)
-        total_profit = SaleItem.objects.filter(
-            sale_id__in=completed_sales_ids,
-            stock_product__isnull=False
-        ).aggregate(
-            profit=SumAgg(
-                ExpressionWrapper(
-                    (F('unit_price') - F('stock_product__unit_cost')) * F('quantity'),
-                    output_field=DecimalField()
-                )
-            )
-        )['profit'] or Decimal('0')
-        
-        # Outstanding credit profit (profit portion from unpaid amounts on credit sales)
-        # For PENDING/PARTIAL sales, calculate profit proportional to amount_due
-        unpaid_credit_sales = queryset.filter(
-            payment_type='CREDIT',
-            status__in=['PENDING', 'PARTIAL']
+        # Prepare sale and sale-item level analytics for profitability and credit tracking
+        analysed_sales = queryset.exclude(status='DRAFT')
+        sale_ids = list(analysed_sales.values_list('id', flat=True))
+        sale_items = list(
+            SaleItem.objects.filter(sale_id__in=sale_ids)
+            .select_related('product', 'stock_product')
         )
-        
-        outstanding_credit_profit = Decimal('0')
-        for sale in unpaid_credit_sales:
-            # Calculate total profit for this sale
-            sale_profit = SaleItem.objects.filter(
-                sale_id=sale.id,
-                stock_product__isnull=False
-            ).aggregate(
-                profit=SumAgg(
-                    ExpressionWrapper(
-                        (F('unit_price') - F('stock_product__unit_cost')) * F('quantity'),
-                        output_field=DecimalField()
-                    )
+
+        # Prefetch fallback stock products for items without a stock_product reference
+        missing_product_ids = {
+            item.product_id
+            for item in sale_items
+            if item.stock_product_id is None
+        }
+        fallback_stock = {}
+        if missing_product_ids:
+            for stock_product in (
+                StockProduct.objects
+                .filter(product_id__in=missing_product_ids)
+                .order_by('product_id', '-created_at')
+            ):
+                if stock_product.product_id not in fallback_stock:
+                    fallback_stock[stock_product.product_id] = stock_product
+
+        sale_costs = defaultdict(lambda: Decimal('0.00'))
+        sale_line_tax = defaultdict(lambda: Decimal('0.00'))
+        sale_line_discount = defaultdict(lambda: Decimal('0.00'))
+
+        for item in sale_items:
+            quantity = to_decimal(item.quantity)
+            stock_product = item.stock_product or fallback_stock.get(item.product_id)
+            if stock_product:
+                unit_cost = (
+                    to_decimal(stock_product.unit_cost)
+                    + to_decimal(getattr(stock_product, 'unit_tax_amount', None))
+                    + to_decimal(getattr(stock_product, 'unit_additional_cost', None))
                 )
-            )['profit'] or Decimal('0')
-            
-            # Calculate the profit portion that's still outstanding
-            # If 40% is unpaid (amount_due/total_amount), then 40% of profit is outstanding
-            if sale.total_amount > 0:
-                outstanding_ratio = sale.amount_due / sale.total_amount
-                outstanding_credit_profit += sale_profit * outstanding_ratio
-        
-        # Realized profit from credit sales (profit from amounts already paid)
-        credit_sales_ids = queryset.filter(payment_type='CREDIT').values_list('id', flat=True)
-        total_credit_profit = SaleItem.objects.filter(
-            sale_id__in=credit_sales_ids,
-            stock_product__isnull=False
-        ).aggregate(
-            profit=SumAgg(
-                ExpressionWrapper(
-                    (F('unit_price') - F('stock_product__unit_cost')) * F('quantity'),
-                    output_field=DecimalField()
-                )
-            )
-        )['profit'] or Decimal('0')
-        
-        realized_credit_profit = total_credit_profit - outstanding_credit_profit
-        
-        # Cash on hand (total profit minus outstanding credit profit)
-        # This now properly includes the realized portion of credit sales profit
-        cash_on_hand_profit = total_profit - outstanding_credit_profit
-        
-        # Add credit management metrics to summary
-        summary['total_profit'] = total_profit
-        summary['outstanding_credit'] = outstanding_credit_profit
-        summary['realized_credit_profit'] = realized_credit_profit
-        summary['cash_on_hand'] = cash_on_hand_profit
-        summary['total_credit_sales'] = summary['total_credit_sales_amount'] or Decimal('0')
+            else:
+                unit_cost = to_decimal(item.product.get_latest_cost())
+
+            sale_costs[item.sale_id] += (unit_cost * quantity)
+            sale_line_tax[item.sale_id] += to_decimal(item.tax_amount)
+            sale_line_discount[item.sale_id] += to_decimal(item.discount_amount)
+
+        total_sales_completed = Decimal('0.00')
+        total_cogs_completed = Decimal('0.00')
+        total_tax_completed = Decimal('0.00')
+        total_discounts_completed = Decimal('0.00')
+        gross_profit_completed = Decimal('0.00')
+
+        total_sales_all = Decimal('0.00')
+        total_tax_all = Decimal('0.00')
+        total_cogs_all = Decimal('0.00')
+        total_discounts_all = Decimal('0.00')
+        gross_profit_all = Decimal('0.00')
+
+        realized_revenue_total = Decimal('0.00')
+        outstanding_revenue_total = Decimal('0.00')
+        realized_profit_total = Decimal('0.00')
+        outstanding_profit_total = Decimal('0.00')
+
+        credit_total_amount = Decimal('0.00')
+        credit_total_completed = Decimal('0.00')
+        credit_amount_paid_total = Decimal('0.00')
+        credit_amount_due_total = Decimal('0.00')
+        credit_amount_due_partial = Decimal('0.00')
+        credit_amount_due_pending = Decimal('0.00')
+        credit_paid_completed = Decimal('0.00')
+        credit_realized_profit = Decimal('0.00')
+        credit_outstanding_profit = Decimal('0.00')
+
+        for sale in analysed_sales:
+            total_amount = to_decimal(sale.total_amount)
+            paid = to_decimal(sale.amount_paid)
+            due = to_decimal(sale.amount_due)
+            sale_tax_total = sale_line_tax[sale.id] + to_decimal(sale.tax_amount)
+            sale_discount_total = sale_line_discount[sale.id] + to_decimal(sale.discount_amount)
+            cogs = sale_costs[sale.id]
+            net_revenue = total_amount - sale_tax_total
+            profit = net_revenue - cogs
+
+            total_sales_all += total_amount
+            total_tax_all += sale_tax_total
+            total_cogs_all += cogs
+            total_discounts_all += sale_discount_total
+            gross_profit_all += profit
+
+            denominator = total_amount if total_amount > Decimal('0.00') else (paid + due)
+            paid_ratio = (paid / denominator) if denominator > Decimal('0.00') else Decimal('0.00')
+            if paid_ratio > Decimal('1.00'):
+                paid_ratio = Decimal('1.00')
+
+            realized_profit = (profit * paid_ratio)
+            outstanding_profit = profit - realized_profit
+            if outstanding_profit < Decimal('0.00'):
+                outstanding_profit = Decimal('0.00')
+
+            realized_revenue_total += paid
+            realized_profit_total += realized_profit
+            outstanding_profit_total += outstanding_profit
+
+            if sale.payment_type == 'CREDIT':
+                outstanding_revenue_total += due
+                credit_total_amount += total_amount
+                credit_amount_paid_total += paid
+                credit_amount_due_total += due
+                credit_realized_profit += realized_profit
+                credit_outstanding_profit += outstanding_profit
+
+                if sale.status == 'COMPLETED':
+                    credit_total_completed += total_amount
+                    credit_paid_completed += paid
+                elif sale.status == 'PARTIAL':
+                    credit_amount_due_partial += due
+                elif sale.status == 'PENDING':
+                    credit_amount_due_pending += due
+
+            if sale.status == 'COMPLETED':
+                total_sales_completed += total_amount
+                total_cogs_completed += cogs
+                total_tax_completed += sale_tax_total
+                total_discounts_completed += sale_discount_total
+                gross_profit_completed += profit
+
+        net_sales_completed = total_sales_completed - total_tax_completed
+        summary['net_sales'] = to_money(net_sales_completed)
+
+        summary['total_sales'] = to_money(total_sales_completed)
+        summary['total_sales_all_statuses'] = to_money(total_sales_all)
+        summary['total_cogs'] = to_money(total_cogs_completed)
+        summary['total_cogs_all_statuses'] = to_money(total_cogs_all)
+        summary['total_tax_collected'] = to_money(total_tax_completed)
+        summary['total_tax_all_statuses'] = to_money(total_tax_all)
+        summary['total_discounts'] = to_money(total_discounts_completed)
+        summary['total_discounts_all_statuses'] = to_money(total_discounts_all)
+
+        summary['total_profit'] = to_money(gross_profit_completed)
+        summary['gross_profit_all_statuses'] = to_money(gross_profit_all)
+        profit_margin = (gross_profit_completed / net_sales_completed * Decimal('100.00')) if net_sales_completed > Decimal('0.00') else Decimal('0.00')
+        summary['profit_margin'] = round(float(profit_margin), 2)
+
+        summary['realized_revenue'] = to_money(realized_revenue_total)
+        summary['outstanding_revenue'] = to_money(outstanding_revenue_total)
+        summary['realized_profit'] = to_money(realized_profit_total)
+        summary['outstanding_profit'] = to_money(outstanding_profit_total)
+
+        # Refresh cash/receivables snapshot
+        summary['cash_at_hand'] = to_money(realized_revenue_total)
+        summary['accounts_receivable'] = to_money(outstanding_revenue_total)
+
+        total_assets = realized_revenue_total + outstanding_revenue_total
+        summary['financial_position'] = {
+            'cash_at_hand': to_money(realized_revenue_total),
+            'accounts_receivable': to_money(outstanding_revenue_total),
+            'total_assets': to_money(total_assets),
+            'cash_percentage': round(float((realized_revenue_total / total_assets * Decimal('100.00')) if total_assets > Decimal('0.00') else Decimal('0.00')), 2),
+            'receivables_percentage': round(float((outstanding_revenue_total / total_assets * Decimal('100.00')) if total_assets > Decimal('0.00') else Decimal('0.00')), 2),
+        }
+
+        summary['total_credit_sales'] = to_money(credit_total_amount)
         summary['unpaid_credit_count'] = summary['unpaid_credit_count'] or 0
-        
+        summary['credit_health'] = {
+            'total_credit_sales': to_money(credit_total_amount),
+            'completed_credit_sales': to_money(credit_total_completed),
+            'amount_paid': to_money(credit_amount_paid_total),
+            'amount_due': to_money(credit_amount_due_total),
+            'unpaid_amount': to_money(credit_amount_due_pending),
+            'partially_paid_amount': to_money(credit_amount_due_partial),
+            'fully_paid_amount': to_money(credit_paid_completed),
+            'realized_profit': to_money(credit_realized_profit),
+            'outstanding_profit': to_money(credit_outstanding_profit),
+            'collection_rate': round(float((credit_paid_completed / credit_total_completed * Decimal('100.00')) if credit_total_completed > Decimal('0.00') else Decimal('0.00')), 2),
+        }
+
+        summary['realized_credit_profit'] = to_money(credit_realized_profit)
+        summary['outstanding_credit'] = to_money(credit_outstanding_profit)
+        summary['cash_on_hand'] = to_money(realized_profit_total)
+
         # Status breakdown
         status_breakdown = queryset.values('status').annotate(
             count=Count('id'),
@@ -527,6 +719,127 @@ class SaleViewSet(viewsets.ModelViewSet):
             'top_customers': list(top_customers),
             'payment_breakdown': list(payment_breakdown),
             'type_breakdown': list(type_breakdown),
+        })
+
+    @action(detail=False, methods=['get'], url_path='todays-stats')
+    def todays_stats(self, request):
+        """Return lightweight metrics for the Today's Stats widget."""
+        base_queryset = self.get_queryset()
+
+        date_param = request.query_params.get('date')
+        parsed_date = parse_date(date_param) if date_param else None
+        target_date = parsed_date or timezone.localdate()
+
+        start_of_day = datetime.combine(target_date, time.min)
+        end_of_day = start_of_day + timedelta(days=1)
+        if timezone.is_naive(start_of_day):
+            tz = timezone.get_current_timezone()
+            start_of_day = timezone.make_aware(start_of_day, tz)
+            end_of_day = timezone.make_aware(end_of_day, tz)
+
+        date_scoped_queryset = base_queryset.filter(
+            created_at__gte=start_of_day,
+            created_at__lt=end_of_day
+        )
+
+        storefront_id = request.query_params.get('storefront')
+        if storefront_id:
+            date_scoped_queryset = date_scoped_queryset.filter(storefront__id=storefront_id)
+
+        requested_statuses = request.query_params.getlist('status')
+        valid_statuses = [choice[0] for choice in Sale.STATUS_CHOICES]
+        statuses = [status for status in requested_statuses if status in valid_statuses]
+        if not statuses:
+            statuses = ['COMPLETED']
+
+        status_queryset = date_scoped_queryset.filter(status__in=statuses)
+
+        two_places = Decimal('0.01')
+
+        def to_decimal(value):
+            if value is None:
+                return Decimal('0.00')
+            if isinstance(value, Decimal):
+                return value
+            try:
+                return Decimal(str(value))
+            except (InvalidOperation, TypeError):
+                return Decimal('0.00')
+
+        def to_money(value):
+            return float(to_decimal(value).quantize(two_places, rounding=ROUND_HALF_UP))
+
+        aggregates = status_queryset.aggregate(
+            total_sales=Sum('total_amount'),
+            avg_transaction=Avg('total_amount')
+        )
+
+        transactions = status_queryset.count()
+        total_sales = to_money(aggregates['total_sales'])
+        avg_transaction = to_money(aggregates['avg_transaction']) if aggregates['avg_transaction'] is not None else 0.0
+
+        cash_snapshot = date_scoped_queryset.aggregate(
+            cash_at_hand=Sum('amount_paid', filter=Q(status__in=['COMPLETED', 'PARTIAL', 'PENDING'])),
+            accounts_receivable=Sum('amount_due', filter=Q(payment_type='CREDIT', status__in=['PENDING', 'PARTIAL']))
+        )
+
+        cash_at_hand = to_money(cash_snapshot['cash_at_hand'])
+        accounts_receivable = to_money(cash_snapshot['accounts_receivable'])
+
+        partial_transactions = date_scoped_queryset.filter(status='PARTIAL').count()
+        pending_transactions = date_scoped_queryset.filter(status='PENDING').count()
+
+        status_breakdown = [
+            {
+                'status': item['status'],
+                'count': item['count'],
+                'total': to_money(item['total'])
+            }
+            for item in date_scoped_queryset.values('status').annotate(
+                count=Count('id'),
+                total=Sum('total_amount')
+            ).order_by('-count')
+        ]
+
+        payment_breakdown = [
+            {
+                'payment_type': item['payment_type'],
+                'count': item['count'],
+                'total': to_money(item['total'])
+            }
+            for item in status_queryset.values('payment_type').annotate(
+                count=Count('id'),
+                total=Sum('total_amount')
+            ).order_by('-total')
+        ]
+
+        credit_scope = date_scoped_queryset.filter(payment_type='CREDIT')
+        credit_totals = credit_scope.aggregate(
+            total_credit_sales=Sum('total_amount', filter=Q(status__in=statuses)),
+            amount_paid=Sum('amount_paid'),
+            outstanding_amount=Sum('amount_due', filter=Q(status__in=['PENDING', 'PARTIAL']))
+        )
+
+        credit_snapshot = {
+            'total_credit_sales': to_money(credit_totals['total_credit_sales']),
+            'amount_paid': to_money(credit_totals['amount_paid']),
+            'outstanding_amount': to_money(credit_totals['outstanding_amount'])
+        }
+
+        return Response({
+            'date': target_date.isoformat(),
+            'storefront': storefront_id,
+            'statuses': statuses,
+            'transactions': transactions,
+            'total_sales': total_sales,
+            'avg_transaction': avg_transaction,
+            'cash_at_hand': cash_at_hand,
+            'accounts_receivable': accounts_receivable,
+            'partial_transactions': partial_transactions,
+            'pending_transactions': pending_transactions,
+            'status_breakdown': status_breakdown,
+            'payment_breakdown': payment_breakdown,
+            'credit_snapshot': credit_snapshot
         })
     
     @action(detail=False, methods=['get'])
