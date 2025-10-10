@@ -7,7 +7,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from django.db.models import QuerySet
 from django.utils import timezone
 
-from inventory.models import Inventory
+from inventory.models import StockProduct
 
 
 TWOPLACES = Decimal('0.01')
@@ -99,23 +99,22 @@ class InventoryValuationReportBuilder:
             'warehouse_ids': set(),
         }
 
-        for record in queryset:
-            stock = record.stock
-            unit_cost = quantize(stock.unit_cost) if stock else Decimal('0.00')
-            unit_tax_rate = quantize(stock.unit_tax_rate) if stock else Decimal('0.00')
-            unit_tax_amount = quantize(stock.unit_tax_amount) if stock else Decimal('0.00')
-            unit_additional = quantize(stock.unit_additional_cost) if stock else Decimal('0.00')
+        for stock_product in queryset:
+            unit_cost = quantize(stock_product.unit_cost)
+            unit_tax_rate = quantize(stock_product.unit_tax_rate) if stock_product.unit_tax_rate else Decimal('0.00')
+            unit_tax_amount = quantize(stock_product.unit_tax_amount) if stock_product.unit_tax_amount else Decimal('0.00')
+            unit_additional = quantize(stock_product.unit_additional_cost) if stock_product.unit_additional_cost else Decimal('0.00')
 
-            quantity = int(record.quantity or 0)
+            quantity = int(stock_product.quantity or 0)
             total_tax = quantize(unit_tax_amount * quantity)
             total_additional = quantize(unit_additional * quantity)
             inventory_value = quantize((unit_cost + unit_tax_amount + unit_additional) * quantity)
 
             row = InventoryReportRow(
-                product_name=record.product.name,
-                product_sku=record.product.sku,
-                warehouse_name=record.warehouse.name,
-                stock_reference=getattr(stock, 'description', None),
+                product_name=stock_product.product.name,
+                product_sku=stock_product.product.sku,
+                warehouse_name=stock_product.warehouse.name,
+                stock_reference=stock_product.description or f"Batch {stock_product.stock.arrival_date}" if stock_product.stock.arrival_date else "N/A",
                 quantity=quantity,
                 unit_cost=unit_cost,
                 unit_tax_rate=unit_tax_rate,
@@ -132,8 +131,8 @@ class InventoryValuationReportBuilder:
             totals['total_tax_amount'] += total_tax
             totals['total_additional_cost'] += total_additional
             totals['inventory_value'] += inventory_value
-            totals['product_ids'].add(record.product_id)
-            totals['warehouse_ids'].add(record.warehouse_id)
+            totals['product_ids'].add(stock_product.product_id)
+            totals['warehouse_ids'].add(stock_product.warehouse_id)
 
         summary = {
             'total_rows': totals['total_rows'],
@@ -154,8 +153,8 @@ class InventoryValuationReportBuilder:
             'detail_headers': self.detail_headers,
         }
 
-    def _apply_filters(self, filters: Dict[str, Any]) -> QuerySet[Inventory]:
-        queryset = Inventory.objects.select_related('product', 'warehouse', 'stock').order_by(
+    def _apply_filters(self, filters: Dict[str, Any]) -> QuerySet[StockProduct]:
+        queryset = StockProduct.objects.select_related('product', 'warehouse', 'stock').order_by(
             'product__name', 'warehouse__name'
         )
         warehouse_id = filters.get('warehouse_id')

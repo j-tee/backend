@@ -27,13 +27,7 @@ WHAT THESE SIGNALS DO:
 ❌ DO NOT reduce StockProduct.quantity on transfers
 """
 
-from django.db import transaction
-from django.db.models.signals import pre_save
-from django.dispatch import receiver
-from django.core.exceptions import ValidationError
-
-
-from django.db import transaction
+from django.db import transaction, models
 from django.db.models.signals import pre_save
 from django.dispatch import receiver
 from django.core.exceptions import ValidationError
@@ -184,21 +178,21 @@ def validate_adjustment_wont_cause_negative_stock(sender, instance, **kwargs):
     adjustments_sum = stock_product.adjustments.filter(
         status='COMPLETED'
     ).exclude(pk=instance.pk).aggregate(
-        total=transaction.models.Sum('quantity')
+        total=models.Sum('quantity')
     )['total'] or 0
     available += adjustments_sum
     
     # Subtract transferred stock (storefront inventory for this product)
     transferred = StoreFrontInventory.objects.filter(
         product=stock_product.product
-    ).aggregate(total=transaction.models.Sum('quantity'))['total'] or 0
+    ).aggregate(total=models.Sum('quantity'))['total'] or 0
     available -= transferred
     
     # Subtract completed sales
     sold = SaleItem.objects.filter(
         product=stock_product.product,
         sale__status='COMPLETED'
-    ).aggregate(total=transaction.models.Sum('quantity'))['total'] or 0
+    ).aggregate(total=models.Sum('quantity'))['total'] or 0
     available -= sold
     
     # Check if this adjustment would make it negative
@@ -248,7 +242,7 @@ def validate_transfer_has_sufficient_stock(sender, instance, **kwargs):
         # Get all warehouse batches for this product
         batches = StockProduct.objects.filter(
             product=product,
-            business=instance.business
+            product__business=instance.business
         )
         
         if not batches.exists():
@@ -264,19 +258,19 @@ def validate_transfer_has_sufficient_stock(sender, instance, **kwargs):
         for batch in batches:
             batch_adjustments = batch.adjustments.filter(
                 status='COMPLETED'
-            ).aggregate(total=transaction.models.Sum('quantity'))['total'] or 0
+            ).aggregate(total=models.Sum('quantity'))['total'] or 0
             adjustments_sum += batch_adjustments
         
         # Subtract already transferred
         transferred = StoreFrontInventory.objects.filter(
             product=product
-        ).aggregate(total=transaction.models.Sum('quantity'))['total'] or 0
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
         
         # Subtract sold
         sold = SaleItem.objects.filter(
             product=product,
             sale__status='COMPLETED'
-        ).aggregate(total=transaction.models.Sum('quantity'))['total'] or 0
+        ).aggregate(total=models.Sum('quantity'))['total'] or 0
         
         available = total_intake + adjustments_sum - transferred - sold
         

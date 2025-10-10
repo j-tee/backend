@@ -1,7 +1,7 @@
 from django.contrib import admin
 from .models import (
     Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
-    Inventory, StoreFrontInventory, Transfer, TransferLineItem, TransferAuditEntry, StockAlert
+    StoreFrontInventory, TransferRequest, TransferRequestLineItem, StockAlert
 )
 from .stock_adjustments import (
     StockAdjustment, StockAdjustmentPhoto, StockAdjustmentDocument,
@@ -66,9 +66,9 @@ class SupplierAdmin(admin.ModelAdmin):
 
 @admin.register(Stock)
 class StockAdmin(admin.ModelAdmin):
-    list_display = ['warehouse', 'arrival_date', 'created_at']
-    search_fields = ['warehouse__name']
-    list_filter = ['warehouse', 'arrival_date', 'created_at']
+    list_display = ['arrival_date', 'created_at']
+    search_fields = ['description']
+    list_filter = ['arrival_date', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['-arrival_date']
 
@@ -76,14 +76,14 @@ class StockAdmin(admin.ModelAdmin):
 @admin.register(StockProduct)
 class StockProductAdmin(admin.ModelAdmin):
     list_display = ['product', 'warehouse', 'supplier', 'quantity', 'unit_cost', 'unit_tax_amount', 'unit_additional_cost', 'landed_unit_cost', 'expiry_date', 'created_at']
-    search_fields = ['product__name', 'product__sku', 'stock__warehouse__name', 'supplier__name']
-    list_filter = ['stock__warehouse', 'supplier', 'expiry_date', 'created_at']
+    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'supplier__name']
+    list_filter = ['warehouse', 'supplier', 'expiry_date', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at', 'landed_unit_cost', 'total_base_cost', 'total_tax_amount', 'total_additional_cost', 'total_landed_cost']
     ordering = ['product__name']
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('id', 'stock', 'product', 'supplier', 'quantity', 'expiry_date', 'description')
+            'fields': ('id', 'stock', 'warehouse', 'product', 'supplier', 'quantity', 'expiry_date', 'description')
         }),
         ('Cost Details', {
             'fields': ('unit_cost', 'unit_tax_rate', 'unit_tax_amount', 'unit_additional_cost')
@@ -99,18 +99,6 @@ class StockProductAdmin(admin.ModelAdmin):
     )
 
 
-@admin.register(Inventory)
-class InventoryAdmin(admin.ModelAdmin):
-    list_display = ['product', 'warehouse', 'stock', 'quantity', 'updated_at']
-    search_fields = ['product__name', 'product__sku', 'warehouse__name', 'stock__product__name']
-    list_filter = ['warehouse', 'updated_at']
-    readonly_fields = ['id', 'created_at', 'updated_at']
-    ordering = ['product__name']
-    
-    def get_queryset(self, request):
-        return super().get_queryset(request).select_related('product', 'warehouse', 'stock')
-
-
 @admin.register(StoreFrontInventory)
 class StoreFrontInventoryAdmin(admin.ModelAdmin):
     list_display = ['product', 'storefront', 'quantity', 'updated_at']
@@ -123,45 +111,32 @@ class StoreFrontInventoryAdmin(admin.ModelAdmin):
         return super().get_queryset(request).select_related('product', 'storefront')
 
 
-class TransferLineItemInline(admin.TabularInline):
-    model = TransferLineItem
+class TransferRequestLineItemInline(admin.TabularInline):
+    model = TransferRequestLineItem
     extra = 0
-    fields = ['product', 'requested_quantity', 'approved_quantity', 'fulfilled_quantity', 'unit_of_measure', 'notes']
+    fields = ['product', 'requested_quantity', 'unit_of_measure', 'notes', 'created_at', 'updated_at']
     readonly_fields = ['created_at', 'updated_at']
-    show_change_link = True
+    show_change_link = False
 
 
-class TransferAuditEntryInline(admin.TabularInline):
-    model = TransferAuditEntry
-    extra = 0
-    fields = ['action', 'actor', 'remarks', 'created_at']
-    readonly_fields = ['action', 'actor', 'remarks', 'created_at']
-    can_delete = False
-    ordering = ['created_at']
-
-
-@admin.register(Transfer)
-class TransferAdmin(admin.ModelAdmin):
-    list_display = ['reference', 'business', 'source_warehouse', 'destination_storefront', 'status', 'submitted_at', 'approved_at', 'dispatched_at', 'completed_at']
-    search_fields = ['reference', 'business__name', 'source_warehouse__name', 'destination_storefront__name']
-    list_filter = ['status', 'source_warehouse', 'destination_storefront', 'created_at']
-    readonly_fields = [
-        'id', 'reference', 'business', 'status', 'requested_by', 'approved_by', 'fulfilled_by',
-        'submitted_at', 'approved_at', 'dispatched_at', 'completed_at', 'rejected_at', 'cancelled_at',
-        'created_at', 'updated_at'
-    ]
+@admin.register(TransferRequest)
+class TransferRequestAdmin(admin.ModelAdmin):
+    list_display = ['storefront', 'business', 'priority', 'status', 'requested_by', 'fulfilled_by', 'cancelled_by', 'created_at']
+    search_fields = ['storefront__name', 'business__name', 'requested_by__name', 'fulfilled_by__name', 'cancelled_by__name']
+    list_filter = ['status', 'priority', 'storefront', 'business', 'created_at']
+    readonly_fields = ['id', 'business', 'fulfilled_at', 'fulfilled_by', 'cancelled_at', 'cancelled_by', 'created_at', 'updated_at']
     ordering = ['-created_at']
-    inlines = [TransferLineItemInline, TransferAuditEntryInline]
+    inlines = [TransferRequestLineItemInline]
 
     fieldsets = (
-        ('Transfer Details', {
-            'fields': ('id', 'reference', 'business', 'status', 'notes')
+        ('Request Details', {
+            'fields': ('id', 'storefront', 'business', 'priority', 'status', 'notes')
         }),
-        ('Participants', {
-            'fields': ('source_warehouse', 'destination_storefront', 'requested_by', 'approved_by', 'fulfilled_by')
+        ('People', {
+            'fields': ('requested_by', 'fulfilled_by', 'cancelled_by')
         }),
         ('Timeline', {
-            'fields': ('submitted_at', 'approved_at', 'dispatched_at', 'completed_at', 'rejected_at', 'cancelled_at', 'created_at', 'updated_at'),
+            'fields': ('fulfilled_at', 'cancelled_at', 'created_at', 'updated_at'),
             'classes': ('collapse',)
         }),
     )
@@ -209,8 +184,8 @@ class StockAdjustmentAdmin(admin.ModelAdmin):
         'created_by__email', 'approved_by__email'
     ]
     list_filter = [
-        'adjustment_type', 'status', 'requires_approval',
-        'created_at', 'stock_product__stock__warehouse'
+    'adjustment_type', 'status', 'requires_approval',
+    'created_at', 'stock_product__warehouse'
     ]
     readonly_fields = [
         'id', 'total_cost', 'financial_impact', 'is_increase', 'is_decrease',
@@ -236,7 +211,7 @@ class StockAdjustmentAdmin(admin.ModelAdmin):
             )
         }),
         ('Related Items', {
-            'fields': ('related_sale', 'related_transfer')
+            'fields': ('related_sale',)
         }),
         ('Computed', {
             'fields': ('financial_impact', 'is_increase', 'is_decrease'),

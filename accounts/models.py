@@ -219,6 +219,31 @@ class User(AbstractBaseUser, PermissionsMixin):
             }
         )
         return membership
+    
+    def has_active_subscription(self):
+        """
+        Check if user has an active subscription.
+        Returns True if BYPASS_SUBSCRIPTION_CHECK is enabled or user has active subscription.
+        """
+        from django.conf import settings
+        
+        # Bypass check if setting is enabled (typically in DEBUG mode)
+        if getattr(settings, 'BYPASS_SUBSCRIPTION_CHECK', False):
+            return True
+        
+        # Check for actual active subscription
+        try:
+            from subscriptions.models import Subscription
+            from django.utils import timezone
+            
+            return Subscription.objects.filter(
+                user=self,
+                status='ACTIVE',
+                end_date__gte=timezone.now().date()
+            ).exists()
+        except:
+            # If subscriptions app isn't available or error occurs, allow access
+            return True
 
 
 class EmailVerificationToken(models.Model):

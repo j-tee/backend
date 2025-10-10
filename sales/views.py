@@ -1039,6 +1039,69 @@ class SaleViewSet(viewsets.ModelViewSet):
             'refund': RefundSerializer(refund).data,
             'sale': SaleSerializer(sale).data
         }, status=status.HTTP_200_OK)
+    
+    @action(detail=True, methods=['post'])
+    def cancel(self, request, pk=None):
+        """
+        Cancel a sale and automatically handle all consequences.
+        
+        This endpoint:
+        - Creates a full refund for all items
+        - Restocks inventory to original location
+        - Updates sale status to CANCELLED
+        - Reverses customer credit balance (if applicable)
+        - Creates comprehensive audit trail
+        
+        Request body:
+        {
+            "reason": "Customer changed mind", // required
+            "restock": true  // optional, default: true
+        }
+        """
+        sale = self.get_object()
+        
+        # Validate request
+        reason = request.data.get('reason')
+        if not reason:
+            return Response(
+                {'error': 'Reason is required for cancellation'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        restock = request.data.get('restock', True)
+        
+        try:
+            with transaction.atomic():
+                refund = sale.cancel_sale(
+                    user=request.user,
+                    reason=reason,
+                    restock=restock
+                )
+                
+                # Prepare response
+                response_data = {
+                    'message': 'Sale cancelled successfully',
+                    'sale': SaleSerializer(sale).data,
+                }
+                
+                if refund:
+                    response_data['refund'] = RefundSerializer(refund).data
+                
+                return Response(response_data, status=status.HTTP_200_OK)
+                
+        except ValidationError as exc:
+            return Response(
+                {'error': str(exc)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        except Exception as exc:
+            return Response(
+                {
+                    'error': 'Failed to cancel sale',
+                    'details': str(exc)
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 class SaleItemViewSet(viewsets.ModelViewSet):

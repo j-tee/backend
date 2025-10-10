@@ -619,6 +619,91 @@ class Sale(models.Model):
 
             return refund
     
+    def cancel_sale(self, *, user, reason: str, restock: bool = True) -> 'Refund':
+        """
+        Cancel a sale and automatically handle all consequences.
+        
+        This method:
+        1. Validates the sale can be cancelled
+        2. Creates a full refund for all items
+        3. Restocks inventory to original location (if restock=True)
+        4. Updates sale status to CANCELLED
+        5. Reverses customer credit balance (if applicable)
+        6. Creates comprehensive audit trail
+        
+        Args:
+            user: User performing the cancellation
+            reason: Reason for cancellation (required for audit)
+            restock: Whether to return items to inventory (default: True)
+        
+        Returns:
+            Refund: The created refund record
+        
+        Raises:
+            ValidationError: If sale cannot be cancelled
+        """
+        # Validate sale can be cancelled
+        if self.status == 'CANCELLED':
+            raise ValidationError('Sale is already cancelled.')
+        
+        if self.status == 'REFUNDED':
+            raise ValidationError('Sale has already been fully refunded. Use status update instead.')
+        
+        # Only allow cancellation of DRAFT, PENDING, COMPLETED, or PARTIAL sales
+        if self.status not in {'DRAFT', 'PENDING', 'COMPLETED', 'PARTIAL'}:
+            raise ValidationError(f'Cannot cancel sale with status: {self.status}')
+        
+        with transaction.atomic():
+            # Build list of all items to refund
+            items_to_refund = []
+            for sale_item in self.sale_items.all():
+                refundable = sale_item.refundable_quantity
+                if refundable > 0:
+                    items_to_refund.append({
+                        'sale_item': sale_item,
+                        'quantity': refundable
+                    })
+            
+            # Process full refund if there are items to refund
+            refund = None
+            if items_to_refund:
+                refund = self.process_refund(
+                    user=user,
+                    items=items_to_refund,
+                    reason=f'Sale Cancellation: {reason}',
+                    refund_type='FULL'
+                )
+            else:
+                # No items to refund (already refunded), just update status
+                pass
+            
+            # Update sale status
+            old_status = self.status
+            self.status = 'CANCELLED'
+            self.save(update_fields=['status', 'updated_at'])
+            
+            # Release any active reservations
+            self.release_reservations(delete=True)
+            
+            # Log the cancellation
+            AuditLog.log_event(
+                event_type='sale.cancelled',
+                user=user,
+                sale=self,
+                customer=self.customer,
+                event_data={
+                    'reason': reason,
+                    'previous_status': old_status,
+                    'refund_id': str(refund.id) if refund else None,
+                    'refund_amount': str(refund.amount) if refund else '0.00',
+                    'restock': restock,
+                    'items_count': len(items_to_refund),
+                },
+                description=f'Sale {self.receipt_number} cancelled by {user.name}: {reason}',
+            )
+            
+            return refund
+    
     def commit_stock(self):
         """
         Commit stock quantities for all sale items

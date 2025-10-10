@@ -73,7 +73,8 @@ class Command(BaseCommand):
             queryset.select_related(
                 "stock_product",
                 "stock_product__product",
-                "stock_product__stock__warehouse",
+                "stock_product__warehouse",
+                "stock_product__stock",
             ).order_by("stock_product_id", "completed_at", "created_at")
         )
 

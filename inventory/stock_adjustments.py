@@ -145,15 +145,6 @@ class StockAdjustment(models.Model):
         related_name='stock_adjustments',
         help_text='Related sale for customer returns'
     )
-    related_transfer = models.ForeignKey(
-        'inventory.Transfer',
-        on_delete=models.SET_NULL,
-        null=True,
-        blank=True,
-        related_name='stock_adjustments',
-        help_text='Related transfer for transfer adjustments'
-    )
-    
     class Meta:
         db_table = 'stock_adjustments'
         ordering = ['-created_at']

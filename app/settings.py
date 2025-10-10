@@ -369,3 +369,7 @@ else:
     REST_FRAMEWORK.pop('DEFAULT_THROTTLE_RATES', None)
 
 PLATFORM_OWNER_EMAIL = config('PLATFORM_OWNER_EMAIL', default='juliustetteh@gmail.com')
+
+# Subscription bypass for development
+# Set to True to bypass all subscription checks during development
+BYPASS_SUBSCRIPTION_CHECK = config('BYPASS_SUBSCRIPTION_CHECK', default=DEBUG, cast=bool)

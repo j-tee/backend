@@ -87,7 +87,7 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
             'approved_by', 'approved_by_name',
             'created_at', 'approved_at', 'completed_at',
             'has_photos', 'has_documents',
-            'related_sale', 'related_transfer',
+            'related_sale',
             'financial_impact', 'is_increase', 'is_decrease',
             'photos', 'documents'
         ]
@@ -133,8 +133,8 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
             if membership:
                 # Filter stock products by user's business
                 fields['stock_product'].queryset = StockProduct.objects.filter(
-                    stock__warehouse__business_link__business=membership.business
-                ).select_related('product', 'supplier', 'stock__warehouse')
+                    warehouse__business_link__business=membership.business
+                ).select_related('product', 'supplier', 'warehouse', 'stock')
             else:
                 # No business membership - return empty queryset
                 fields['stock_product'].queryset = StockProduct.objects.none()
@@ -259,8 +259,8 @@ class StockAdjustmentCreateSerializer(serializers.ModelSerializer):
             if membership:
                 # Filter stock products by user's business
                 fields['stock_product'].queryset = StockProduct.objects.filter(
-                    stock__warehouse__business_link__business=membership.business
-                ).select_related('product', 'supplier', 'stock__warehouse')
+                    warehouse__business_link__business=membership.business
+                ).select_related('product', 'supplier', 'warehouse', 'stock')
             else:
                 # No business membership - return empty queryset
                 fields['stock_product'].queryset = StockProduct.objects.none()

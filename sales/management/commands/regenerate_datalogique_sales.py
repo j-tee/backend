@@ -233,7 +233,7 @@ def ensure_inventory(business, storefront, products):
     for product, retail_price in products:
         stock_product = StockProduct.objects.filter(
             product=product,
-            stock__warehouse=warehouse,
+            warehouse=warehouse,
         ).order_by("-created_at").first()
 
         if stock_product:

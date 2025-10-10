@@ -30,9 +30,8 @@ from inventory.models import (
     Warehouse,
     WarehouseEmployee,
     Product,
-    Transfer,
-    TransferLineItem,
-    TransferAuditEntry,
+    TransferRequest,
+    TransferRequestLineItem,
 )
 from sales.models import (
     CreditTransaction,
@@ -662,35 +661,28 @@ class Command(BaseCommand):
 
         now = timezone.now()
         submitted_at = now - timedelta(days=2)
-        approved_at = submitted_at + timedelta(hours=4)
-        dispatched_at = approved_at + timedelta(hours=6)
-        completed_at = dispatched_at + timedelta(hours=12)
+        completed_at = submitted_at + timedelta(hours=22)
 
-        transfer = Transfer.objects.create(
+        request = TransferRequest.objects.create(
             business=business,
-            source_warehouse=source_warehouse,
-            destination_storefront=target_storefront,
-            status=Transfer.STATUS_COMPLETED,
-            notes="Demo transfer for seeded data",
+            storefront=target_storefront,
             requested_by=owner,
-            approved_by=owner,
-            fulfilled_by=owner,
-            submitted_at=submitted_at,
-            approved_at=approved_at,
-            dispatched_at=dispatched_at,
-            completed_at=completed_at,
+            priority=TransferRequest.PRIORITY_MEDIUM,
+            status=TransferRequest.STATUS_NEW,
+            notes="Demo transfer request for seeded data",
         )
 
-        TransferLineItem.objects.create(
-            transfer=transfer,
+        TransferRequestLineItem.objects.create(
+            request=request,
             product=product,
             requested_quantity=quantity,
-            approved_quantity=quantity,
-            fulfilled_quantity=quantity,
         )
 
-        transfer.add_audit(TransferAuditEntry.ACTION_CREATED, owner, "Seeded transfer")
-        transfer.add_audit(TransferAuditEntry.ACTION_COMPLETED, owner, "Seeded transfer")
+        request.apply_manual_inventory_fulfillment()
+        request.status = TransferRequest.STATUS_FULFILLED
+        request.fulfilled_at = completed_at
+        request.fulfilled_by = owner
+        request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
 
         inventory_entry = product_entry["inventory"]
         inventory_entry.quantity = max(0, inventory_entry.quantity - quantity)

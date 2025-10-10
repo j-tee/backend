@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.utils import timezone
 from openpyxl import load_workbook
 
-from inventory.models import Category, Product, Warehouse, Supplier, Stock, StockProduct, Inventory
+from inventory.models import Category, Product, Warehouse, Supplier, Stock, StockProduct
 from reports.exporters import ExcelReportExporter
 from reports.services.inventory import InventoryValuationReportBuilder
 

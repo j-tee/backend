@@ -26,14 +26,14 @@ from accounts.serializers import (
 from accounts.utils import send_business_invitation_email, EmailDeliveryError
 from .models import (
     Category, Warehouse, StoreFront, Product, Supplier, Stock, StockProduct,
-    Inventory, StoreFrontInventory, Transfer, TransferLineItem, TransferAuditEntry, TransferRequest, StockAlert,
+    StoreFrontInventory, TransferRequest, StockAlert,
     BusinessWarehouse, BusinessStoreFront, StoreFrontEmployee, WarehouseEmployee
 )
 from .serializers import (
     CategorySerializer, WarehouseSerializer, StoreFrontSerializer, 
     StockSerializer, StockProductSerializer, SupplierSerializer, ProductSerializer,
     StorefrontSaleProductSerializer,
-    InventorySerializer, TransferSerializer, TransferRequestSerializer, StockAlertSerializer,
+    TransferRequestSerializer, StockAlertSerializer,
     InventorySummarySerializer, StockArrivalReportSerializer,
     BusinessWarehouseSerializer, BusinessStoreFrontSerializer,
     StoreFrontEmployeeSerializer, WarehouseEmployeeSerializer,
@@ -88,13 +88,14 @@ class StockProductFilter(FilterSet):
     """Filter class for StockProduct model."""
     product = UUIDFilter(field_name='product_id')
     stock = UUIDFilter(field_name='stock_id')
+    warehouse = UUIDFilter(field_name='warehouse_id')  # Direct warehouse field on StockProduct
     supplier = UUIDFilter(field_name='supplier_id')
     has_quantity = BooleanFilter(method='filter_has_quantity', label='Has quantity greater than 0')
     search = CharFilter(method='filter_search', label='Search in product name/SKU')
 
     class Meta:
         model = StockProduct
-        fields = ['product', 'stock', 'supplier', 'has_quantity', 'search']
+        fields = ['product', 'stock', 'warehouse', 'supplier', 'has_quantity', 'search']
 
     def filter_has_quantity(self, queryset, name, value):
         """Filter stock products that have quantity > 0."""
@@ -113,12 +114,11 @@ class StockProductFilter(FilterSet):
 
 class StockFilter(FilterSet):
     """Filter class for Stock (batch) model."""
-    warehouse = UUIDFilter(field_name='warehouse_id')
     search = CharFilter(method='filter_search', label='Search in description or reference')
 
     class Meta:
         model = Stock
-        fields = ['warehouse', 'search']
+        fields = ['search']  # Stock doesn't have warehouse directly anymore
 
     def filter_search(self, queryset, name, value):
         """Search in description."""
@@ -171,9 +171,24 @@ def _filter_queryset_by_business(queryset, request, business_lookup, allowed_bus
 
 
 def _get_primary_business_for_owner(user):
-    if getattr(user, 'account_type', None) != getattr(User, 'ACCOUNT_OWNER', 'OWNER'):
-        return None
-    return user.owned_businesses.first()
+    """
+    Get the primary business for a user. 
+    Checks both account_type=OWNER and BusinessMembership OWNER role.
+    """
+    # First check if user has account_type OWNER and owned_businesses
+    if getattr(user, 'account_type', None) == getattr(User, 'ACCOUNT_OWNER', 'OWNER'):
+        business = user.owned_businesses.first()
+        if business:
+            return business
+    
+    # Also check BusinessMembership for OWNER role
+    owner_membership = BusinessMembership.objects.filter(
+        user=user,
+        role=BusinessMembership.OWNER,
+        is_active=True
+    ).select_related('business').first()
+    
+    return owner_membership.business if owner_membership else None
 
 
 def _ensure_business_admin(user, business):
@@ -484,7 +499,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 return 0
             return value
 
-        stock_products_qs = StockProduct.objects.filter(product=product).select_related('stock__warehouse')
+        stock_products_qs = StockProduct.objects.filter(product=product).select_related('warehouse', 'stock')
         stock_products = list(stock_products_qs)
         warehouse_aggregate = stock_products_qs.aggregate(
             current_quantity=Coalesce(Sum('quantity'), 0)
@@ -565,7 +580,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             reservation_qs = StockReservation.objects.filter(
                 stock_product__product=product,
                 status='ACTIVE'
-            ).select_related('stock_product__stock__warehouse')
+            ).select_related('stock_product__warehouse', 'stock_product__stock')
             reservations = list(reservation_qs)
             sale_lookup = {}
             sale_ids = []
@@ -985,7 +1000,7 @@ class StockViewSet(viewsets.ModelViewSet):
 class StockProductViewSet(viewsets.ModelViewSet):
     """Manage individual stock line items with pagination, filtering, and ordering."""
 
-    queryset = StockProduct.objects.select_related('product', 'supplier', 'stock__warehouse').all()
+    queryset = StockProduct.objects.select_related('product', 'supplier', 'warehouse', 'stock').all()
     serializer_class = StockProductSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = CustomPageNumberPagination
@@ -996,7 +1011,7 @@ class StockProductViewSet(viewsets.ModelViewSet):
     ordering = ['-created_at']  # Default ordering by newest first
 
     def get_queryset(self):
-        queryset = StockProduct.objects.select_related('product', 'supplier', 'stock__warehouse')
+        queryset = StockProduct.objects.select_related('product', 'supplier', 'warehouse', 'stock')
         user = self.request.user
         if user.is_superuser:
             return queryset
@@ -1004,7 +1019,9 @@ class StockProductViewSet(viewsets.ModelViewSet):
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return queryset.none()
-        return queryset.filter(stock__warehouse__business_link__business_id__in=business_ids)
+        
+        # Filter by warehouse business_link since warehouse is directly on StockProduct now
+        return queryset.filter(warehouse__business_link__business_id__in=business_ids)
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1033,7 +1050,9 @@ class StockProductViewSet(viewsets.ModelViewSet):
 
         instance = self.get_object()
         business_ids = _business_ids_for_user(self.request.user)
-        if instance.stock and instance.stock.warehouse and instance.stock.warehouse.business_link and instance.stock.warehouse.business_link.business_id not in business_ids:
+        
+        # Check if warehouse belongs to user's business
+        if instance.warehouse and instance.warehouse.business_link and instance.warehouse.business_link.business_id not in business_ids:
             raise PermissionDenied('You do not have permission to update this stock item.')
         serializer.save()
 
@@ -1076,7 +1095,7 @@ class StockProductViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(
                 Q(product__name__icontains=query) |
                 Q(product__sku__icontains=query) |
-                Q(stock__warehouse__name__icontains=query) |
+                Q(warehouse__name__icontains=query) |
                 Q(stock__batch_number__icontains=query)
             )
         
@@ -1084,7 +1103,7 @@ class StockProductViewSet(viewsets.ModelViewSet):
         if warehouse_id:
             try:
                 warehouse_uuid = UUID(warehouse_id)
-                queryset = queryset.filter(stock__warehouse_id=warehouse_uuid)
+                queryset = queryset.filter(warehouse_id=warehouse_uuid)
             except (TypeError, ValueError):
                 pass  # Ignore invalid UUID
         
@@ -1159,213 +1178,6 @@ class SupplierViewSet(viewsets.ModelViewSet):
         if instance.business_id not in business_ids:
             raise PermissionDenied('You do not have permission to delete this supplier.')
         instance.delete()
-
-
-class InventoryViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing inventory"""
-    queryset = Inventory.objects.select_related('product', 'warehouse', 'stock__supplier', 'stock__stock', 'stock__warehouse').all()
-    serializer_class = InventorySerializer
-    permission_classes = [permissions.IsAuthenticated]
-
-    def get_queryset(self):
-        queryset = Inventory.objects.select_related(
-            'product',
-            'warehouse',
-            'stock__supplier',
-            'stock__stock',
-            'stock__warehouse',
-        )
-        user = self.request.user
-        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
-            return queryset
-
-        business_ids = _business_ids_for_user(user)
-        if not business_ids:
-            return queryset.none()
-
-        return queryset.filter(
-            Q(product__business_id__in=business_ids) |
-            Q(warehouse__business_link__business_id__in=business_ids) |
-            Q(stock__warehouse__business_link__business_id__in=business_ids)
-        ).distinct()
-
-
-class TransferViewSet(viewsets.ModelViewSet):
-    """Manage warehouse → storefront transfers with workflow actions."""
-
-    queryset = Transfer.objects.select_related(
-        'business', 'source_warehouse', 'destination_storefront',
-        'requested_by', 'approved_by', 'fulfilled_by'
-    ).prefetch_related('line_items__product', 'audit_entries__actor')
-    serializer_class = TransferSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['status', 'source_warehouse', 'destination_storefront']
-    search_fields = ['reference', 'line_items__product__name', 'line_items__product__sku']
-    ordering_fields = ['created_at', 'updated_at', 'reference']
-    ordering = ['-created_at']
-
-    def get_queryset(self):
-        queryset = super().get_queryset()
-        user = self.request.user
-        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
-            return queryset
-
-        business_ids = _business_ids_for_user(user)
-        if not business_ids:
-            return queryset.none()
-
-        return queryset.filter(business_id__in=business_ids)
-
-    def perform_create(self, serializer):
-        warehouse = serializer.validated_data.get('source_warehouse')
-        link = getattr(warehouse, 'business_link', None)
-        business = link.business if link else serializer.validated_data.get('business')
-        self._ensure_membership(business)
-        serializer.save(requested_by=self.request.user, business=business)
-
-    def perform_update(self, serializer):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business)
-        serializer.save()
-
-    def destroy(self, request, *args, **kwargs):
-        transfer = self.get_object()
-        if not transfer.is_editable:
-            raise ValidationError('Only draft or rejected transfers can be deleted.')
-        self._ensure_membership(
-            transfer.business,
-            allowed_roles={BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
-        )
-        transfer.delete()
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-    def _ensure_membership(self, business: Business | None, allowed_roles: set[str] | None = None):
-        user = self.request.user
-        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
-            return None
-
-        if business is None:
-            raise PermissionDenied('Unable to resolve business context for this transfer.')
-
-        membership = BusinessMembership.objects.filter(
-            business=business,
-            user=user,
-            is_active=True,
-        ).first()
-
-        if not membership:
-            raise PermissionDenied('You are not a member of this business.')
-
-        if allowed_roles and membership.role not in allowed_roles:
-            raise PermissionDenied('You do not have the required role for this action.')
-
-        return membership
-
-    def _apply_line_item_updates(self, transfer: Transfer, payload, field_name: str):
-        if not payload:
-            return
-
-        line_map = {str(item.id): item for item in transfer.line_items.all()}
-        updates = []
-
-        for item in payload:
-            item_id = item.get('id')
-            if not item_id:
-                raise ValidationError({'line_items': 'Each adjustment must include an "id" field.'})
-            line = line_map.get(str(item_id))
-            if not line:
-                raise ValidationError({'line_items': f'Line item {item_id} was not found for this transfer.'})
-            if field_name not in item:
-                continue
-            value = item[field_name]
-            if value is None:
-                continue
-            if int(value) < 0:
-                raise ValidationError({'line_items': f'{field_name} cannot be negative.'})
-            setattr(line, field_name, int(value))
-            updates.append(line)
-
-        for line in updates:
-            line.save(update_fields=[field_name, 'updated_at'])
-
-    def _manager_roles(self):
-        return {BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
-
-    def _confirm_roles(self):
-        return self._manager_roles()
-
-    @action(detail=True, methods=['post'])
-    def submit(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business)
-        transfer.submit(request.user)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def approve(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
-        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'approved_quantity')
-        transfer.approve(request.user)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def reject(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
-        reason = request.data.get('reason')
-        if not reason:
-            raise ValidationError({'reason': 'This field is required.'})
-        transfer.reject(request.user, reason)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'], url_path='dispatch')
-    def dispatch_transfer(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
-        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'fulfilled_quantity')
-        with transaction.atomic():
-            transfer.dispatch(request.user)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def complete(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
-        self._apply_line_item_updates(transfer, request.data.get('line_items', []), 'fulfilled_quantity')
-        with transaction.atomic():
-            transfer.complete(request.user)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'])
-    def cancel(self, request, pk=None):
-        transfer = self.get_object()
-        self._ensure_membership(transfer.business, allowed_roles=self._manager_roles())
-        reason = request.data.get('reason')
-        transfer.cancel(request.user, reason)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
-
-    @action(detail=True, methods=['post'], url_path='confirm-receipt')
-    def confirm_receipt(self, request, pk=None):
-        transfer = self.get_object()
-        request_link = getattr(transfer, 'request', None)
-        if request_link and request.user == request_link.requested_by:
-            self._ensure_membership(transfer.business)
-        elif request.user == transfer.requested_by:
-            self._ensure_membership(transfer.business)
-        else:
-            self._ensure_membership(transfer.business, allowed_roles=self._confirm_roles())
-        notes = request.data.get('notes')
-        transfer.confirm_receipt(request.user, notes)
-        transfer.refresh_from_db()
-        return Response(self.get_serializer(transfer).data, status=status.HTTP_200_OK)
 
 
 class TransferRequestViewSet(viewsets.ModelViewSet):
@@ -1458,10 +1270,10 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
         transfer_request = self.get_object()
-        if transfer_request.status not in {TransferRequest.STATUS_NEW, TransferRequest.STATUS_ASSIGNED}:
-            raise ValidationError({'status': 'Only new or assigned requests can be cancelled.'})
+        if transfer_request.status != TransferRequest.STATUS_NEW:
+            raise ValidationError({'status': 'Only new requests can be cancelled.'})
 
-        if transfer_request.status == TransferRequest.STATUS_NEW and request.user == transfer_request.requested_by:
+        if request.user == transfer_request.requested_by:
             self._ensure_membership(transfer_request.business)
         else:
             self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
@@ -1473,23 +1285,26 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def fulfill(self, request, pk=None):
         transfer_request = self.get_object()
-        if transfer_request.status != TransferRequest.STATUS_ASSIGNED:
-            raise ValidationError({'status': 'Only assigned requests can be fulfilled.'})
+        if transfer_request.status == TransferRequest.STATUS_CANCELLED:
+            raise ValidationError({'status': 'Cancelled requests cannot be fulfilled.'})
 
-        transfer = transfer_request._current_transfer()
-        if not transfer:
-            raise ValidationError({'linked_transfer': 'Request is not linked to a transfer.'})
-        if transfer.status not in {Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED}:
-            raise ValidationError({'linked_transfer': 'Linked transfer must be in transit or completed before fulfillment.'})
+        if transfer_request.status == TransferRequest.STATUS_FULFILLED:
+            return Response(self.get_serializer(transfer_request).data, status=status.HTTP_200_OK)
 
         if request.user == transfer_request.requested_by:
             self._ensure_membership(transfer_request.business)
         else:
             self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
 
-        transfer_request.mark_fulfilled(request.user)
+        adjustments = transfer_request.apply_manual_inventory_fulfillment()
+        transfer_request.status = TransferRequest.STATUS_FULFILLED
+        transfer_request.fulfilled_at = timezone.now()
+        transfer_request.fulfilled_by = request.user
+        transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
         transfer_request.refresh_from_db()
-        return Response(self.get_serializer(transfer_request).data, status=status.HTTP_200_OK)
+        payload = self.get_serializer(transfer_request).data
+        payload['_inventory_adjustments'] = adjustments
+        return Response(payload, status=status.HTTP_200_OK)
 
     @action(detail=True, methods=['post'], url_path='update-status')
     def update_status(self, request, pk=None):
@@ -1503,7 +1318,6 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         
         valid_statuses = {
             TransferRequest.STATUS_NEW,
-            TransferRequest.STATUS_ASSIGNED,
             TransferRequest.STATUS_FULFILLED,
             TransferRequest.STATUS_CANCELLED,
         }
@@ -1529,13 +1343,7 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         elif new_status == TransferRequest.STATUS_FULFILLED:
             # Allow manual fulfillment override
             if transfer_request.status != TransferRequest.STATUS_FULFILLED:
-                linked_transfer = transfer_request._current_transfer()
-                if linked_transfer:
-                    if linked_transfer.status not in {Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED}:
-                        raise ValidationError({'linked_transfer': 'Linked transfer must be in transit or completed before fulfillment.'})
-                else:
-                    inventory_adjustments = transfer_request.apply_manual_inventory_fulfillment()
-
+                inventory_adjustments = transfer_request.apply_manual_inventory_fulfillment()
                 transfer_request.status = TransferRequest.STATUS_FULFILLED
                 transfer_request.fulfilled_at = timezone.now()
                 transfer_request.fulfilled_by = request.user
@@ -1546,13 +1354,6 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
             if transfer_request.status != TransferRequest.STATUS_NEW:
                 transfer_request.status = TransferRequest.STATUS_NEW
                 transfer_request.save(update_fields=['status', 'updated_at'])
-        elif new_status == TransferRequest.STATUS_ASSIGNED:
-            # Managers can mark as assigned without a transfer link (manual override)
-            if transfer_request.status != TransferRequest.STATUS_ASSIGNED:
-                transfer_request.status = TransferRequest.STATUS_ASSIGNED
-                if not transfer_request.assigned_at:
-                    transfer_request.assigned_at = timezone.now()
-                transfer_request.save(update_fields=['status', 'assigned_at', 'updated_at'])
         
         transfer_request.refresh_from_db()
         
@@ -1607,7 +1408,12 @@ class StockAvailabilityView(APIView):
             if business.id not in business_ids:
                 raise PermissionDenied('You do not have access to this business.')
 
-        available_quantity = Transfer.available_quantity(warehouse, product)
+        available_quantity = (
+            StockProduct.objects.filter(
+                warehouse=warehouse,
+                product=product
+            ).aggregate(total=Sum('quantity'))['total'] or 0
+        )
         is_available = available_quantity >= requested_quantity
 
         if is_available:
@@ -1760,8 +1566,6 @@ class EmployeeWorkspaceView(APIView):
                 'businesses': [],
                 'warehouses': [],
                 'storefronts': [],
-                'pending_approvals': [],
-                'incoming_transfers': [],
                 'my_transfer_requests': [],
             },
             status=status.HTTP_200_OK,
@@ -1860,7 +1664,7 @@ class EmployeeWorkspaceView(APIView):
 
         warehouse_stock_map = {}
         if all_warehouse_ids:
-            for row in Inventory.objects.filter(warehouse_id__in=all_warehouse_ids).values('warehouse_id').annotate(total=Sum('quantity')):
+            for row in StockProduct.objects.filter(warehouse_id__in=all_warehouse_ids).values('warehouse_id').annotate(total=Sum('quantity')):
                 warehouse_stock_map[row['warehouse_id']] = int(row['total'] or 0)
 
         storefront_stock_map = {}
@@ -1872,7 +1676,7 @@ class EmployeeWorkspaceView(APIView):
         if all_storefront_ids:
             pending_qs = TransferRequest.objects.filter(
                 storefront_id__in=all_storefront_ids,
-                status__in=[TransferRequest.STATUS_NEW, TransferRequest.STATUS_ASSIGNED],
+                status=TransferRequest.STATUS_NEW,
             )
             for row in pending_qs.values('storefront_id').annotate(total=Count('id')):
                 storefront_pending_map[row['storefront_id']] = int(row['total'] or 0)
@@ -1898,21 +1702,6 @@ class EmployeeWorkspaceView(APIView):
                 TransferRequest.objects.filter(business_id__in=non_manager_business_ids).filter(request_filter)
             )
 
-        manager_transfer_counts = {}
-        if manager_business_ids:
-            manager_transfer_counts = _build_status_counts(
-                Transfer.objects.filter(business_id__in=manager_business_ids)
-            )
-
-        non_manager_transfer_counts = {}
-        if non_manager_business_ids and non_manager_storefront_ids:
-            non_manager_transfer_counts = _build_status_counts(
-                Transfer.objects.filter(
-                    business_id__in=non_manager_business_ids,
-                    destination_storefront_id__in=non_manager_storefront_ids,
-                )
-            )
-
         my_transfer_requests = [
             {
                 'id': str(request_obj.id),
@@ -1920,53 +1709,12 @@ class EmployeeWorkspaceView(APIView):
                 'priority': request_obj.priority,
                 'storefront': str(request_obj.storefront_id),
                 'storefront_name': request_obj.storefront.name,
-                'linked_transfer_reference': request_obj.linked_transfer_reference,
                 'created_at': request_obj.created_at.isoformat(),
             }
             for request_obj in TransferRequest.objects.filter(requested_by=user)
             .select_related('storefront')
             .order_by('-created_at')[:10]
         ]
-
-        pending_approvals = []
-        if manager_business_ids:
-            pending_approvals = [
-                {
-                    'id': str(transfer.id),
-                    'reference': transfer.reference,
-                    'status': transfer.status,
-                    'destination_storefront': str(transfer.destination_storefront_id),
-                    'destination_storefront_name': transfer.destination_storefront.name,
-                    'created_at': transfer.created_at.isoformat(),
-                }
-                for transfer in Transfer.objects.filter(
-                    business_id__in=manager_business_ids,
-                    status=Transfer.STATUS_REQUESTED,
-                )
-                .select_related('destination_storefront')
-                .order_by('created_at')[:10]
-            ]
-
-        incoming_transfers = []
-        incoming_storefront_ids = all_storefront_ids
-        if incoming_storefront_ids:
-            incoming_transfers = [
-                {
-                    'id': str(transfer.id),
-                    'reference': transfer.reference,
-                    'status': transfer.status,
-                    'destination_storefront': str(transfer.destination_storefront_id),
-                    'destination_storefront_name': transfer.destination_storefront.name,
-                    'completed_at': transfer.completed_at.isoformat() if transfer.completed_at else None,
-                    'received_at': transfer.received_at.isoformat() if transfer.received_at else None,
-                }
-                for transfer in Transfer.objects.filter(
-                    destination_storefront_id__in=incoming_storefront_ids,
-                    status__in=[Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED],
-                )
-                .select_related('destination_storefront')
-                .order_by('-created_at')[:10]
-            ]
 
         businesses_payload = []
         warehouses_payload = []
@@ -1975,15 +1723,6 @@ class EmployeeWorkspaceView(APIView):
         seen_storefront_ids = set()
 
         request_status_template = {status: 0 for status, _ in TransferRequest.STATUS_CHOICES}
-        transfer_status_template = {
-            Transfer.STATUS_DRAFT: 0,
-            Transfer.STATUS_REQUESTED: 0,
-            Transfer.STATUS_APPROVED: 0,
-            Transfer.STATUS_IN_TRANSIT: 0,
-            Transfer.STATUS_COMPLETED: 0,
-            Transfer.STATUS_REJECTED: 0,
-            Transfer.STATUS_CANCELLED: 0,
-        }
 
         for business_id, context in contexts.items():
             membership = context['membership']
@@ -1994,12 +1733,6 @@ class EmployeeWorkspaceView(APIView):
             source_counts = manager_request_counts if is_manager else non_manager_request_counts
             for status_key, total in source_counts.get(business_id, {}).items():
                 request_counts[status_key] = total
-
-            transfer_counts = transfer_status_template.copy()
-            transfer_source_counts = manager_transfer_counts if is_manager else non_manager_transfer_counts
-            for status_key, total in transfer_source_counts.get(business_id, {}).items():
-                if status_key in transfer_counts:
-                    transfer_counts[status_key] = total
 
             warehouse_stock_total = sum(warehouse_stock_map.get(warehouse_id, 0) for warehouse_id in context['warehouse_ids'])
             storefront_stock_total = sum(storefront_stock_map.get(storefront_id, 0) for storefront_id in context['storefront_ids'])
@@ -2013,9 +1746,6 @@ class EmployeeWorkspaceView(APIView):
                     'warehouse_count': len(context['warehouses']),
                     'transfer_requests': {
                         'by_status': request_counts,
-                    },
-                    'transfers': {
-                        'by_status': transfer_counts,
                     },
                     'stock': {
                         'warehouse_on_hand': warehouse_stock_total,
@@ -2066,8 +1796,6 @@ class EmployeeWorkspaceView(APIView):
                 'businesses': businesses_payload,
                 'warehouses': warehouses_payload,
                 'storefronts': storefronts_payload,
-                'pending_approvals': pending_approvals,
-                'incoming_transfers': incoming_transfers,
                 'my_transfer_requests': my_transfer_requests,
             },
             status=status.HTTP_200_OK,
@@ -2131,14 +1859,14 @@ class ProfitProjectionViewSet(viewsets.ViewSet):
         """Get base queryset for user's business"""
         user = self.request.user
         if user.is_superuser:
-            return StockProduct.objects.select_related('product', 'supplier', 'stock__warehouse')
+            return StockProduct.objects.select_related('product', 'supplier', 'warehouse', 'stock')
 
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return StockProduct.objects.none()
         return StockProduct.objects.filter(
-            stock__warehouse__business_link__business_id__in=business_ids
-        ).select_related('product', 'supplier', 'stock__warehouse')
+            warehouse__business_link__business_id__in=business_ids
+        ).select_related('product', 'supplier', 'warehouse', 'stock')
 
     @action(detail=False, methods=['post'], url_path='stock-product')
     def stock_product_projection(self, request):
@@ -2477,7 +2205,7 @@ class WarehouseStockAvailabilityView(APIView):
             return Response({'detail': 'quantity must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
 
         available_quantity = (
-            Inventory.objects.filter(warehouse=warehouse, product=product)
+            StockProduct.objects.filter(warehouse=warehouse, product=product)
             .aggregate(total=Sum('quantity'))
             .get('total')
         ) or 0
@@ -2609,7 +2337,7 @@ class StockAvailabilityView(APIView):
 
         stock_products = (
             StockProduct.objects.filter(product=product)
-            .select_related('stock__warehouse')
+            .select_related('warehouse', 'stock')
             .order_by('-created_at')
         )
 
@@ -2623,7 +2351,7 @@ class StockAvailabilityView(APIView):
                 'wholesale_price': str(stock_product.wholesale_price) if stock_product.wholesale_price else None,
                 'expiry_date': stock_product.expiry_date.isoformat() if stock_product.expiry_date else None,
                 'created_at': stock_product.created_at.isoformat(),
-                'warehouse': stock_product.stock.warehouse.name if stock_product.stock and stock_product.stock.warehouse else None,
+                'warehouse': stock_product.warehouse.name if stock_product.warehouse else None,
             })
 
         response_payload = {

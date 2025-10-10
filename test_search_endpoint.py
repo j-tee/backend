@@ -25,7 +25,7 @@ def test_search_logic():
     print("\n✅ SEARCH FIELDS (Multi-field OR search):")
     print("   - product__name (case-insensitive, partial match)")
     print("   - product__sku (case-insensitive, partial match)")
-    print("   - stock__warehouse__name (case-insensitive, partial match)")
+    print("   - warehouse__name (case-insensitive, partial match)")
     print("   - stock__batch_number (case-insensitive, partial match)")
     
     print("\n✅ SECURITY:")

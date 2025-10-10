@@ -69,7 +69,7 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
             'stock_product',
             'stock_product__product',
             'stock_product__stock',
-            'stock_product__stock__warehouse',
+            'stock_product__warehouse',
             'created_by',
             'approved_by'
         ).prefetch_related(
@@ -94,7 +94,7 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
         # Filter by warehouse
         warehouse_id = self.request.query_params.get('warehouse')
         if warehouse_id:
-            queryset = queryset.filter(stock_product__stock__warehouse__id=warehouse_id)
+            queryset = queryset.filter(stock_product__warehouse__id=warehouse_id)
         
         return queryset
     
