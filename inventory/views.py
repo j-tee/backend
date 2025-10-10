@@ -956,7 +956,7 @@ class BusinessMembershipStorefrontAssignmentView(APIView):
 
 class StockViewSet(viewsets.ModelViewSet):
     """ViewSet for managing stock batches with pagination, filtering, and ordering."""
-    queryset = Stock.objects.select_related('warehouse').all()
+    queryset = Stock.objects.all()
     serializer_class = StockSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = CustomPageNumberPagination
@@ -967,15 +967,16 @@ class StockViewSet(viewsets.ModelViewSet):
     ordering = ['-arrival_date']  # Default ordering by newest arrivals first
 
     def get_queryset(self):
-        queryset = Stock.objects.select_related('warehouse')
+        queryset = Stock.objects.all()
         user = self.request.user
         if user.is_superuser:
-            return queryset.prefetch_related('items__product')
+            return queryset.prefetch_related('items__product', 'items__warehouse')
 
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return queryset.none()
-        return queryset.filter(warehouse__business_link__business_id__in=business_ids).prefetch_related('items__product')
+        # Filter by warehouse through stock items (StockProduct)
+        return queryset.filter(items__warehouse__business_link__business_id__in=business_ids).distinct().prefetch_related('items__product', 'items__warehouse')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -983,8 +984,9 @@ class StockViewSet(viewsets.ModelViewSet):
         if business is None:
             raise PermissionDenied('Only business owners with an active business can create stock receipts.')
 
-        stock = serializer.save()
-        BusinessWarehouse.objects.get_or_create(business=business, warehouse=stock.warehouse)
+        # Stock model no longer has warehouse field
+        # Warehouse is now on StockProduct items
+        serializer.save()
 
     def perform_update(self, serializer):
         if self.request.user.is_superuser:
@@ -992,7 +994,10 @@ class StockViewSet(viewsets.ModelViewSet):
             return
 
         instance = self.get_object()
-        if instance.warehouse.business_link and instance.warehouse.business_link.business_id not in _business_ids_for_user(self.request.user):
+        # Check permission through stock items' warehouses
+        user_business_ids = _business_ids_for_user(self.request.user)
+        stock_warehouses = instance.items.values_list('warehouse__business_link__business_id', flat=True).distinct()
+        if not any(biz_id in user_business_ids for biz_id in stock_warehouses if biz_id):
             raise PermissionDenied('You do not have permission to update this stock receipt.')
         serializer.save()
 
