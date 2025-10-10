@@ -513,6 +513,56 @@ class AddSaleItemSerializer(serializers.Serializer):
         min_value=Decimal('0'),
         max_value=Decimal('100')
     )
+    
+    def validate(self, data):
+        """
+        DATA INTEGRITY CHECK: Ensure product has storefront inventory before allowing sale.
+        This prevents sales from happening without proper stock flow:
+        Warehouse → Transfer Request → Fulfillment → StoreFront → Sales
+        """
+        from inventory.models import StoreFrontInventory
+        
+        # Get storefront from context (should be passed from view)
+        sale = self.context.get('sale')
+        if not sale or not sale.storefront:
+            # If no storefront context, skip validation (will fail elsewhere)
+            return data
+        
+        product = data.get('product')
+        quantity = data.get('quantity', Decimal('0'))
+        storefront = sale.storefront
+        
+        # Check if product has storefront inventory
+        try:
+            storefront_inv = StoreFrontInventory.objects.get(
+                storefront=storefront,
+                product=product
+            )
+        except StoreFrontInventory.DoesNotExist:
+            raise serializers.ValidationError({
+                'product': f'Product "{product.name}" has not been transferred to storefront "{storefront.name}". '
+                          f'Please create a transfer request and fulfill it first.'
+            })
+        
+        # Calculate available quantity at storefront
+        # (StoreFrontInventory.quantity - already sold from this storefront)
+        from .models import SaleItem
+        sold_from_storefront = SaleItem.objects.filter(
+            product=product,
+            sale__storefront=storefront,
+            sale__status='COMPLETED'
+        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
+        
+        available_at_storefront = storefront_inv.quantity - sold_from_storefront
+        
+        if available_at_storefront < quantity:
+            raise serializers.ValidationError({
+                'quantity': f'Insufficient storefront inventory for "{product.name}". '
+                          f'Available: {available_at_storefront}, Requested: {quantity}. '
+                          f'Create a transfer request to move more stock to this storefront.'
+            })
+        
+        return data
 
 
 class CompleteSaleSerializer(serializers.Serializer):

@@ -62,7 +62,8 @@ from django.db.models import Sum
 from accounts.models import User, Business, BusinessMembership
 from inventory.models import (
     Category, Supplier, Warehouse, StoreFront, Product, Stock, StockProduct,
-    StoreFrontInventory, BusinessWarehouse, BusinessStoreFront
+    StoreFrontInventory, BusinessWarehouse, BusinessStoreFront, TransferRequest,
+    TransferRequestLineItem
 )
 from inventory.stock_adjustments import StockAdjustment
 from sales.models import Customer, Sale, SaleItem, Payment
@@ -489,8 +490,40 @@ class DataPopulator:
                 
                 print(f"      ✅ {product.name}: {quantity} units @ GH₵{unit_cost}")
     
+    def create_and_fulfill_transfer_request(self, storefront, product, quantity, created_at):
+        """
+        Create and fulfill a transfer request to move stock from warehouse to storefront.
+        This follows the correct data flow: Warehouse → Transfer Request → Fulfillment → Storefront
+        """
+        # Create transfer request
+        transfer_request = TransferRequest.objects.create(
+            business=self.business,
+            storefront=storefront,
+            requested_by=self.user,
+            priority='MEDIUM',
+            status='NEW',
+            notes=f'Stock request for {product.name} - Sample Data',
+            created_at=created_at
+        )
+        
+        # Create line item
+        TransferRequestLineItem.objects.create(
+            transfer_request=transfer_request,
+            product=product,
+            requested_quantity=quantity
+        )
+        
+        # Fulfill the request (this creates/updates StoreFrontInventory)
+        transfer_request.apply_manual_inventory_fulfillment()
+        transfer_request.status = 'FULFILLED'
+        transfer_request.fulfilled_at = created_at
+        transfer_request.fulfilled_by = self.user
+        transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+        
+        return transfer_request
+    
     def generate_sales_for_month(self, year, month):
-        """Generate sales for a specific month"""
+        """Generate sales for a specific month with proper stock flow"""
         month_name = datetime(2025, month, 1).strftime('%B %Y')
         
         # Get available stocks
@@ -505,6 +538,12 @@ class DataPopulator:
             return
         
         print(f"\n  💰 Generating Sales for {month_name}:")
+        
+        # STEP 1: Create Transfer Requests to move stock to storefronts
+        print(f"  📦 Creating Transfer Requests...")
+        transfer_requests_created = self._create_transfer_requests_for_month(
+            year, month, available_stocks
+        )
         
         # Distribute sales across both storefronts
         num_sales = randint(20, 40)  # 20-40 sales per month

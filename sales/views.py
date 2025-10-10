@@ -171,7 +171,8 @@ class SaleViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        serializer = AddSaleItemSerializer(data=request.data)
+        # Pass sale in context for storefront inventory validation
+        serializer = AddSaleItemSerializer(data=request.data, context={'sale': sale})
         serializer.is_valid(raise_exception=True)
         
         data = serializer.validated_data
