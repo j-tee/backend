@@ -42,24 +42,31 @@ from django.core.exceptions import ValidationError
 @receiver(pre_save, sender='inventory.StockProduct')
 def prevent_quantity_edit_after_movements(sender, instance, **kwargs):
     """
-    CRITICAL: Prevent ANY editing of StockProduct.quantity after stock movements.
+    CRITICAL: Prevent editing StockProduct.quantity after ANY stock movement.
     
-    StockProduct.quantity represents the INITIAL INTAKE AMOUNT and must NEVER change
-    once stock movements have occurred. This ensures data integrity and audit trails.
+    BUSINESS RULE:
+    ==============
+    StockProduct.quantity can ONLY be edited:
+    1. During initial creation (intake data entry)
+    2. Immediately after creation, BEFORE any stock movements occur (to fix intake errors)
     
-    Allowed:
-    - Setting quantity on creation (intake)
-    - Editing quantity BEFORE any movements (to fix intake errors)
+    Once ANY of these occur, quantity is PERMANENTLY LOCKED:
+    - Stock Adjustment created (any status: PENDING, APPROVED, COMPLETED, REJECTED)
+    - Transfer Request created (any status: PENDING, APPROVED, FULFILLED, REJECTED, CANCELLED)
+    - Storefront Inventory allocation exists
+    - Sale transaction exists (any status: DRAFT, PENDING, COMPLETED, PARTIAL, REFUNDED, CANCELLED)
     
-    Blocked:
-    - ANY edits to quantity after adjustments exist
-    - ANY edits to quantity after transfers exist
-    - ANY edits to quantity after sales exist
+    WHY THIS RULE EXISTS:
+    ====================
+    - StockProduct.quantity = Initial Intake Amount (immutable historical record)
+    - Available stock = CALCULATED (not stored):
+      Available = Intake + Adjustments - Transfers - Sales
+    - Modifying intake breaks audit trail and calculation integrity
     
-    Why: Available stock is calculated as:
-         Available = StockProduct.quantity + SUM(adjustments) - SUM(transfers) - SUM(sales)
-         
-    If we modify StockProduct.quantity, we break this calculation and lose audit trail.
+    CORRECT WORKFLOW FOR CORRECTIONS:
+    =================================
+    ❌ WRONG: Edit StockProduct.quantity after movements
+    ✅ RIGHT: Create Stock Adjustment with reason "Intake data correction"
     """
     from inventory.models import StockProduct
     
@@ -79,47 +86,56 @@ def prevent_quantity_edit_after_movements(sender, instance, **kwargs):
         return
     
     # CRITICAL CHECK: Has ANY stock movement occurred?
+    # Once ANY movement exists (regardless of status), quantity is LOCKED
     has_movements = False
     movement_details = []
     
-    # Check for completed adjustments
-    adjustment_count = instance.adjustments.filter(status='COMPLETED').count()
+    # Check for ANY adjustments (PENDING, APPROVED, COMPLETED, REJECTED)
+    adjustment_count = instance.adjustments.count()
     if adjustment_count > 0:
         has_movements = True
-        movement_details.append(f"{adjustment_count} completed adjustment(s)")
+        movement_details.append(f"{adjustment_count} stock adjustment(s)")
     
-    # Check for fulfilled transfers
+    # Check for ANY transfer requests that reference this product
+    if not has_movements:
+        from inventory.models import TransferRequest, TransferRequestLineItem
+        # TransferRequestLineItem references product, not stock_product
+        transfer_count = TransferRequestLineItem.objects.filter(
+            product=instance.product
+        ).count()
+        if transfer_count > 0:
+            has_movements = True
+            movement_details.append(f"{transfer_count} transfer request(s)")
+    
+    # Check for ANY storefront inventory allocations
     if not has_movements:
         from inventory.models import StoreFrontInventory
         storefront_count = StoreFrontInventory.objects.filter(
-            product=instance.product,
-            quantity__gt=0
+            product=instance.product
         ).count()
         if storefront_count > 0:
             has_movements = True
-            movement_details.append(f"{storefront_count} storefront(s) with inventory")
+            movement_details.append(f"{storefront_count} storefront allocation(s)")
     
-    # Check for completed sales
+    # Check for ANY sales that reference this specific stock_product
     if not has_movements:
         from sales.models import SaleItem
         sale_count = SaleItem.objects.filter(
-            product=instance.product,
-            sale__status='COMPLETED'
+            stock_product=instance
         ).count()
         if sale_count > 0:
             has_movements = True
-            movement_details.append(f"{sale_count} completed sale(s)")
+            movement_details.append(f"{sale_count} sale transaction(s)")
     
     # BLOCK the change if any movements exist
     if has_movements:
         details = ', '.join(movement_details)
         raise ValidationError(
-            f'BLOCKED: Cannot modify StockProduct.quantity for {instance.product.name} '
-            f'because stock movements have occurred ({details}). '
-            f'StockProduct.quantity represents the initial intake amount and must remain '
-            f'unchanged at {old_instance.quantity} units. '
-            f'Use Stock Adjustments to record corrections - they will be reflected in '
-            f'available stock calculations without modifying the intake record.'
+            f'Cannot edit quantity for {instance.product.name} (Batch: {instance.stock.description if instance.stock else "N/A"}). '
+            f'Stock movements have occurred: {details}. '
+            f'The quantity field ({old_instance.quantity} units) is locked after the first stock movement. '
+            f'This preserves the intake record as the single source of truth. '
+            f'To correct stock levels, create a Stock Adjustment instead.'
         )
 
 
