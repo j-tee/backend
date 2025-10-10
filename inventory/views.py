@@ -11,6 +11,7 @@ from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, CharFilter, BooleanFilter, UUIDFilter
 from django.db import IntegrityError, transaction
 from django.db.models import Q, Sum, Count
+from django.db.models.functions import Coalesce
 from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -31,6 +32,7 @@ from .models import (
 from .serializers import (
     CategorySerializer, WarehouseSerializer, StoreFrontSerializer, 
     StockSerializer, StockProductSerializer, SupplierSerializer, ProductSerializer,
+    StorefrontSaleProductSerializer,
     InventorySerializer, TransferSerializer, TransferRequestSerializer, StockAlertSerializer,
     InventorySummarySerializer, StockArrivalReportSerializer,
     BusinessWarehouseSerializer, BusinessStoreFrontSerializer,
@@ -40,12 +42,17 @@ from .serializers import (
     BulkProfitProjectionSerializer, BulkProfitProjectionResponseSerializer
 )
 
-# Import StockReservation for availability calculation
+# Import sales models for availability calculation
 try:
-    from sales.models import StockReservation
+    from sales.models import StockReservation, Sale, SaleItem
     SALES_APP_AVAILABLE = True
 except ImportError:
+    StockReservation = None
+    Sale = None
+    SaleItem = None
     SALES_APP_AVAILABLE = False
+
+from .stock_adjustments import StockAdjustment
 
 
 User = get_user_model()
@@ -313,6 +320,85 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('You do not have permission to delete this store front.')
         instance.delete()
 
+    @action(detail=True, methods=['get'], url_path='sale-catalog')
+    def sale_catalog(self, request, pk=None):
+        """Return POS catalog data limited to products with stock metadata."""
+
+        storefront = self.get_object()
+
+        include_zero = request.query_params.get('include_zero', '').lower() == 'true'
+
+        inventory_qs = StoreFrontInventory.objects.filter(storefront=storefront)
+        if not include_zero:
+            inventory_qs = inventory_qs.filter(quantity__gt=0)
+
+        inventory_totals = {
+            row['product_id']: row['total_quantity']
+            for row in inventory_qs.values('product_id').annotate(total_quantity=Sum('quantity'))
+        }
+
+        if not inventory_totals:
+            return Response({'storefront': str(storefront.id), 'products': []}, status=status.HTTP_200_OK)
+
+        stock_products = (
+            StockProduct.objects.filter(product_id__in=inventory_totals.keys())
+            .select_related('product', 'product__category')
+            .order_by('product_id', '-created_at')
+        )
+
+        stock_map: dict = {}
+        for stock_product in stock_products:
+            entry = stock_map.setdefault(
+                stock_product.product_id,
+                {
+                    'product': stock_product.product,
+                    'latest': None,
+                    'stock_product_ids': [],
+                }
+            )
+
+            entry['stock_product_ids'].append(stock_product.id)
+
+            if entry['latest'] is None:
+                entry['latest'] = stock_product
+
+        filtered_inventory = {
+            product_id: quantity
+            for product_id, quantity in inventory_totals.items()
+            if product_id in stock_map
+        }
+
+        if not filtered_inventory:
+            return Response({'storefront': str(storefront.id), 'products': []}, status=status.HTTP_200_OK)
+
+        catalog_items = []
+        for product_id, quantity in filtered_inventory.items():
+            entry = stock_map[product_id]
+            latest = entry['latest']
+            product = entry['product']
+
+            retail_price = latest.retail_price if latest and latest.retail_price is not None else Decimal('0.00')
+            wholesale_price = latest.wholesale_price if latest and latest.wholesale_price is not None else None
+            if wholesale_price is not None and wholesale_price <= Decimal('0.00'):
+                wholesale_price = None
+
+            catalog_items.append({
+                'product_id': product.id,
+                'product_name': product.name,
+                'sku': product.sku,
+                'category_name': product.category.name if product.category else None,
+                'available_quantity': int(quantity),
+                'retail_price': retail_price,
+                'wholesale_price': wholesale_price,
+                'stock_product_ids': entry['stock_product_ids'],
+                'last_stocked_at': latest.created_at if latest else None,
+            })
+
+        catalog_items.sort(key=lambda item: item['product_name'].lower())
+
+        serializer = StorefrontSaleProductSerializer(catalog_items, many=True)
+        return Response({'storefront': str(storefront.id), 'products': serializer.data}, status=status.HTTP_200_OK)
+
 
 class ProductViewSet(viewsets.ModelViewSet):
     """ViewSet for managing products with pagination, filtering, and ordering."""
@@ -375,6 +461,225 @@ class ProductViewSet(viewsets.ModelViewSet):
             'has_stock': stock_products.exists(),
             'total_quantity': sum(sp.quantity for sp in stock_products)
         })
+
+    @action(detail=True, methods=['get'], url_path='stock-reconciliation')
+    def stock_reconciliation(self, request, pk=None):
+        """Return aggregated stock metrics for banner reconciliation."""
+
+        product = self.get_object()
+
+        def to_decimal(value):
+            if value is None:
+                return Decimal('0')
+            if isinstance(value, Decimal):
+                return value
+            return Decimal(str(value))
+
+        def to_number(value):
+            if isinstance(value, Decimal):
+                if value == value.to_integral_value():
+                    return int(value)
+                return float(value)
+            if value is None:
+                return 0
+            return value
+
+        stock_products_qs = StockProduct.objects.filter(product=product).select_related('stock__warehouse')
+        stock_products = list(stock_products_qs)
+        warehouse_aggregate = stock_products_qs.aggregate(
+            current_quantity=Coalesce(Sum('quantity'), 0)
+        )
+
+        storefront_qs = StoreFrontInventory.objects.filter(product=product).select_related('storefront')
+        storefront_entries = list(storefront_qs)
+        storefront_total = storefront_qs.aggregate(total=Coalesce(Sum('quantity'), 0))['total'] or 0
+
+        # Build storefront breakdown with sellable and reserved
+        storefront_breakdown = []
+        for entry in storefront_entries:
+            on_hand = to_decimal(entry.quantity)
+            
+            # Calculate reservations for this storefront
+            reserved_qty = Decimal('0')
+            if SALES_APP_AVAILABLE and StockReservation is not None and Sale is not None:
+                # Get active reservations linked to sales at this storefront
+                storefront_reservations = StockReservation.objects.filter(
+                    stock_product__product=product,
+                    status='ACTIVE'
+                ).select_related('stock_product')
+                
+                for res in storefront_reservations:
+                    try:
+                        sale_uuid = UUID(str(res.cart_session_id))
+                        sale = Sale.objects.filter(
+                            id=sale_uuid,
+                            storefront=entry.storefront,
+                            status__in=['DRAFT', 'PENDING', 'PARTIAL']
+                        ).first()
+                        if sale:
+                            reserved_qty += to_decimal(res.quantity)
+                    except (ValueError, TypeError):
+                        pass
+            
+            sellable_qty = on_hand - reserved_qty
+            if sellable_qty < Decimal('0'):
+                sellable_qty = Decimal('0')
+            
+            storefront_breakdown.append({
+                'storefront_id': str(entry.storefront_id),
+                'storefront_name': entry.storefront.name,
+                'on_hand': to_number(on_hand),
+                'sellable': to_number(sellable_qty),
+                'reserved': to_number(reserved_qty),
+            })
+
+        completed_units = Decimal('0')
+        completed_value = Decimal('0')
+        completed_sales = set()
+        if SALES_APP_AVAILABLE and SaleItem is not None:
+            completed_items = SaleItem.objects.filter(
+                product=product,
+                sale__status=Sale.STATUS_COMPLETED
+            ).select_related('sale', 'sale__storefront')
+            for item in completed_items:
+                completed_units += to_decimal(item.quantity)
+                completed_value += to_decimal(item.total_price)
+                completed_sales.add(str(item.sale_id))
+
+        adjustments_qs = StockAdjustment.objects.filter(
+            stock_product__product=product,
+            status='COMPLETED'
+        )
+        negative_adjustments = adjustments_qs.filter(quantity__lt=0).aggregate(total=Coalesce(Sum('quantity'), 0))['total'] or 0
+        positive_adjustments = adjustments_qs.filter(quantity__gt=0).aggregate(total=Coalesce(Sum('quantity'), 0))['total'] or 0
+        shrinkage_units = abs(Decimal(str(negative_adjustments))) if negative_adjustments else Decimal('0')
+        correction_units = Decimal(str(positive_adjustments)) if positive_adjustments else Decimal('0')
+
+        reservation_details = []
+        reservations_linked_units = Decimal('0')
+        reservations_orphaned_units = Decimal('0')
+        linked_count = 0
+        orphaned_count = 0
+        ACTIVE_SALE_STATUSES = {'DRAFT', 'PENDING', 'PARTIAL', 'COMPLETED'}
+        if SALES_APP_AVAILABLE and StockReservation is not None:
+            reservation_qs = StockReservation.objects.filter(
+                stock_product__product=product,
+                status='ACTIVE'
+            ).select_related('stock_product__stock__warehouse')
+            reservations = list(reservation_qs)
+            sale_lookup = {}
+            sale_ids = []
+            for reservation in reservations:
+                sale_uuid = None
+                if reservation.cart_session_id:
+                    try:
+                        sale_uuid = UUID(str(reservation.cart_session_id))
+                    except (ValueError, TypeError):
+                        sale_uuid = None
+                if sale_uuid:
+                    sale_ids.append(str(sale_uuid))
+                reservation_details.append({
+                    'id': str(reservation.id),
+                    'quantity': to_number(reservation.quantity),
+                    'cart_session_id': reservation.cart_session_id,
+                    'linked_sale_id': str(sale_uuid) if sale_uuid else None,
+                    'expires_at': reservation.expires_at,
+                })
+
+            if sale_ids:
+                sale_lookup = {
+                    str(sale.id): sale
+                    for sale in Sale.objects.filter(id__in=sale_ids).only('id', 'status')
+                }
+
+            for detail, reservation in zip(reservation_details, reservations):
+                quantity_decimal = to_decimal(reservation.quantity)
+                linked_sale_id = detail['linked_sale_id']
+                sale = sale_lookup.get(linked_sale_id) if linked_sale_id else None
+                if sale and sale.status in ACTIVE_SALE_STATUSES:
+                    reservations_linked_units += quantity_decimal
+                    linked_count += 1
+                else:
+                    reservations_orphaned_units += quantity_decimal
+                    orphaned_count += 1
+        else:
+            reservations = []
+
+        storefront_total_decimal = to_decimal(storefront_total)
+        recorded_quantity_decimal = to_decimal(warehouse_aggregate.get('current_quantity', 0))
+        
+        # Warehouse on hand = Recorded batch - Storefront on hand
+        warehouse_on_hand = recorded_quantity_decimal - storefront_total_decimal
+
+        # Reconciliation formula: Start with current physical stock, add back what was removed/sold
+        # recorded_batch = warehouse_on_hand + storefront_on_hand + sold - shrinkage + corrections - reservations
+        formula_baseline = (
+            warehouse_on_hand
+            + storefront_total_decimal
+            - completed_units  # SUBTRACT sold units (they're gone)
+            - shrinkage_units
+            + correction_units
+            - reservations_linked_units
+        )
+
+        computed_initial_decimal = formula_baseline
+
+        response = {
+            'product': {
+                'id': str(product.id),
+                'name': product.name,
+                'sku': product.sku,
+            },
+            'warehouse': {
+                'recorded_quantity': to_number(recorded_quantity_decimal),
+                'inventory_on_hand': to_number(warehouse_on_hand),
+                'batches': [
+                    {
+                        'stock_product_id': str(sp.id),
+                        'warehouse_id': str(sp.stock.warehouse_id) if sp.stock and sp.stock.warehouse_id else None,
+                        'warehouse_name': sp.stock.warehouse.name if sp.stock and sp.stock.warehouse else None,
+                        'quantity': sp.quantity,
+                        'arrival_date': sp.stock.arrival_date if sp.stock else None,
+                    }
+                    for sp in stock_products
+                ],
+            },
+            'storefront': {
+                'total_on_hand': to_number(storefront_total_decimal),
+                'breakdown': storefront_breakdown,
+            },
+            'sales': {
+                'completed_units': to_number(completed_units),
+                'completed_value': to_number(completed_value),
+                'completed_sale_ids': sorted(completed_sales),
+            },
+            'adjustments': {
+                'shrinkage_units': to_number(shrinkage_units),
+                'correction_units': to_number(correction_units),
+            },
+            'reservations': {
+                'linked_units': to_number(reservations_linked_units),
+                'orphaned_units': to_number(reservations_orphaned_units),
+                'linked_count': linked_count,
+                'orphaned_count': orphaned_count,
+                'details': reservation_details,
+            },
+            'formula': {
+                'warehouse_inventory_on_hand': to_number(warehouse_on_hand),
+                'storefront_on_hand': to_number(storefront_total_decimal),
+                'completed_sales_units': to_number(completed_units),
+                'shrinkage_units': to_number(shrinkage_units),
+                'correction_units': to_number(correction_units),
+                'active_reservations_units': to_number(reservations_linked_units),
+                'calculated_baseline': to_number(formula_baseline),
+                'recorded_batch_quantity': to_number(recorded_quantity_decimal),
+                'initial_batch_quantity': to_number(computed_initial_decimal),
+                'baseline_vs_recorded_delta': to_number(recorded_quantity_decimal - formula_baseline),
+                'formula_explanation': 'warehouse_on_hand + storefront_on_hand - sold - shrinkage + corrections - reservations',
+            },
+        }
+
+        return Response(response, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=['get'], url_path='by-sku/(?P<sku>[^/.]+)')
     def by_sku(self, request, sku=None):
@@ -731,6 +1036,78 @@ class StockProductViewSet(viewsets.ModelViewSet):
         if instance.stock and instance.stock.warehouse and instance.stock.warehouse.business_link and instance.stock.warehouse.business_link.business_id not in business_ids:
             raise PermissionDenied('You do not have permission to update this stock item.')
         serializer.save()
+
+    @action(detail=False, methods=['get'], url_path='search')
+    def search(self, request):
+        """
+        Server-side search for stock products by name, SKU, warehouse, or batch.
+        
+        Query params:
+        - q or search: search query string
+        - limit: max results (default 50, max 100)
+        - warehouse: filter by warehouse ID
+        - has_quantity: filter by quantity > 0
+        - ordering: sort field (default: product__name)
+        """
+        # Get search query
+        query = request.query_params.get('q') or request.query_params.get('search', '')
+        
+        # Get limit (default 50, max 100)
+        try:
+            limit = int(request.query_params.get('limit', 50))
+            limit = min(limit, 100)  # Cap at 100
+        except (TypeError, ValueError):
+            limit = 50
+        
+        # Get warehouse filter
+        warehouse_id = request.query_params.get('warehouse')
+        
+        # Get has_quantity filter
+        has_quantity = request.query_params.get('has_quantity', '').lower() == 'true'
+        
+        # Get ordering (default: product__name)
+        ordering = request.query_params.get('ordering', 'product__name')
+        
+        # Start with base queryset (already business-scoped from get_queryset)
+        queryset = self.get_queryset()
+        
+        # Apply search filter if query provided
+        if query:
+            queryset = queryset.filter(
+                Q(product__name__icontains=query) |
+                Q(product__sku__icontains=query) |
+                Q(stock__warehouse__name__icontains=query) |
+                Q(stock__batch_number__icontains=query)
+            )
+        
+        # Apply warehouse filter
+        if warehouse_id:
+            try:
+                warehouse_uuid = UUID(warehouse_id)
+                queryset = queryset.filter(stock__warehouse_id=warehouse_uuid)
+            except (TypeError, ValueError):
+                pass  # Ignore invalid UUID
+        
+        # Apply quantity filter
+        if has_quantity:
+            queryset = queryset.filter(quantity__gt=0)
+        
+        # Apply ordering
+        try:
+            queryset = queryset.order_by(ordering)
+        except Exception:
+            queryset = queryset.order_by('product__name')  # Fallback to default
+        
+        # Limit results
+        queryset = queryset[:limit]
+        
+        # Serialize and return
+        serializer = self.get_serializer(queryset, many=True)
+        
+        return Response({
+            'results': serializer.data,
+            'count': len(serializer.data)
+        }, status=status.HTTP_200_OK)
 
 
 class SupplierViewSet(viewsets.ModelViewSet):
@@ -1144,6 +1521,7 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
                 })
         
         old_status = transfer_request.status
+        inventory_adjustments = None
         
         # Handle status-specific logic
         if new_status == TransferRequest.STATUS_CANCELLED:
@@ -1151,6 +1529,13 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         elif new_status == TransferRequest.STATUS_FULFILLED:
             # Allow manual fulfillment override
             if transfer_request.status != TransferRequest.STATUS_FULFILLED:
+                linked_transfer = transfer_request._current_transfer()
+                if linked_transfer:
+                    if linked_transfer.status not in {Transfer.STATUS_IN_TRANSIT, Transfer.STATUS_COMPLETED}:
+                        raise ValidationError({'linked_transfer': 'Linked transfer must be in transit or completed before fulfillment.'})
+                else:
+                    inventory_adjustments = transfer_request.apply_manual_inventory_fulfillment()
+
                 transfer_request.status = TransferRequest.STATUS_FULFILLED
                 transfer_request.fulfilled_at = timezone.now()
                 transfer_request.fulfilled_by = request.user
@@ -1178,7 +1563,8 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
                     'old_status': old_status,
                     'new_status': transfer_request.status,
                     'changed_by': request.user.name if hasattr(request.user, 'name') else str(request.user),
-                }
+                },
+                '_inventory_adjustments': inventory_adjustments,
             },
             status=status.HTTP_200_OK
         )
@@ -2044,102 +2430,208 @@ class ProfitProjectionViewSet(viewsets.ViewSet):
         return Response({'scenarios': scenarios}, status=status.HTTP_200_OK)
 
 
-class StockAvailabilityView(APIView):
-    """
-    Get detailed stock availability for a product at a storefront.
-    
-    Returns:
-    - total_available: Total quantity in all batches
-    - reserved_quantity: Quantity currently reserved in active carts
-    - unreserved_quantity: Available for new sales (total - reserved)
-    - batches: Array of all stock batches with prices
-    - reservations: Array of active reservations with cart info
-    """
+class WarehouseStockAvailabilityView(APIView):
+    """Legacy endpoint for warehouse-level availability checks used by transfers."""
+
     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request, storefront_id, product_id):
+    def get(self, request):
+        warehouse_id = request.query_params.get('warehouse')
+        product_id = request.query_params.get('product')
+        requested_quantity_param = request.query_params.get('quantity')
+
+        if not warehouse_id or not product_id:
+            return Response(
+                {'detail': 'warehouse and product query parameters are required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         try:
-            # Verify user has access to this storefront
-            storefront = get_object_or_404(StoreFront, id=storefront_id)
-            
-            # Check employment at this storefront
-            if not StoreFrontEmployee.objects.filter(
-                storefront=storefront,
-                user=request.user
-            ).exists():
-                return Response(
-                    {"detail": "You do not have access to this storefront."},
-                    status=status.HTTP_403_FORBIDDEN
-                )
-            
-            # Get all batches for this product at this storefront
-            batches = StockProduct.objects.filter(
-                storefront_id=storefront_id,
-                product_id=product_id
-            ).order_by('-created_at')
-            
-            # Calculate total available
-            total_available = sum(batch.quantity for batch in batches)
-            
-            # Calculate reserved quantity (from active cart reservations)
-            reserved_quantity = 0
-            reservations_data = []
-            
-            if SALES_APP_AVAILABLE:
-                # Get active reservations for this product at this storefront
-                active_reservations = StockReservation.objects.filter(
-                    storefront_id=storefront_id,
-                    product_id=product_id,
+            warehouse = Warehouse.objects.select_related('business_link__business').get(id=warehouse_id)
+        except Warehouse.DoesNotExist:
+            return Response({'detail': 'Warehouse not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            product = Product.objects.select_related('business').get(id=product_id)
+        except Product.DoesNotExist:
+            return Response({'detail': 'Product not found.'}, status=status.HTTP_404_NOT_FOUND)
+
+        business_link = getattr(warehouse, 'business_link', None)
+        business_id = business_link.business_id if business_link else None
+
+        allowed_business_ids = _business_ids_for_user(request.user)
+        if business_id and business_id not in allowed_business_ids:
+            return Response({'detail': 'You do not have access to this warehouse.'}, status=status.HTTP_403_FORBIDDEN)
+
+        if product.business_id and business_id and product.business_id != business_id:
+            return Response(
+                {'detail': 'Product does not belong to this warehouse business.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            requested_quantity = int(requested_quantity_param) if requested_quantity_param is not None else None
+            if requested_quantity is not None and requested_quantity < 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return Response({'detail': 'quantity must be a positive integer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        available_quantity = (
+            Inventory.objects.filter(warehouse=warehouse, product=product)
+            .aggregate(total=Sum('quantity'))
+            .get('total')
+        ) or 0
+
+        is_available = True
+        if requested_quantity is not None:
+            is_available = available_quantity >= requested_quantity
+
+        return Response(
+            {
+                'warehouse': str(warehouse.id),
+                'product': str(product.id),
+                'available_quantity': available_quantity,
+                'requested_quantity': requested_quantity,
+                'is_available': is_available,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+
+class StockAvailabilityView(APIView):
+    """Return storefront-level stock availability for a product."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    @staticmethod
+    def _decimal_to_native(value: Decimal) -> int | float:
+        if value == value.to_integral_value():
+            return int(value)
+        return float(value)
+
+    @staticmethod
+    def _user_has_access(user, storefront: StoreFront) -> bool:
+        if not getattr(user, 'is_authenticated', False):
+            return False
+        if user.is_superuser or getattr(user, 'is_platform_super_admin', False):
+            return True
+        if storefront.user_id == getattr(user, 'id', None):
+            return True
+        return StoreFrontEmployee.objects.filter(
+            storefront=storefront,
+            user=user,
+            is_active=True,
+        ).exists()
+
+    def get(self, request, storefront_id, product_id):
+        storefront = get_object_or_404(
+            StoreFront.objects.select_related('business_link__business', 'user'),
+            id=storefront_id,
+        )
+
+        if not self._user_has_access(request.user, storefront):
+            return Response(
+                {"detail": "You do not have access to this storefront."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        product = get_object_or_404(
+            Product.objects.select_related('business'),
+            id=product_id,
+        )
+
+        business_link = getattr(storefront, 'business_link', None)
+        if business_link and product.business_id != business_link.business_id:
+            return Response(
+                {"detail": "Product does not belong to this storefront's business."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        inventory_entry = StoreFrontInventory.objects.filter(
+            storefront=storefront,
+            product=product,
+        ).first()
+
+        total_available = Decimal(str(inventory_entry.quantity)) if inventory_entry else Decimal('0')
+
+        reserved_quantity = Decimal('0')
+        reservations_data: list[dict] = []
+
+        if SALES_APP_AVAILABLE and StockReservation is not None and Sale is not None:
+            now = timezone.now()
+            reservations = (
+                StockReservation.objects.filter(
+                    stock_product__product=product,
                     status='ACTIVE',
-                    expires_at__gt=timezone.now()
-                ).select_related('sale', 'sale__customer')
-                
-                reserved_quantity = active_reservations.aggregate(
-                    total=Sum('quantity')
-                )['total'] or 0
-                
-                # Build reservations array
-                for reservation in active_reservations:
-                    reservations_data.append({
-                        'id': str(reservation.id),
-                        'quantity': reservation.quantity,
-                        'sale_id': str(reservation.sale.id),
-                        'customer_name': reservation.sale.customer.name if reservation.sale.customer else None,
-                        'expires_at': reservation.expires_at.isoformat(),
-                        'created_at': reservation.created_at.isoformat()
-                    })
-            
-            # Calculate unreserved (available for new sales)
-            unreserved_quantity = max(0, total_available - reserved_quantity)
-            
-            # Build batches array with pricing
-            batches_data = []
-            for batch in batches:
-                batches_data.append({
-                    'id': str(batch.id),
-                    'batch_number': batch.batch_number,
-                    'quantity': batch.quantity,
-                    'retail_price': str(batch.retail_price),
-                    'wholesale_price': str(batch.wholesale_price) if batch.wholesale_price else None,
-                    'expiry_date': batch.expiry_date.isoformat() if batch.expiry_date else None,
-                    'created_at': batch.created_at.isoformat()
+                    expires_at__gt=now,
+                )
+                .select_related('stock_product')
+            )
+
+            reservation_sale_pairs: list[tuple] = []
+            sale_ids: list[str] = []
+
+            for reservation in reservations:
+                try:
+                    sale_uuid = str(UUID(str(reservation.cart_session_id)))
+                except (TypeError, ValueError):
+                    continue
+                reservation_sale_pairs.append((reservation, sale_uuid))
+                sale_ids.append(sale_uuid)
+
+            sales_lookup = {}
+            if sale_ids:
+                sales = (
+                    Sale.objects.filter(id__in=sale_ids)
+                    .select_related('storefront', 'customer')
+                )
+                sales_lookup = {str(sale.id): sale for sale in sales}
+
+            for reservation, sale_id in reservation_sale_pairs:
+                sale = sales_lookup.get(sale_id)
+                if not sale or sale.storefront_id != storefront_id:
+                    continue
+
+                quantity = Decimal(reservation.quantity)
+                reserved_quantity += quantity
+                reservations_data.append({
+                    'id': str(reservation.id),
+                    'quantity': self._decimal_to_native(quantity),
+                    'sale_id': str(sale.id),
+                    'customer_name': sale.customer.name if sale.customer else None,
+                    'expires_at': reservation.expires_at.isoformat(),
+                    'created_at': reservation.created_at.isoformat(),
                 })
-            
-            return Response({
-                'total_available': total_available,
-                'reserved_quantity': reserved_quantity,
-                'unreserved_quantity': unreserved_quantity,
-                'batches': batches_data,
-                'reservations': reservations_data
-            }, status=status.HTTP_200_OK)
-            
-        except StoreFront.DoesNotExist:
-            return Response(
-                {"detail": "Storefront not found."},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        except Exception as e:
-            return Response(
-                {"detail": f"Error retrieving stock availability: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
+
+        unreserved_quantity = total_available - reserved_quantity
+        if unreserved_quantity < Decimal('0'):
+            unreserved_quantity = Decimal('0')
+
+        stock_products = (
+            StockProduct.objects.filter(product=product)
+            .select_related('stock__warehouse')
+            .order_by('-created_at')
+        )
+
+        batches_data = []
+        for stock_product in stock_products:
+            batches_data.append({
+                'id': str(stock_product.id),
+                'batch_number': getattr(stock_product, 'batch_number', None),
+                'quantity': stock_product.quantity,
+                'retail_price': str(stock_product.retail_price),
+                'wholesale_price': str(stock_product.wholesale_price) if stock_product.wholesale_price else None,
+                'expiry_date': stock_product.expiry_date.isoformat() if stock_product.expiry_date else None,
+                'created_at': stock_product.created_at.isoformat(),
+                'warehouse': stock_product.stock.warehouse.name if stock_product.stock and stock_product.stock.warehouse else None,
+            })
+
+        response_payload = {
+            'total_available': self._decimal_to_native(total_available),
+            'reserved_quantity': self._decimal_to_native(reserved_quantity),
+            'unreserved_quantity': self._decimal_to_native(unreserved_quantity),
+            'batches': batches_data,
+            'reservations': reservations_data,
+        }
+
+        return Response(response_payload, status=status.HTTP_200_OK)

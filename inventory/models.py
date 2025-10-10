@@ -697,7 +697,11 @@ class Transfer(models.Model):
     @staticmethod
     def available_quantity(warehouse: Warehouse, product: Product, exclude_transfer: Optional['Transfer'] = None) -> int:
         """Calculate available quantity for a product at a warehouse, accounting for reserved transfers."""
-        on_hand = Inventory.objects.filter(warehouse=warehouse, product=product).aggregate(total=Sum('quantity'))['total'] or 0
+        # Use StockProduct as source of truth for warehouse inventory
+        on_hand = StockProduct.objects.filter(
+            stock__warehouse=warehouse,
+            product=product
+        ).aggregate(total=Sum('quantity'))['total'] or 0
 
         reserved_qs = TransferLineItem.objects.filter(
             transfer__source_warehouse=warehouse,
@@ -738,10 +742,15 @@ class Transfer(models.Model):
             self._adjust_warehouse_inventory(line.product, -required)
 
     def _adjust_warehouse_inventory(self, product: 'Product', delta: int):
+        """
+        Adjust warehouse inventory by modifying StockProduct quantities.
+        Positive delta = deduct (transfer out), Negative delta = add back (transfer cancelled)
+        """
         with transaction.atomic():
+            # Use StockProduct as source of truth
             entries = list(
-                Inventory.objects.select_for_update().filter(
-                    warehouse=self.source_warehouse,
+                StockProduct.objects.select_for_update().filter(
+                    stock__warehouse=self.source_warehouse,
                     product=product,
                 ).order_by('-updated_at', 'id')
             )
@@ -751,6 +760,7 @@ class Transfer(models.Model):
                 raise ValidationError({'line_items': f'Insufficient stock for {product.name} at {self.source_warehouse.name}.'})
 
             if delta > 0:
+                # Deduct from existing StockProduct records (FIFO-ish)
                 remaining = delta
                 for entry in entries:
                     if remaining == 0:
@@ -762,17 +772,19 @@ class Transfer(models.Model):
                 if remaining > 0:
                     raise ValidationError({'line_items': f'Insufficient stock for {product.name} at {self.source_warehouse.name}.'})
             elif delta < 0:
+                # Add back to most recent StockProduct record
                 remaining = abs(delta)
                 if entries:
                     entry = entries[0]
                     entry.quantity += remaining
                     entry.save(update_fields=['quantity', 'updated_at'])
                 else:
-                    Inventory.objects.create(
-                        product=product,
-                        warehouse=self.source_warehouse,
-                        quantity=remaining,
-                    )
+                    # Should not happen in normal flow, but handle gracefully
+                    # Note: We can't create a StockProduct without a Stock batch
+                    # This indicates the transfer was cancelled but original stock was deleted
+                    raise ValidationError({
+                        'line_items': f'Cannot return {product.name} - no stock batches found at {self.source_warehouse.name}.'
+                    })
 
     def _increment_storefront_quantities(self):
         with transaction.atomic():
@@ -1027,6 +1039,34 @@ class TransferRequest(models.Model):
         if transfer:
             transfer.request = None
             transfer.save(update_fields=['request', 'updated_at'])
+
+    def apply_manual_inventory_fulfillment(self) -> list[dict[str, int]]:
+        """Manually add requested quantities to storefront inventory.
+
+        Returns a list of dictionaries with product IDs and quantities added.
+        """
+        if not self.line_items.exists():
+            raise ValidationError({'line_items': 'Cannot fulfill request without line items.'})
+        if not self.storefront_id:
+            raise ValidationError({'storefront': 'Request must be associated with a storefront before fulfillment.'})
+
+        adjustments: list[dict[str, int]] = []
+
+        with transaction.atomic():
+            for line in self.line_items.select_related('product'):
+                entry, _ = StoreFrontInventory.objects.select_for_update().get_or_create(
+                    storefront=self.storefront,
+                    product=line.product,
+                    defaults={'quantity': 0},
+                )
+                entry.quantity += line.requested_quantity
+                entry.save(update_fields=['quantity', 'updated_at'])
+                adjustments.append({
+                    'product_id': str(line.product_id),
+                    'quantity_added': line.requested_quantity,
+                })
+
+        return adjustments
 
     def mark_fulfilled(self, actor: User | None):
         if self.status == self.STATUS_FULFILLED:
