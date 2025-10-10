@@ -104,6 +104,33 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
             return StockAdjustmentCreateSerializer
         return StockAdjustmentSerializer
     
+    def update(self, request, *args, **kwargs):
+        """Update an adjustment - only allowed for PENDING status"""
+        instance = self.get_object()
+        
+        if instance.status != 'PENDING':
+            return Response(
+                {'error': f'Cannot edit adjustment with status: {instance.status}. Only PENDING adjustments can be edited.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Use create serializer for updates to enforce validation
+        serializer = StockAdjustmentCreateSerializer(
+            instance,
+            data=request.data,
+            partial=kwargs.get('partial', False)
+        )
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        
+        # Return with standard serializer
+        return Response(StockAdjustmentSerializer(instance).data)
+    
+    def partial_update(self, request, *args, **kwargs):
+        """Partial update - delegates to update with partial=True"""
+        kwargs['partial'] = True
+        return self.update(request, *args, **kwargs)
+    
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """

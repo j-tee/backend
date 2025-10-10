@@ -24,7 +24,8 @@ from .serializers import (
     PaymentSerializer, RefundSerializer, RefundItemSerializer,
     CreditTransactionSerializer, AuditLogSerializer,
     AddSaleItemSerializer, CompleteSaleSerializer,
-    StockAvailabilitySerializer, RecordPaymentSerializer
+    StockAvailabilitySerializer, RecordPaymentSerializer,
+    SaleRefundSerializer
 )
 from .filters import SaleFilter
 from inventory.models import StockProduct, StoreFront
@@ -449,6 +450,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             
             # Cash accounting - actual cash received
             cash_at_hand=Sum('amount_paid', filter=Q(status__in=['COMPLETED', 'PARTIAL', 'PENDING'])),
+            refund_payouts=Sum('amount_refunded', filter=Q(status__in=['COMPLETED', 'PARTIAL', 'PENDING', 'REFUNDED'])),
             
             # Accounts receivable - money owed (credit sales not yet paid)
             accounts_receivable=Sum('amount_due', filter=Q(
@@ -497,7 +499,6 @@ class SaleViewSet(viewsets.ModelViewSet):
             SaleItem.objects.filter(sale_id__in=sale_ids)
             .select_related('product', 'stock_product')
         )
-
         # Prefetch fallback stock products for items without a stock_product reference
         missing_product_ids = {
             item.product_id
@@ -551,6 +552,8 @@ class SaleViewSet(viewsets.ModelViewSet):
         realized_profit_total = Decimal('0.00')
         outstanding_profit_total = Decimal('0.00')
 
+        refunds_processed_total = Decimal('0.00')
+
         credit_total_amount = Decimal('0.00')
         credit_total_completed = Decimal('0.00')
         credit_amount_paid_total = Decimal('0.00')
@@ -564,6 +567,7 @@ class SaleViewSet(viewsets.ModelViewSet):
         for sale in analysed_sales:
             total_amount = to_decimal(sale.total_amount)
             paid = to_decimal(sale.amount_paid)
+            refunded = to_decimal(sale.amount_refunded)
             due = to_decimal(sale.amount_due)
             sale_tax_total = sale_line_tax[sale.id] + to_decimal(sale.tax_amount)
             sale_discount_total = sale_line_discount[sale.id] + to_decimal(sale.discount_amount)
@@ -571,14 +575,22 @@ class SaleViewSet(viewsets.ModelViewSet):
             net_revenue = total_amount - sale_tax_total
             profit = net_revenue - cogs
 
+            if refunded < Decimal('0.00'):
+                refunded = Decimal('0.00')
+            refunds_processed_total += refunded
+
+            net_paid = paid - refunded
+            if net_paid < Decimal('0.00'):
+                net_paid = Decimal('0.00')
+
             total_sales_all += total_amount
             total_tax_all += sale_tax_total
             total_cogs_all += cogs
             total_discounts_all += sale_discount_total
             gross_profit_all += profit
 
-            denominator = total_amount if total_amount > Decimal('0.00') else (paid + due)
-            paid_ratio = (paid / denominator) if denominator > Decimal('0.00') else Decimal('0.00')
+            denominator = total_amount if total_amount > Decimal('0.00') else (net_paid + due)
+            paid_ratio = (net_paid / denominator) if denominator > Decimal('0.00') else Decimal('0.00')
             if paid_ratio > Decimal('1.00'):
                 paid_ratio = Decimal('1.00')
 
@@ -587,21 +599,21 @@ class SaleViewSet(viewsets.ModelViewSet):
             if outstanding_profit < Decimal('0.00'):
                 outstanding_profit = Decimal('0.00')
 
-            realized_revenue_total += paid
+            realized_revenue_total += net_paid
             realized_profit_total += realized_profit
             outstanding_profit_total += outstanding_profit
 
             if sale.payment_type == 'CREDIT':
                 outstanding_revenue_total += due
                 credit_total_amount += total_amount
-                credit_amount_paid_total += paid
+                credit_amount_paid_total += net_paid
                 credit_amount_due_total += due
                 credit_realized_profit += realized_profit
                 credit_outstanding_profit += outstanding_profit
 
                 if sale.status == 'COMPLETED':
                     credit_total_completed += total_amount
-                    credit_paid_completed += paid
+                    credit_paid_completed += net_paid
                 elif sale.status == 'PARTIAL':
                     credit_amount_due_partial += due
                 elif sale.status == 'PENDING':
@@ -632,20 +644,30 @@ class SaleViewSet(viewsets.ModelViewSet):
         summary['profit_margin'] = round(float(profit_margin), 2)
 
         summary['realized_revenue'] = to_money(realized_revenue_total)
+        summary['refunds_processed'] = to_money(refunds_processed_total)
         summary['outstanding_revenue'] = to_money(outstanding_revenue_total)
         summary['realized_profit'] = to_money(realized_profit_total)
         summary['outstanding_profit'] = to_money(outstanding_profit_total)
 
         # Refresh cash/receivables snapshot
-        summary['cash_at_hand'] = to_money(realized_revenue_total)
+        cash_collected_gross = to_decimal(summary.get('cash_at_hand'))
+        refund_payouts_total = to_decimal(summary.get('refund_payouts'))
+        net_cash_available = realized_revenue_total
+        if cash_collected_gross or refund_payouts_total:
+            net_cash_available = cash_collected_gross - refund_payouts_total
+
+        summary['cash_collected'] = to_money(cash_collected_gross)
+        summary['cash_outflow_refunds'] = to_money(refund_payouts_total)
+        summary['refund_payouts'] = to_money(refund_payouts_total)
+        summary['cash_at_hand'] = to_money(net_cash_available)
         summary['accounts_receivable'] = to_money(outstanding_revenue_total)
 
-        total_assets = realized_revenue_total + outstanding_revenue_total
+        total_assets = net_cash_available + outstanding_revenue_total
         summary['financial_position'] = {
-            'cash_at_hand': to_money(realized_revenue_total),
+            'cash_at_hand': to_money(net_cash_available),
             'accounts_receivable': to_money(outstanding_revenue_total),
             'total_assets': to_money(total_assets),
-            'cash_percentage': round(float((realized_revenue_total / total_assets * Decimal('100.00')) if total_assets > Decimal('0.00') else Decimal('0.00')), 2),
+            'cash_percentage': round(float((net_cash_available / total_assets * Decimal('100.00')) if total_assets > Decimal('0.00') else Decimal('0.00')), 2),
             'receivables_percentage': round(float((outstanding_revenue_total / total_assets * Decimal('100.00')) if total_assets > Decimal('0.00') else Decimal('0.00')), 2),
         }
 
@@ -959,9 +981,7 @@ class SaleViewSet(viewsets.ModelViewSet):
             
             # Update sale amounts
             sale.amount_paid += data['amount_paid']
-            sale.amount_due = sale.total_amount - sale.amount_paid
-            if sale.amount_due < Decimal('0.00'):
-                sale.amount_due = Decimal('0.00')
+            sale.calculate_totals()
             
             # Update sale status based on payment
             if sale.amount_due == Decimal('0.00'):
@@ -998,6 +1018,27 @@ class SaleViewSet(viewsets.ModelViewSet):
                 'payment': PaymentSerializer(payment).data,
                 'sale': SaleSerializer(sale).data
             })
+
+    @action(detail=True, methods=['post'])
+    def refund(self, request, pk=None):
+        """Process a refund for an existing sale and restock inventory."""
+        sale = self.get_object()
+
+        serializer = SaleRefundSerializer(data=request.data, context={'sale': sale})
+        serializer.is_valid(raise_exception=True)
+
+        refund = sale.process_refund(
+            user=request.user,
+            items=serializer.validated_data['items'],
+            reason=serializer.validated_data['reason'],
+            refund_type=serializer.validated_data.get('refund_type', 'PARTIAL')
+        )
+
+        return Response({
+            'message': 'Refund processed successfully',
+            'refund': RefundSerializer(refund).data,
+            'sale': SaleSerializer(sale).data
+        }, status=status.HTTP_200_OK)
 
 
 class SaleItemViewSet(viewsets.ModelViewSet):

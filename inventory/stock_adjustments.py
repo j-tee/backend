@@ -216,21 +216,22 @@ class StockAdjustment(models.Model):
         self.save()
     
     def complete(self):
-        """Mark adjustment as completed and apply to stock"""
+        """
+        Mark adjustment as completed.
+        
+        IMPORTANT: This does NOT modify StockProduct.quantity!
+        StockProduct.quantity is the initial intake amount and never changes.
+        Adjustments are tracked separately and reflected in available stock calculations.
+        
+        The pre_save signal validates this won't cause negative available stock.
+        """
         from django.utils import timezone
         
         if self.status != 'APPROVED':
             raise ValueError('Only approved adjustments can be completed')
         
-        # Apply adjustment to stock
-        stock_product = self.stock_product
-        new_quantity = stock_product.quantity + self.quantity
-        
-        if new_quantity < 0:
-            raise ValueError(f'Cannot reduce stock below zero. Current: {stock_product.quantity}, Adjustment: {self.quantity}')
-        
-        stock_product.quantity = new_quantity
-        stock_product.save()
+        # The pre_save signal will validate this won't cause negative stock
+        # We do NOT modify stock_product.quantity here
         
         self.status = 'COMPLETED'
         self.completed_at = timezone.now()

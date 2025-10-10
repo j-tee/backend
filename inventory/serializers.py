@@ -53,6 +53,18 @@ class ProductSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
 
+class StorefrontSaleProductSerializer(serializers.Serializer):
+    product_id = serializers.UUIDField()
+    product_name = serializers.CharField()
+    sku = serializers.CharField()
+    category_name = serializers.CharField(allow_null=True)
+    available_quantity = serializers.IntegerField()
+    retail_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+    wholesale_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    stock_product_ids = serializers.ListField(child=serializers.UUIDField())
+    last_stocked_at = serializers.DateTimeField(allow_null=True)
+
+
 class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
         model = Supplier

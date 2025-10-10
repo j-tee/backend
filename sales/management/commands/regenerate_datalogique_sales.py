@@ -306,9 +306,16 @@ def create_sale_with_items(*, sale_date, business, storefront, user, customer, p
 
         tax_rate = Decimal("12.50") if random.random() < 0.65 else Decimal("0.00")
 
+        stock_product = StockProduct.objects.filter(
+            product=product
+        ).order_by("-created_at").first()
+        stock_ref = stock_product.stock if stock_product else None
+
         SaleItem.objects.create(
             sale=sale,
             product=product,
+            stock=stock_ref,
+            stock_product=stock_product,
             quantity=quantity,
             unit_price=unit_price,
             discount_percentage=discount_percentage,

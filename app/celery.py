@@ -51,6 +51,10 @@ app.conf.update(
             'task': 'inventory.tasks.check_stock_levels',
             'schedule': 1800.0,  # Run every 30 minutes
         },
+        'release-expired-stock-reservations': {
+            'task': 'sales.tasks.release_expired_reservations',
+            'schedule': 900.0,  # Run every 15 minutes
+        },
     },
 )
 

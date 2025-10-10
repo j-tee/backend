@@ -38,6 +38,14 @@ DEBUG = config('DEBUG', cast=bool, default=False)
 _raw_allowed_hosts = config('ALLOWED_HOSTS', default='')
 ALLOWED_HOSTS = Csv()(_raw_allowed_hosts) if _raw_allowed_hosts else []
 
+# Ensure test clients (and local dev) have sensible defaults
+if isinstance(ALLOWED_HOSTS, tuple):
+    ALLOWED_HOSTS = list(ALLOWED_HOSTS)
+
+for host in ['localhost', '127.0.0.1', 'testserver']:
+    if host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
+
 
 # Application definition
 
@@ -345,13 +353,19 @@ else:
     }
 
 # Rate limiting and throttling
-REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
-    'rest_framework.throttling.AnonRateThrottle',
-    'rest_framework.throttling.UserRateThrottle'
-]
-REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
-    'anon': '100/hour',
-    'user': '1000/hour'
-}
+ENABLE_API_THROTTLE = config('ENABLE_API_THROTTLE', default=not DEBUG, cast=bool)
+
+if ENABLE_API_THROTTLE:
+    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ]
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
+        'anon': '100/hour',
+        'user': '1000/hour'
+    }
+else:
+    REST_FRAMEWORK.pop('DEFAULT_THROTTLE_CLASSES', None)
+    REST_FRAMEWORK.pop('DEFAULT_THROTTLE_RATES', None)
 
 PLATFORM_OWNER_EMAIL = config('PLATFORM_OWNER_EMAIL', default='juliustetteh@gmail.com')

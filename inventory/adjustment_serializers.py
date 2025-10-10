@@ -118,6 +118,29 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
     def get_approved_by_name(self, obj):
         return obj.approved_by.name if obj.approved_by else None
     
+    def get_fields(self):
+        """Override to set stock_product queryset based on user's business"""
+        fields = super().get_fields()
+        request = self.context.get('request')
+        
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            # Get user's business
+            membership = BusinessMembership.objects.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            
+            if membership:
+                # Filter stock products by user's business
+                fields['stock_product'].queryset = StockProduct.objects.filter(
+                    stock__warehouse__business_link__business=membership.business
+                ).select_related('product', 'supplier', 'stock__warehouse')
+            else:
+                # No business membership - return empty queryset
+                fields['stock_product'].queryset = StockProduct.objects.none()
+        
+        return fields
+    
     def validate(self, data):
         """Validate adjustment data"""
         request = self.context.get('request')
@@ -212,7 +235,7 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
 
 
 class StockAdjustmentCreateSerializer(serializers.ModelSerializer):
-    """Simplified serializer for creating adjustments"""
+    """Simplified serializer for creating/updating adjustments"""
     
     class Meta:
         model = StockAdjustment
@@ -220,6 +243,29 @@ class StockAdjustmentCreateSerializer(serializers.ModelSerializer):
             'stock_product', 'adjustment_type', 'quantity',
             'reason', 'reference_number', 'unit_cost'
         ]
+    
+    def get_fields(self):
+        """Override to set stock_product queryset based on user's business"""
+        fields = super().get_fields()
+        request = self.context.get('request')
+        
+        if request and hasattr(request, 'user') and request.user.is_authenticated:
+            # Get user's business
+            membership = BusinessMembership.objects.filter(
+                user=request.user,
+                is_active=True
+            ).first()
+            
+            if membership:
+                # Filter stock products by user's business
+                fields['stock_product'].queryset = StockProduct.objects.filter(
+                    stock__warehouse__business_link__business=membership.business
+                ).select_related('product', 'supplier', 'stock__warehouse')
+            else:
+                # No business membership - return empty queryset
+                fields['stock_product'].queryset = StockProduct.objects.none()
+        
+        return fields
     
     def validate(self, data):
         """Use the same validation as main serializer"""
@@ -230,6 +276,31 @@ class StockAdjustmentCreateSerializer(serializers.ModelSerializer):
         """Use the same creation logic as main serializer"""
         serializer = StockAdjustmentSerializer(context=self.context)
         return serializer.create(validated_data)
+    
+    def update(self, instance, validated_data):
+        """Update adjustment - only allowed for PENDING status"""
+        if instance.status != 'PENDING':
+            raise serializers.ValidationError(
+                f"Cannot edit adjustment with status: {instance.status}. Only PENDING adjustments can be edited."
+            )
+        
+        # Update fields
+        instance.stock_product = validated_data.get('stock_product', instance.stock_product)
+        instance.adjustment_type = validated_data.get('adjustment_type', instance.adjustment_type)
+        instance.quantity = validated_data.get('quantity', instance.quantity)
+        instance.reason = validated_data.get('reason', instance.reason)
+        instance.reference_number = validated_data.get('reference_number', instance.reference_number)
+        instance.unit_cost = validated_data.get('unit_cost', instance.unit_cost)
+        
+        # Recalculate total_cost
+        instance.total_cost = instance.unit_cost * abs(instance.quantity)
+        
+        # Update quantity_before if stock_product changed
+        if 'stock_product' in validated_data:
+            instance.quantity_before = instance.stock_product.quantity
+        
+        instance.save()
+        return instance
 
 
 class StockCountItemSerializer(serializers.ModelSerializer):

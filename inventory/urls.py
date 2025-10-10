@@ -9,7 +9,7 @@ from .views import (
     InventorySummaryView, StockArrivalReportView, EmployeeWorkspaceView, OwnerWorkspaceView, ProfitProjectionViewSet,
     BusinessInvitationListCreateView, BusinessInvitationResendView, BusinessInvitationRevokeView,
     BusinessMembershipListView, BusinessMembershipDetailView, BusinessMembershipStorefrontAssignmentView,
-    StockAvailabilityView,
+    WarehouseStockAvailabilityView, StockAvailabilityView,
 )
 from .adjustment_views import (
     StockAdjustmentViewSet,
@@ -44,6 +44,7 @@ router.register(r'stock-counts', StockCountViewSet, basename='stock-counts')
 router.register(r'stock-count-items', StockCountItemViewSet, basename='stock-count-items')
 
 urlpatterns = [
+    path('api/stock/availability/', WarehouseStockAvailabilityView.as_view(), name='warehouse-stock-availability'),
     path('api/storefronts/<uuid:storefront_id>/stock-products/<uuid:product_id>/availability/', 
          StockAvailabilityView.as_view(), 
          name='stock-availability'),

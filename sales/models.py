@@ -1,5 +1,6 @@
 import uuid
 from django.db import models, transaction
+from django.db.models import Sum
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
@@ -7,7 +8,7 @@ from django.utils import timezone
 from decimal import Decimal
 from datetime import timedelta
 
-from inventory.models import StoreFront, Product, Stock, StockProduct
+from inventory.models import StoreFront, Product, Stock, StockProduct, StoreFrontInventory
 from accounts.models import Business
 
 
@@ -223,9 +224,65 @@ class StockReservation(models.Model):
         
         # Check available stock (unreserved quantity)
         available = stock_product.get_available_quantity()
+
+        sale_instance = None
+        try:
+            sale_instance = Sale.objects.select_related('storefront').get(id=uuid.UUID(str(cart_session_id)))
+        except (Sale.DoesNotExist, ValueError, TypeError):
+            sale_instance = None
+
+        if sale_instance and sale_instance.storefront_id:
+            storefront_inventory = (
+                StoreFrontInventory.objects.select_for_update()
+                .filter(
+                    storefront=sale_instance.storefront,
+                    product=stock_product.product,
+                )
+                .first()
+            )
+
+            if storefront_inventory:
+                active_reservations = cls.objects.filter(
+                    stock_product__product=stock_product.product,
+                    status='ACTIVE',
+                )
+
+                reservation_sale_ids = []
+                for reservation in active_reservations:
+                    try:
+                        reservation_sale_ids.append(uuid.UUID(str(reservation.cart_session_id)))
+                    except (TypeError, ValueError):
+                        continue
+
+                storefront_map = {}
+                if reservation_sale_ids:
+                    storefront_map = {
+                        str(sale.id): sale.storefront_id
+                        for sale in Sale.objects.filter(id__in=reservation_sale_ids).only('id', 'storefront_id')
+                    }
+
+                reserved_for_storefront = Decimal('0.00')
+                for reservation in active_reservations:
+                    storefront_id = storefront_map.get(reservation.cart_session_id)
+                    if storefront_id == sale_instance.storefront_id:
+                        reserved_for_storefront += Decimal(reservation.quantity)
+
+                available_storefront = Decimal(str(storefront_inventory.quantity)) - reserved_for_storefront
+                if available_storefront < Decimal('0.00'):
+                    available_storefront = Decimal('0.00')
+
+                available = available_storefront
+
         if available < quantity:
             raise ValidationError(
-                f"Insufficient stock. Available: {available}, Requested: {quantity}"
+                f"Insufficient stock. Available: {available}, Requested: {quantity}",
+                code='insufficient_stock',
+                params={
+                    'available': str(available),
+                    'requested': str(quantity),
+                    'stock_product_id': str(stock_product.id),
+                    'product_id': str(stock_product.product_id),
+                }
             )
         
         # Create reservation
@@ -271,26 +328,42 @@ class StockReservation(models.Model):
 
 class Sale(models.Model):
     """Sales transactions - supports cart functionality with DRAFT status"""
+    PAYMENT_TYPE_CASH = 'CASH'
+    PAYMENT_TYPE_CARD = 'CARD'
+    PAYMENT_TYPE_MOBILE = 'MOBILE'
+    PAYMENT_TYPE_CREDIT = 'CREDIT'
+    PAYMENT_TYPE_MIXED = 'MIXED'
+
     PAYMENT_TYPE_CHOICES = [
-        ('CASH', 'Cash'),
-        ('CARD', 'Card'),
-        ('MOBILE', 'Mobile Money'),
-        ('CREDIT', 'Credit'),
-        ('MIXED', 'Mixed Payment'),
+        (PAYMENT_TYPE_CASH, 'Cash'),
+        (PAYMENT_TYPE_CARD, 'Card'),
+        (PAYMENT_TYPE_MOBILE, 'Mobile Money'),
+        (PAYMENT_TYPE_CREDIT, 'Credit'),
+        (PAYMENT_TYPE_MIXED, 'Mixed Payment'),
     ]
     
+    STATUS_DRAFT = 'DRAFT'
+    STATUS_PENDING = 'PENDING'
+    STATUS_COMPLETED = 'COMPLETED'
+    STATUS_PARTIAL = 'PARTIAL'
+    STATUS_REFUNDED = 'REFUNDED'
+    STATUS_CANCELLED = 'CANCELLED'
+
     STATUS_CHOICES = [
-        ('DRAFT', 'Draft'),  # Cart/incomplete sale
-        ('PENDING', 'Pending'),  # Awaiting payment
-        ('COMPLETED', 'Completed'),  # Fully paid
-        ('PARTIAL', 'Partial'),  # Partially paid
-        ('REFUNDED', 'Refunded'),  # Fully refunded
-        ('CANCELLED', 'Cancelled'),  # Cancelled
+        (STATUS_DRAFT, 'Draft'),  # Cart/incomplete sale
+        (STATUS_PENDING, 'Pending'),  # Awaiting payment
+        (STATUS_COMPLETED, 'Completed'),  # Fully paid
+        (STATUS_PARTIAL, 'Partial'),  # Partially paid
+        (STATUS_REFUNDED, 'Refunded'),  # Fully refunded
+        (STATUS_CANCELLED, 'Cancelled'),  # Cancelled
     ]
     
+    TYPE_RETAIL = 'RETAIL'
+    TYPE_WHOLESALE = 'WHOLESALE'
+
     TYPE_CHOICES = [
-        ('RETAIL', 'Retail'),
-        ('WHOLESALE', 'Wholesale'),
+        (TYPE_RETAIL, 'Retail'),
+        (TYPE_WHOLESALE, 'Wholesale'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -303,8 +376,8 @@ class Sale(models.Model):
     receipt_number = models.CharField(max_length=100, unique=True, db_index=True, null=True, blank=True)
     
     # Sale type and status
-    type = models.CharField(max_length=20, choices=TYPE_CHOICES, default='RETAIL')
-    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT', db_index=True)
+    type = models.CharField(max_length=20, choices=TYPE_CHOICES, default=TYPE_RETAIL)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default=STATUS_DRAFT, db_index=True)
     
     # Amounts
     subtotal = models.DecimalField(
@@ -338,6 +411,13 @@ class Sale(models.Model):
         validators=[MinValueValidator(Decimal('0.00'))],
         help_text="Total amount already paid"
     )
+    amount_refunded = models.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        validators=[MinValueValidator(Decimal('0.00'))],
+        help_text="Total amount refunded to the customer"
+    )
     amount_due = models.DecimalField(
         max_digits=12, 
         decimal_places=2, 
@@ -347,7 +427,7 @@ class Sale(models.Model):
     )
     
     # Payment
-    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default='CASH')
+    payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default=PAYMENT_TYPE_CASH)
     
     # Manager override for credit limit
     manager_override = models.BooleanField(
@@ -429,12 +509,115 @@ class Sale(models.Model):
         # Add tax
         self.total_amount = discounted_total + self.tax_amount
         
-        # Calculate amount due
-        self.amount_due = self.total_amount - self.amount_paid
+        # Calculate amount due after refunds
+        net_paid = self.amount_paid - self.amount_refunded
+        if net_paid < Decimal('0.00'):
+            net_paid = Decimal('0.00')
+
+        self.amount_due = self.total_amount - net_paid
         if self.amount_due < Decimal('0.00'):
             self.amount_due = Decimal('0.00')
         
         return self.total_amount
+
+    def process_refund(self, *, user, items: list[dict], reason: str, refund_type: str = 'PARTIAL') -> 'Refund':
+        """Process a refund for the sale and restock inventory where appropriate."""
+        if self.status not in {'COMPLETED', 'PARTIAL', 'PENDING'}:
+            raise ValidationError('Only completed or in-progress sales can be refunded.')
+
+        if not items:
+            raise ValidationError({'items': 'At least one item is required for a refund.'})
+
+        with transaction.atomic():
+            refund = Refund.objects.create(
+                sale=self,
+                refund_type=refund_type,
+                amount=Decimal('0.00'),
+                reason=reason,
+                status='PROCESSED',
+                requested_by=user,
+                approved_by=user,
+                processed_by=user,
+            )
+
+            total_refund = Decimal('0.00')
+
+            for entry in items:
+                sale_item: 'SaleItem' = entry['sale_item']
+                quantity = int(entry['quantity'])
+                if quantity <= 0:
+                    raise ValidationError({'quantity': 'Quantity must be greater than zero.'})
+
+                refundable_quantity = sale_item.refundable_quantity
+                if quantity > refundable_quantity:
+                    raise ValidationError({
+                        'quantity': f'Only {refundable_quantity} units available to refund for item {sale_item.id}.'
+                    })
+
+                quantity_decimal = Decimal(quantity)
+                line_quantity = Decimal(sale_item.quantity)
+                if line_quantity <= Decimal('0.00'):
+                    raise ValidationError('Sale item quantity is invalid for refund processing.')
+
+                unit_total = (sale_item.total_price / line_quantity).quantize(Decimal('0.01'))
+                line_refund = (unit_total * quantity_decimal).quantize(Decimal('0.01'))
+
+                RefundItem.objects.create(
+                    refund=refund,
+                    sale_item=sale_item,
+                    quantity=quantity,
+                    amount=line_refund,
+                )
+
+                total_refund += line_refund
+
+                # Restock inventory based on where stock was taken from originally
+                if self.storefront_id:
+                    storefront_inventory, _ = StoreFrontInventory.objects.select_for_update().get_or_create(
+                        storefront=self.storefront,
+                        product=sale_item.product,
+                        defaults={'quantity': 0},
+                    )
+                    storefront_inventory.quantity += quantity
+                    storefront_inventory.save(update_fields=['quantity', 'updated_at'])
+                elif sale_item.stock_product_id:
+                    stock_product = StockProduct.objects.select_for_update().get(id=sale_item.stock_product_id)
+                    stock_product.quantity += quantity
+                    stock_product.save(update_fields=['quantity', 'updated_at'])
+
+            refund.amount = total_refund
+            refund.save(update_fields=['amount', 'updated_at'])
+
+            self.amount_refunded += total_refund
+            self.calculate_totals()
+
+            if self.amount_refunded >= self.total_amount:
+                self.status = 'REFUNDED'
+            elif self.amount_due > Decimal('0.00'):
+                self.status = 'PARTIAL'
+            else:
+                self.status = 'COMPLETED'
+
+            self.save(update_fields=['amount_refunded', 'amount_due', 'status', 'updated_at'])
+
+            if self.payment_type == 'CREDIT' and self.customer:
+                self.customer.update_balance(-total_refund, transaction_type='REFUND')
+
+            AuditLog.log_event(
+                event_type='refund.processed',
+                user=user,
+                sale=self,
+                refund=refund,
+                customer=self.customer,
+                event_data={
+                    'refund_id': str(refund.id),
+                    'amount': str(total_refund),
+                    'refund_type': refund.refund_type,
+                },
+                description=f'Refund of {total_refund} processed for sale {self.receipt_number}',
+            )
+
+            return refund
     
     def commit_stock(self):
         """
@@ -442,24 +625,65 @@ class Sale(models.Model):
         Called when sale is completed
         """
         with transaction.atomic():
-            for item in self.sale_items.all():
-                if item.stock_product:
-                    # Reduce stock quantity
+            for item in self.sale_items.select_related('product', 'stock_product').all():
+                quantity_decimal = Decimal(item.quantity)
+                if quantity_decimal != quantity_decimal.to_integral_value():
+                    raise ValidationError(
+                        f"Fractional quantity {quantity_decimal} for {item.product.name} is not supported for stock deduction."
+                    )
+                quantity_required = int(quantity_decimal)
+
+                if item.stock_product and not self.storefront_id:
+                    # Reduce stock quantity at the warehouse level
                     stock_product = StockProduct.objects.select_for_update().get(id=item.stock_product.id)
-                    if stock_product.quantity < item.quantity:
+                    if stock_product.quantity < quantity_required:
                         raise ValidationError(
                             f"Insufficient stock for {item.product.name}. "
-                            f"Available: {stock_product.quantity}, Required: {item.quantity}"
+                            f"Available: {stock_product.quantity}, Required: {quantity_required}"
                         )
-                    stock_product.quantity -= item.quantity
-                    stock_product.save()
+                    stock_product.quantity = stock_product.quantity - quantity_required
+                    if stock_product.quantity < 0:
+                        raise ValidationError(f"Stock level for {item.product.name} would become negative.")
+                    stock_product.save(update_fields=['quantity', 'updated_at'])
+
+                if self.storefront_id:
+                    storefront_inventory, _ = StoreFrontInventory.objects.select_for_update().get_or_create(
+                        storefront=self.storefront,
+                        product=item.product,
+                        defaults={'quantity': 0}
+                    )
+
+                    current_qty = int(storefront_inventory.quantity)
+                    if current_qty < quantity_required:
+                        raise ValidationError(
+                            f"Insufficient storefront stock for {item.product.name}. "
+                            f"Available: {current_qty}, Required: {quantity_required}"
+                        )
+
+                    new_qty = current_qty - quantity_required
+                    if new_qty < 0:
+                        raise ValidationError(f"Storefront stock level for {item.product.name} would become negative.")
+
+                    storefront_inventory.quantity = new_qty
+                    storefront_inventory.save(update_fields=['quantity', 'updated_at'])
     
-    def release_reservations(self):
-        """Release all stock reservations for this sale"""
-        StockReservation.objects.filter(
-            cart_session_id=str(self.id),
-            status='ACTIVE'
-        ).update(status='RELEASED')
+    def release_reservations(self, *, delete: bool = False):
+        """Release all stock reservations for this sale.
+
+        Args:
+            delete: When True, delete all reservations linked to this sale
+                after marking any active holds as released.
+        """
+        reservations = StockReservation.objects.filter(cart_session_id=str(self.id))
+
+        # Mark any outstanding holds as released before cleanup
+        reservations.filter(status='ACTIVE').update(
+            status='RELEASED',
+            released_at=timezone.now()
+        )
+
+        if delete:
+            reservations.delete()
     
     def complete_sale(self):
         """
@@ -481,8 +705,9 @@ class Sale(models.Model):
             # Commit stock
             self.commit_stock()
             
-            # Release reservations
-            self.release_reservations()
+            # Release reservations and remove draft/session artifacts
+            self.release_reservations(delete=True)
+            self.cart_session_id = None
             
             # Update status based on payment
             if self.amount_due == Decimal('0.00'):
@@ -656,6 +881,19 @@ class SaleItem(models.Model):
         self.calculate_totals()
         
         super().save(*args, **kwargs)
+
+    @property
+    def refunded_quantity(self) -> int:
+        """Return the total quantity already refunded for this sale item."""
+        total = self.refund_items.aggregate(total=Sum('quantity'))['total'] or 0
+        return int(total)
+
+    @property
+    def refundable_quantity(self) -> int:
+        """Maximum quantity still available to refund."""
+        original_quantity = int(Decimal(self.quantity))
+        remaining = original_quantity - self.refunded_quantity
+        return remaining if remaining > 0 else 0
 
 
 class Payment(models.Model):

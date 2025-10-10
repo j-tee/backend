@@ -1,0 +1,180 @@
+from decimal import Decimal
+
+from django.urls import reverse
+from django.utils import timezone
+from rest_framework.test import APITestCase
+
+from accounts.models import Business
+from inventory.models import (
+    BusinessStoreFront,
+    Category,
+    Product,
+    Stock,
+    StockProduct,
+    StoreFront,
+    Warehouse,
+)
+from sales.models import Customer, Sale, SaleItem
+from django.contrib.auth import get_user_model
+
+
+User = get_user_model()
+
+
+class SalesSummaryAPITestCase(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(
+            email="owner@example.com",
+            password="testpass123",
+            name="Business Owner",
+        )
+        self.business = Business.objects.create(
+            owner=self.user,
+            name="Test Business",
+            tin="TIN-123456",
+            email="biz@example.com",
+            address="123 Test Street",
+        )
+        self.storefront = StoreFront.objects.create(
+            user=self.user,
+            name="Main Store",
+            location="Accra",
+        )
+        BusinessStoreFront.objects.create(
+            business=self.business,
+            storefront=self.storefront,
+        )
+
+        self.category = Category.objects.create(name="Electronics")
+        self.product_cash = Product.objects.create(
+            business=self.business,
+            name="POS Terminal",
+            sku="POS-001",
+            category=self.category,
+        )
+        self.product_credit = Product.objects.create(
+            business=self.business,
+            name="Barcode Scanner",
+            sku="POS-002",
+            category=self.category,
+        )
+
+        self.warehouse = Warehouse.objects.create(
+            name="Central Warehouse",
+            location="Tema",
+            manager=self.user,
+        )
+        self.stock_cash = Stock.objects.create(
+            warehouse=self.warehouse,
+            arrival_date=timezone.now().date(),
+        )
+        self.stock_credit = Stock.objects.create(
+            warehouse=self.warehouse,
+            arrival_date=timezone.now().date(),
+        )
+        self.stock_product_cash = StockProduct.objects.create(
+            stock=self.stock_cash,
+            product=self.product_cash,
+            quantity=100,
+            unit_cost=Decimal("60.00"),
+            retail_price=Decimal("100.00"),
+        )
+        self.stock_product_credit = StockProduct.objects.create(
+            stock=self.stock_credit,
+            product=self.product_credit,
+            quantity=100,
+            unit_cost=Decimal("30.00"),
+            retail_price=Decimal("50.00"),
+        )
+
+        self.customer_credit = Customer.objects.create(
+            business=self.business,
+            name="Credit Customer",
+            created_by=self.user,
+            credit_limit=Decimal("1000.00"),
+            credit_terms_days=30,
+        )
+
+        self.client.force_authenticate(self.user)
+
+    def _create_completed_cash_sale(self):
+        sale = Sale.objects.create(
+            business=self.business,
+            storefront=self.storefront,
+            user=self.user,
+            payment_type="CASH",
+            status="COMPLETED",
+            type="RETAIL",
+        )
+
+        SaleItem.objects.create(
+            sale=sale,
+            product=self.product_cash,
+            stock=self.stock_cash,
+            stock_product=self.stock_product_cash,
+            quantity=Decimal("2"),
+            unit_price=Decimal("100.00"),
+            tax_rate=Decimal("10.00"),
+        )
+
+        sale.calculate_totals()
+        sale.amount_paid = sale.total_amount
+        sale.amount_due = Decimal("0.00")
+        sale.receipt_number = "RCPT-CASH-001"
+        sale.completed_at = timezone.now()
+        sale.save()
+        return sale
+
+    def _create_partial_credit_sale(self):
+        sale = Sale.objects.create(
+            business=self.business,
+            storefront=self.storefront,
+            user=self.user,
+            customer=self.customer_credit,
+            payment_type="CREDIT",
+            status="PARTIAL",
+            type="RETAIL",
+        )
+
+        SaleItem.objects.create(
+            sale=sale,
+            product=self.product_credit,
+            stock=self.stock_credit,
+            stock_product=self.stock_product_credit,
+            quantity=Decimal("3"),
+            unit_price=Decimal("50.00"),
+            tax_rate=Decimal("0.00"),
+        )
+
+        sale.calculate_totals()
+        sale.amount_paid = Decimal("75.00")
+        sale.amount_due = sale.total_amount - sale.amount_paid
+        sale.receipt_number = "RCPT-CREDIT-001"
+        sale.completed_at = timezone.now()
+        sale.save()
+        return sale
+
+    def test_summary_includes_cogs_and_credit_breakdown(self):
+        self._create_completed_cash_sale()
+        self._create_partial_credit_sale()
+
+        response = self.client.get(reverse("sale-summary"))
+        self.assertEqual(response.status_code, 200)
+
+        summary = response.data["summary"]
+        self.assertAlmostEqual(summary["total_sales"], 220.0)
+        self.assertAlmostEqual(summary["total_cogs"], 120.0)
+        self.assertAlmostEqual(summary["total_tax_collected"], 20.0)
+        self.assertAlmostEqual(summary["total_profit"], 80.0)
+        self.assertAlmostEqual(summary["profit_margin"], 40.0)
+
+        self.assertAlmostEqual(summary["realized_revenue"], 295.0)
+        self.assertAlmostEqual(summary["outstanding_revenue"], 75.0)
+        self.assertAlmostEqual(summary["realized_profit"], 110.0)
+        self.assertAlmostEqual(summary["outstanding_profit"], 30.0)
+
+        credit_overview = summary["credit_health"]
+        self.assertAlmostEqual(credit_overview["amount_due"], 75.0)
+        self.assertAlmostEqual(credit_overview["partially_paid_amount"], 75.0)
+        self.assertAlmostEqual(credit_overview["realized_profit"], 30.0)
+        self.assertAlmostEqual(credit_overview["outstanding_profit"], 30.0)

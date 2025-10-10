@@ -66,9 +66,10 @@ class SaleItemTaxCalculationTest(TestCase):
 		self.assertEqual(sale_item.tax_amount, Decimal('8.25'))
 		self.assertEqual(sale_item.total_price, Decimal('63.25'))
 
-		total = self.sale.calculate_total()
+		total = self.sale.calculate_totals()
 		self.assertEqual(total, Decimal('63.25'))
-		self.assertEqual(self.sale.tax_amount, Decimal('8.25'))
+		self.sale.refresh_from_db()
+		self.assertEqual(self.sale.sale_items.first().tax_amount, Decimal('8.25'))
 
 	def test_sale_item_profit_margin_calculation(self):
 		# Create warehouse and stock for cost tracking

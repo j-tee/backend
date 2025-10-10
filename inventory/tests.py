@@ -1,10 +1,13 @@
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.test import TestCase
 from django.core.exceptions import ValidationError
+from django.core.management import call_command
 from django.utils import timezone
+from django.urls import reverse
+from django.db.models import Sum
 from django.contrib.auth import get_user_model
 
 from rest_framework import status
@@ -16,7 +19,9 @@ from .models import (
 	StoreFrontEmployee, WarehouseEmployee, Category, Product, Supplier, Stock, StockProduct,
 	Inventory, StoreFrontInventory, Transfer, TransferRequest
 )
+from .stock_adjustments import StockAdjustment
 from accounts.models import Business, BusinessMembership
+from sales.models import Sale, SaleItem, Customer, StockReservation
 
 User = get_user_model()
 
@@ -1106,6 +1111,367 @@ class TransferAvailabilityValidationTest(BusinessTestMixin, APITestCase):
 		self.assertTrue(recheck.data['is_available'])
 
 
+class StorefrontAvailabilityAfterSaleTest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner, self.business = self.create_business()
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'is_active'])
+
+		BusinessMembership.objects.get_or_create(
+			business=self.business,
+			user=self.owner,
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+		)
+
+		self.category = Category.objects.create(name='Availability Tracking')
+		self.product = Product.objects.create(
+			business=self.business,
+			name='Realtime Widget',
+			sku='RT-001',
+			category=self.category
+		)
+
+		self.warehouse = Warehouse.objects.create(name='Realtime Warehouse', location='Central Depot')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+
+		self.stock = Stock.objects.create(warehouse=self.warehouse, description='Initial Batch')
+		self.stock_product = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			quantity=60,
+			unit_cost=Decimal('5.00'),
+			retail_price=Decimal('12.00')
+		)
+
+		self.storefront = StoreFront.objects.create(user=self.owner, name='Realtime Storefront', location='Downtown')
+		BusinessStoreFront.objects.create(business=self.business, storefront=self.storefront)
+		self.storefront_inventory = StoreFrontInventory.objects.create(
+			storefront=self.storefront,
+			product=self.product,
+			quantity=50
+		)
+
+		self.customer = Customer.objects.create(
+			business=self.business,
+			name='Walk-in Customer',
+			created_by=self.owner
+		)
+
+		self.sale = Sale.objects.create(
+			business=self.business,
+			storefront=self.storefront,
+			user=self.owner,
+			customer=self.customer,
+			status='DRAFT',
+			payment_type='CASH'
+		)
+		SaleItem.objects.create(
+			sale=self.sale,
+			product=self.product,
+			stock=self.stock,
+			stock_product=self.stock_product,
+			quantity=Decimal('2'),
+			unit_price=Decimal('12.00')
+		)
+		self.sale.calculate_totals()
+
+		self.client.force_authenticate(self.owner)
+
+	def test_storefront_availability_reflects_completed_sale(self):
+		url = reverse('stock-availability', kwargs={
+			'storefront_id': self.storefront.id,
+			'product_id': self.product.id,
+		})
+
+		pre_sale_response = self.client.get(url)
+		self.assertEqual(pre_sale_response.status_code, status.HTTP_200_OK)
+		self.assertEqual(pre_sale_response.data['unreserved_quantity'], 50)
+		self.assertEqual(pre_sale_response.data['reserved_quantity'], 0)
+
+		self.sale.amount_paid = self.sale.total_amount
+		self.sale.amount_due = Decimal('0.00')
+class StorefrontSaleCatalogAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner, self.business = self.create_business()
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.email_verified = True
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'email_verified', 'is_active'])
+
+		BusinessMembership.objects.get_or_create(
+			business=self.business,
+			user=self.owner,
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+		)
+
+		self.category = Category.objects.create(name='Catalog Products')
+		self.product_with_stock = Product.objects.create(
+			business=self.business,
+			name='Catalog Widget',
+			sku='CAT-001',
+			category=self.category
+		)
+		self.product_without_stock = Product.objects.create(
+			business=self.business,
+			name='Ghost Widget',
+			sku='CAT-002',
+			category=self.category
+		)
+
+		self.warehouse = Warehouse.objects.create(name='Catalog Warehouse', location='Industrial Estate')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+		self.stock = Stock.objects.create(warehouse=self.warehouse, description='Initial Catalog Batch')
+		self.supplier = Supplier.objects.create(business=self.business, name='Catalog Supplier')
+
+		self.storefront = StoreFront.objects.create(user=self.owner, name='Catalog Storefront', location='High Street')
+		BusinessStoreFront.objects.create(business=self.business, storefront=self.storefront)
+
+		self.stock_product_old = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product_with_stock,
+			supplier=self.supplier,
+			quantity=5,
+			unit_cost=Decimal('8.00'),
+			unit_tax_rate=Decimal('5.00'),
+			retail_price=Decimal('10.00'),
+			wholesale_price=Decimal('9.00')
+		)
+		self.stock_product_latest = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product_with_stock,
+			supplier=self.supplier,
+			quantity=7,
+			unit_cost=Decimal('9.00'),
+			unit_tax_rate=Decimal('5.00'),
+			retail_price=Decimal('12.50'),
+			wholesale_price=Decimal('10.50')
+		)
+
+		self.catalog_inventory = StoreFrontInventory.objects.create(
+			storefront=self.storefront,
+			product=self.product_with_stock,
+			quantity=5
+		)
+		self.catalog_inventory.quantity += 7
+		self.catalog_inventory.save(update_fields=['quantity', 'updated_at'])
+
+		StoreFrontInventory.objects.create(
+			storefront=self.storefront,
+			product=self.product_without_stock,
+			quantity=9
+		)
+
+		self.client.force_authenticate(self.owner)
+
+	def test_sale_catalog_filters_products_without_stock_product(self):
+		url = f'/inventory/api/storefronts/{self.storefront.id}/sale-catalog/'
+		response = self.client.get(url)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertIn('products', response.data)
+		products = response.data['products']
+		self.assertEqual(len(products), 1)
+		product_data = products[0]
+		self.assertEqual(product_data['product_id'], str(self.product_with_stock.id))
+		self.assertEqual(product_data['available_quantity'], 12)
+		self.assertEqual(
+			sorted(product_data['stock_product_ids']),
+			sorted([str(self.stock_product_old.id), str(self.stock_product_latest.id)])
+		)
+		self.assertEqual(Decimal(product_data['retail_price']), Decimal('12.50'))
+		self.assertEqual(Decimal(product_data['wholesale_price']), Decimal('10.50'))
+		self.assertIsNotNone(product_data['last_stocked_at'])
+
+	def test_sale_catalog_includes_zero_stock_when_requested(self):
+		# Zero out storefront quantity but request include_zero to confirm optional behaviour
+		self.catalog_inventory.quantity = 0
+		self.catalog_inventory.save(update_fields=['quantity', 'updated_at'])
+		url = f'/inventory/api/storefronts/{self.storefront.id}/sale-catalog/?include_zero=true'
+		response = self.client.get(url)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		products = response.data['products']
+		self.assertEqual(len(products), 1)
+		self.assertEqual(products[0]['available_quantity'], 0)
+
+
+class StockReconciliationAPITest(BusinessTestMixin, APITestCase):
+	def setUp(self):
+		self.owner, self.business = self.create_business()
+		self.owner.account_type = User.ACCOUNT_OWNER
+		self.owner.is_active = True
+		self.owner.save(update_fields=['account_type', 'is_active'])
+
+		BusinessMembership.objects.get_or_create(
+			business=self.business,
+			user=self.owner,
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+		)
+
+		self.category = Category.objects.create(name='Reconciliation Gadgets')
+		self.product = Product.objects.create(
+			business=self.business,
+			name='Recon Widget',
+			sku='RECON-001',
+			category=self.category
+		)
+
+		self.warehouse = Warehouse.objects.create(name='Recon Warehouse', location='Recon City')
+		BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+		self.stock = Stock.objects.create(warehouse=self.warehouse, description='Recon batch')
+		self.stock_product = StockProduct.objects.create(
+			stock=self.stock,
+			product=self.product,
+			quantity=20,
+			unit_cost=Decimal('5.00'),
+			retail_price=Decimal('10.00')
+		)
+
+		Inventory.objects.create(
+			product=self.product,
+			stock=self.stock_product,
+			warehouse=self.warehouse,
+			quantity=12
+		)
+
+		self.storefront = StoreFront.objects.create(user=self.owner, name='Recon Storefront', location='Mall')
+		BusinessStoreFront.objects.create(business=self.business, storefront=self.storefront)
+		StoreFrontInventory.objects.create(
+			storefront=self.storefront,
+			product=self.product,
+			quantity=5
+		)
+
+		self.customer = Customer.objects.create(
+			business=self.business,
+			name='Recon Customer',
+			created_by=self.owner
+		)
+
+		self.sale = Sale.objects.create(
+			business=self.business,
+			storefront=self.storefront,
+			user=self.owner,
+			customer=self.customer,
+			status='COMPLETED',
+			payment_type='CASH'
+		)
+		SaleItem.objects.create(
+			sale=self.sale,
+			product=self.product,
+			stock=self.stock,
+			stock_product=self.stock_product,
+			quantity=Decimal('3'),
+			unit_price=Decimal('12.00')
+		)
+		line_total = self.sale.sale_items.aggregate(total=Sum('total_price'))['total'] or Decimal('0.00')
+		self.sale.amount_paid = line_total
+		self.sale.calculate_totals()
+		self.sale.completed_at = timezone.now()
+		self.sale.save(update_fields=['subtotal', 'discount_amount', 'tax_amount', 'total_amount', 'amount_paid', 'amount_due', 'completed_at', 'updated_at'])
+
+		StockAdjustment.objects.create(
+			business=self.business,
+			stock_product=self.stock_product,
+			adjustment_type='DAMAGE',
+			quantity=-2,
+			unit_cost=Decimal('5.00'),
+			total_cost=Decimal('10.00'),
+			reason='Damage',
+			status='COMPLETED',
+			requires_approval=False,
+			created_by=self.owner,
+			approved_by=self.owner,
+			approved_at=timezone.now(),
+			completed_at=timezone.now()
+		)
+		StockAdjustment.objects.create(
+			business=self.business,
+			stock_product=self.stock_product,
+			adjustment_type='CORRECTION_INCREASE',
+			quantity=1,
+			unit_cost=Decimal('5.00'),
+			total_cost=Decimal('5.00'),
+			reason='Correction',
+			status='COMPLETED',
+			requires_approval=False,
+			created_by=self.owner,
+			approved_by=self.owner,
+			approved_at=timezone.now(),
+			completed_at=timezone.now()
+		)
+
+		StockReservation.objects.create(
+			stock_product=self.stock_product,
+			quantity=Decimal('2'),
+			cart_session_id=str(self.sale.id),
+			status='ACTIVE',
+			expires_at=timezone.now() + timedelta(minutes=30)
+		)
+		StockReservation.objects.create(
+			stock_product=self.stock_product,
+			quantity=Decimal('1'),
+			cart_session_id='orphan-session',
+			status='ACTIVE',
+			expires_at=timezone.now() + timedelta(minutes=30)
+		)
+
+		self.client.force_authenticate(self.owner)
+
+	def test_stock_reconciliation_returns_expected_metrics(self):
+		url = reverse('product-stock-reconciliation', kwargs={'pk': self.product.id})
+		response = self.client.get(url)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+		payload = response.data
+
+		self.assertEqual(payload['warehouse']['recorded_quantity'], 20)
+		self.assertEqual(payload['storefront']['total_on_hand'], 5)
+		self.assertEqual(payload['sales']['completed_units'], 3)
+		self.assertEqual(payload['adjustments']['shrinkage_units'], 2)
+		self.assertEqual(payload['adjustments']['correction_units'], 1)
+		self.assertEqual(payload['reservations']['linked_units'], 2)
+		self.assertEqual(payload['reservations']['orphaned_units'], 1)
+
+		# Warehouse on hand = Recorded batch (20) - Storefront on hand (5) = 15
+		formula = payload['formula']
+		self.assertEqual(formula['warehouse_inventory_on_hand'], 15)
+		# Baseline = Warehouse (15) + Storefront (5) + Sold (3) - Shrinkage (2) + Corrections (1) - Reservations (2) = 20
+		self.assertEqual(formula['calculated_baseline'], 20)
+		self.assertEqual(formula['recorded_batch_quantity'], 20)
+		self.assertEqual(formula['baseline_vs_recorded_delta'], 0)
+
+	def test_warehouse_inventory_falls_back_to_recorded_quantity_when_no_entries(self):
+		new_product = Product.objects.create(
+			business=self.business,
+			name='Fallback Widget',
+			sku='FALL-001',
+			category=self.category
+		)
+		new_stock = Stock.objects.create(warehouse=self.warehouse, description='Fallback stock')
+		new_stock_product = StockProduct.objects.create(
+			stock=new_stock,
+			product=new_product,
+			quantity=15,
+			unit_cost=Decimal('4.00'),
+			retail_price=Decimal('8.00')
+		)
+
+		url = reverse('product-stock-reconciliation', kwargs={'pk': new_product.id})
+		response = self.client.get(url)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+		payload = response.data
+		self.assertEqual(payload['warehouse']['recorded_quantity'], 15)
+		# No storefront transfers, so warehouse on hand = recorded quantity
+		self.assertEqual(payload['warehouse']['inventory_on_hand'], 15)
+
+		formula = payload['formula']
+		self.assertEqual(formula['warehouse_inventory_on_hand'], 15)
+		self.assertEqual(formula['recorded_batch_quantity'], 15)
+		# Baseline = Warehouse (15) + Storefront (0) + Sold (0) - Shrinkage (0) + Corrections (0) - Reservations (0) = 15
+		self.assertEqual(formula['calculated_baseline'], 15)
+		self.assertEqual(formula['baseline_vs_recorded_delta'], 0)
+
 class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 	def setUp(self):
 		self.owner, self.business = self.create_business()
@@ -1310,6 +1676,24 @@ class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(staff_workspace.data['incoming_transfers'][0]['reference'], transfer_response.data['reference'])
 		self.assertEqual(staff_workspace.data['my_transfer_requests'][0]['status'], TransferRequest.STATUS_FULFILLED)
 
+	def test_manual_fulfillment_updates_storefront_inventory(self):
+		request_data = self._create_request(quantity=5)
+		request_id = request_data['id']
+
+		self.client.force_authenticate(self.owner)
+		response = self.client.post(
+			f'/inventory/api/transfer-requests/{request_id}/update-status/',
+			{'status': TransferRequest.STATUS_FULFILLED},
+			format='json'
+		)
+		self.assertEqual(response.status_code, status.HTTP_200_OK)
+		self.assertEqual(response.data['status'], TransferRequest.STATUS_FULFILLED)
+		inventory_entry = StoreFrontInventory.objects.get(storefront=self.storefront, product=self.product)
+		self.assertEqual(inventory_entry.quantity, 5)
+		adjustments = response.data.get('_inventory_adjustments')
+		self.assertIsNotNone(adjustments)
+		self.assertEqual(adjustments[0]['quantity_added'], 5)
+
 	def test_manager_can_cancel_request(self):
 		request_data = self._create_request(quantity=6)
 		request_id = request_data['id']
@@ -1399,4 +1783,85 @@ class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 		)
 		self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn('status', invalid_response.data)
+
+
+class ReplayCompletedAdjustmentsCommandTests(BusinessTestMixin, TestCase):
+		"""Ensure replay_completed_adjustments fixes orphaned shrinkage rows."""
+
+		def setUp(self):
+			self.owner, self.business = self.create_business(name='Replay Biz', tin='TIN-REPLAY-001')
+			self.category = Category.objects.create(name='Replay Category')
+			self.product = Product.objects.create(
+				business=self.business,
+				name='Replay Cable',
+				sku='REPLAY-001',
+				category=self.category,
+			)
+			self.warehouse = Warehouse.objects.create(name='Replay Warehouse', location='Replay City')
+			BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
+			self.stock = Stock.objects.create(warehouse=self.warehouse, description='Replay stock batch')
+			self.stock_product = StockProduct.objects.create(
+				stock=self.stock,
+				product=self.product,
+				quantity=26,
+				unit_cost=Decimal('120.00'),
+				retail_price=Decimal('150.00'),
+			)
+
+		def _create_completed_adjustment(self, quantity: int) -> StockAdjustment:
+			return StockAdjustment.objects.create(
+				business=self.business,
+				stock_product=self.stock_product,
+				adjustment_type='DAMAGE',
+				quantity=quantity,
+				unit_cost=Decimal('120.00'),
+				reason='Replay test adjustment',
+				status='COMPLETED',
+				requires_approval=True,
+				created_by=self.owner,
+				approved_by=self.owner,
+				approved_at=timezone.now(),
+				completed_at=timezone.now(),
+				quantity_before=self.stock_product.quantity,
+			)
+
+		def test_command_replays_adjustments_when_quantity_matches_baseline(self):
+			adjustments = [
+				self._create_completed_adjustment(-4),
+				self._create_completed_adjustment(-6),
+				self._create_completed_adjustment(-8),
+			]
+			original_completed_at = {adj.id: adj.completed_at for adj in adjustments}
+
+			call_command('replay_completed_adjustments')
+			self.stock_product.refresh_from_db()
+			self.assertEqual(self.stock_product.quantity, 26)
+
+			call_command('replay_completed_adjustments', '--apply')
+			self.stock_product.refresh_from_db()
+			self.assertEqual(self.stock_product.quantity, 8)
+
+			for adj in adjustments:
+				adj.refresh_from_db()
+				self.assertEqual(adj.status, 'COMPLETED')
+				self.assertEqual(adj.completed_at, original_completed_at[adj.id])
+				self.assertEqual(adj.quantity_before, 26)
+
+		def test_command_is_idempotent(self):
+			adjustments = [
+				self._create_completed_adjustment(-5),
+				self._create_completed_adjustment(-7),
+			]
+
+			call_command('replay_completed_adjustments', '--apply')
+			self.stock_product.refresh_from_db()
+			self.assertEqual(self.stock_product.quantity, 14)
+
+			call_command('replay_completed_adjustments', '--apply')
+			self.stock_product.refresh_from_db()
+			self.assertEqual(self.stock_product.quantity, 14)
+
+			for adj in adjustments:
+				adj.refresh_from_db()
+				self.assertEqual(adj.status, 'COMPLETED')
 

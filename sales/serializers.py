@@ -35,6 +35,19 @@ class CustomerSerializer(serializers.ModelSerializer):
             'updated_at', 'overdue_balance'
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'outstanding_balance']
+        extra_kwargs = {
+            'business': {'required': False, 'allow_null': True},
+            'email': {'required': False, 'allow_null': True},
+            'phone': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'address': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'customer_type': {'required': False},
+            'credit_limit': {'required': False},
+            'credit_terms_days': {'required': False},
+            'credit_blocked': {'required': False},
+            'contact_person': {'required': False, 'allow_null': True, 'allow_blank': True},
+            'is_active': {'required': False},
+            'created_by': {'required': False, 'allow_null': True},
+        }
     
     def get_overdue_balance(self, obj):
         """Get overdue balance for the customer"""
@@ -263,6 +276,11 @@ class SaleSerializer(serializers.ModelSerializer):
         decimal_places=2,
         coerce_to_string=False
     )
+    amount_refunded = serializers.DecimalField(
+        max_digits=12,
+        decimal_places=2,
+        coerce_to_string=False
+    )
     amount_due = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
@@ -279,7 +297,7 @@ class SaleSerializer(serializers.ModelSerializer):
             'id', 'business', 'storefront', 'storefront_name', 'user', 'user_name',
             'customer', 'customer_name', 'receipt_number', 'type', 'status',
             'subtotal', 'discount_amount', 'tax_amount', 'total_amount',
-            'amount_paid', 'amount_due', 'payment_type', 'manager_override',
+            'amount_paid', 'amount_refunded', 'amount_due', 'payment_type', 'manager_override',
             'override_reason', 'override_by', 'notes', 'cart_session_id',
             'created_at', 'updated_at', 'completed_at', 'line_items', 'payments',
             'payment_status', 'payment_completion_percentage'
@@ -546,3 +564,43 @@ class StockAvailabilitySerializer(serializers.Serializer):
     unreserved = serializers.DecimalField(max_digits=10, decimal_places=2)
     retail_price = serializers.DecimalField(max_digits=12, decimal_places=2)
     wholesale_price = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class RefundRequestItemSerializer(serializers.Serializer):
+    """Single line item payload for sale refunds."""
+    sale_item_id = serializers.UUIDField()
+    quantity = serializers.IntegerField(min_value=1)
+
+
+class SaleRefundSerializer(serializers.Serializer):
+    """Serializer for processing a refund against an existing sale."""
+    refund_type = serializers.ChoiceField(choices=Refund.REFUND_TYPE_CHOICES, default='PARTIAL')
+    reason = serializers.CharField()
+    items = RefundRequestItemSerializer(many=True)
+
+    def validate_items(self, value):
+        sale: Sale = self.context['sale']
+        if not value:
+            raise serializers.ValidationError('At least one item must be provided for a refund.')
+
+        sale_items_map = {str(item.id): item for item in sale.sale_items.all()}
+        validated = []
+
+        for entry in value:
+            sale_item = sale_items_map.get(str(entry['sale_item_id']))
+            if not sale_item:
+                raise serializers.ValidationError(f"Sale item {entry['sale_item_id']} does not belong to this sale.")
+
+            refundable = sale_item.refundable_quantity
+            if refundable <= 0:
+                raise serializers.ValidationError(f"Sale item {sale_item.id} has no refundable quantity remaining.")
+
+            quantity = entry['quantity']
+            if quantity > refundable:
+                raise serializers.ValidationError(
+                    f"Only {refundable} units available to refund for item {sale_item.id}."
+                )
+
+            validated.append({'sale_item': sale_item, 'quantity': quantity})
+
+        return validated

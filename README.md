@@ -94,6 +94,10 @@ Set the `PLATFORM_OWNER_EMAIL` environment variable to the email address of the 
 export PLATFORM_OWNER_EMAIL=owner@example.com
 ```
 
+### Development API throttling
+
+API throttling is disabled automatically while `DEBUG` is `True` so that local development and automated tests aren’t blocked by rate limits. Set `ENABLE_API_THROTTLE=true` in your environment if you need to exercise the production throttling behavior locally.
+
 ### Prerequisites
 - Docker and Docker Compose
 - Python 3.11+ (for local development)
@@ -281,9 +285,10 @@ The system uses Celery for background processing:
 
 - **User management**: Welcome emails, account cleanup
 - **Inventory**: Stock level monitoring, low stock alerts
-- **Sales**: Receipt generation, inventory updates
+- **Sales**: Receipt generation, inventory updates, expired reservation cleanup
 - **Subscriptions**: Renewal notifications, payment processing
 - **Reporting**: Periodic report generation
+- **Stock reservations**: `sales.tasks.release_expired_reservations` runs via Celery beat every 15 minutes to free stale holds. Trigger manually anytime with `python manage.py release_expired_reservations` (use `--dry-run` to preview).
 
 ## Monitoring and Logging
 
