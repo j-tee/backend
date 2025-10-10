@@ -1,3 +1,4 @@
+from decimal import Decimal
 from django.db.models import Sum
 from rest_framework import serializers
 
@@ -113,6 +114,8 @@ class StockProductSerializer(serializers.ModelSerializer):
     expected_profit_amount = serializers.SerializerMethodField()
     expected_profit_margin = serializers.SerializerMethodField()
     expected_total_profit = serializers.SerializerMethodField()
+    projected_retail_profit = serializers.SerializerMethodField()
+    projected_wholesale_profit = serializers.SerializerMethodField()
 
     class Meta:
         model = StockProduct
@@ -122,13 +125,15 @@ class StockProductSerializer(serializers.ModelSerializer):
             'unit_tax_amount', 'unit_additional_cost', 'retail_price', 'wholesale_price',
             'description', 'landed_unit_cost', 'total_base_cost', 'total_tax_amount',
             'total_additional_cost', 'total_landed_cost', 'expected_profit_amount',
-            'expected_profit_margin', 'expected_total_profit', 'created_at', 'updated_at'
+            'expected_profit_margin', 'expected_total_profit', 'projected_retail_profit',
+            'projected_wholesale_profit', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'warehouse_name', 'product_name', 'product_sku', 'supplier_name',
             'landed_unit_cost', 'total_base_cost', 'total_tax_amount', 'total_additional_cost',
             'total_landed_cost', 'expected_profit_amount', 'expected_profit_margin',
-            'expected_total_profit', 'created_at', 'updated_at'
+            'expected_total_profit', 'projected_retail_profit', 'projected_wholesale_profit',
+            'created_at', 'updated_at'
         ]
 
     def get_landed_unit_cost(self, obj):
@@ -154,6 +159,20 @@ class StockProductSerializer(serializers.ModelSerializer):
 
     def get_expected_total_profit(self, obj):
         return obj.expected_total_profit
+
+    def get_projected_retail_profit(self, obj):
+        """Calculate total profit if all units sold at retail price"""
+        if not obj.retail_price or obj.retail_price <= Decimal('0.00'):
+            return Decimal('0.00')
+        profit_per_unit = obj.retail_price - obj.landed_unit_cost
+        return profit_per_unit * obj.quantity
+
+    def get_projected_wholesale_profit(self, obj):
+        """Calculate total profit if all units sold at wholesale price"""
+        if not obj.wholesale_price or obj.wholesale_price <= Decimal('0.00'):
+            return Decimal('0.00')
+        profit_per_unit = obj.wholesale_price - obj.landed_unit_cost
+        return profit_per_unit * obj.quantity
 
 
 class StockSerializer(serializers.ModelSerializer):
