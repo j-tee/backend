@@ -106,7 +106,7 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
             'product_code': sp.product.sku,
             'quantity_at_creation': obj.quantity_before,  # Historical snapshot
             'current_quantity': sp.quantity,              # Real-time value
-            'warehouse': sp.stock.warehouse.name,
+            'warehouse': sp.warehouse.name if sp.warehouse else None,
             'supplier': sp.supplier.name if sp.supplier else None,
             'unit_cost': str(sp.landed_unit_cost),
             'retail_price': str(sp.retail_price)
@@ -329,7 +329,7 @@ class StockCountItemSerializer(serializers.ModelSerializer):
             'id': str(sp.id),
             'product_name': sp.product.name,
             'product_code': sp.product.sku,
-            'warehouse': sp.stock.warehouse.name,
+            'warehouse': sp.warehouse.name if sp.warehouse else None,
             'current_quantity': sp.quantity
         }
     

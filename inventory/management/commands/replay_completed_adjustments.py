@@ -142,7 +142,7 @@ class Command(BaseCommand):
 
             summary_prefix = (
                 f"Stock product {stock_product.id} ({stock_product.product.name}) in "
-                f"{stock_product.stock.warehouse.name if stock_product.stock_id else 'warehouse unknown'}"
+                f"{stock_product.warehouse.name if stock_product.warehouse else 'warehouse unknown'}"
             )
             batch_count = sum(len(batch["adjustments"]) for batch in batches)
 
