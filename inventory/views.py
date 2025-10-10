@@ -651,8 +651,8 @@ class ProductViewSet(viewsets.ModelViewSet):
                 'batches': [
                     {
                         'stock_product_id': str(sp.id),
-                        'warehouse_id': str(sp.stock.warehouse_id) if sp.stock and sp.stock.warehouse_id else None,
-                        'warehouse_name': sp.stock.warehouse.name if sp.stock and sp.stock.warehouse else None,
+                        'warehouse_id': str(sp.warehouse_id) if sp.warehouse_id else None,
+                        'warehouse_name': sp.warehouse.name if sp.warehouse else None,
                         'quantity': sp.quantity,
                         'arrival_date': sp.stock.arrival_date if sp.stock else None,
                     }
