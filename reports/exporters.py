@@ -15,6 +15,12 @@ from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
 
 from .services.inventory import InventoryReportRow
+from .csv_exporters import (
+    SalesCSVExporter,
+    CustomerCSVExporter,
+    InventoryCSVExporter,
+    AuditLogCSVExporter,
+)
 
 
 class BaseReportExporter(ABC):
@@ -824,7 +830,11 @@ EXPORTER_MAP = {
     'docx': WordReportExporter,
     'pdf': PDFReportExporter,
     'sales_excel': SalesExcelExporter,
+    'sales_csv': SalesCSVExporter,
     'customer_excel': CustomerExcelExporter,
+    'customer_csv': CustomerCSVExporter,
     'inventory_excel': InventoryExcelExporter,
+    'inventory_csv': InventoryCSVExporter,
     'audit_excel': AuditLogExcelExporter,
+    'audit_csv': AuditLogCSVExporter,
 }

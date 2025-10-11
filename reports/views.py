@@ -103,11 +103,10 @@ class SalesExportView(APIView):
             content_type = file_exporter.content_type
             extension = file_exporter.file_extension
         elif export_format == 'csv':
-            # CSV export - to be implemented
-            return Response(
-                {'error': 'CSV export not yet implemented'},
-                status=status.HTTP_501_NOT_IMPLEMENTED
-            )
+            file_exporter = EXPORTER_MAP['sales_csv']()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
         elif export_format == 'pdf':
             # PDF export - to be implemented
             return Response(
@@ -181,11 +180,10 @@ class CustomerExportView(APIView):
             content_type = file_exporter.content_type
             extension = file_exporter.file_extension
         elif export_format == 'csv':
-            # CSV export - to be implemented
-            return Response(
-                {'error': 'CSV export not yet implemented'},
-                status=status.HTTP_501_NOT_IMPLEMENTED
-            )
+            file_exporter = EXPORTER_MAP['customer_csv']()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
         else:
             return Response(
                 {'error': 'Invalid export format'},
@@ -215,13 +213,6 @@ class InventoryExportView(APIView):
         
         # Extract format
         export_format = validated.pop('format', 'excel')
-        
-        # CSV not yet implemented
-        if export_format == 'csv':
-            return Response(
-                {'error': 'CSV format not yet implemented'},
-                status=status.HTTP_501_NOT_IMPLEMENTED
-            )
         
         try:
             # Create exporter
@@ -281,13 +272,6 @@ class AuditLogExportView(APIView):
         
         # Extract format
         export_format = validated.pop('format', 'excel')
-        
-        # CSV not yet implemented
-        if export_format == 'csv':
-            return Response(
-                {'error': 'CSV format not yet implemented'},
-                status=status.HTTP_501_NOT_IMPLEMENTED
-            )
         
         try:
             # Create exporter
