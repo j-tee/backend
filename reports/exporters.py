@@ -6,7 +6,7 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 from openpyxl import Workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.styles import Font
+from openpyxl.styles import Font, PatternFill
 from docx import Document
 from docx.shared import Inches
 from reportlab.lib import colors
@@ -181,8 +181,145 @@ class PDFReportExporter(BaseReportExporter):
         return buffer.read()
 
 
+class SalesExcelExporter(BaseReportExporter):
+    """Excel exporter specifically for sales data with multiple sheets"""
+    content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    file_extension = 'xlsx'
+    
+    def export(self, report_data: Dict[str, Any]) -> bytes:
+        workbook = Workbook()
+        
+        # Summary Sheet
+        summary_sheet = workbook.active
+        summary_sheet.title = 'Summary'
+        
+        # Header
+        summary_sheet['A1'] = 'Sales Export Report'
+        summary_sheet['A1'].font = Font(size=16, bold=True)
+        summary_sheet.merge_cells('A1:B1')
+        
+        summary_sheet['A2'] = 'Generated At'
+        summary_sheet['B2'] = report_data['generated_at'].strftime('%Y-%m-%d %H:%M:%S')
+        
+        row = 4
+        summary_sheet[f'A{row}'] = 'Summary Metrics'
+        summary_sheet[f'A{row}'].font = Font(bold=True, size=12)
+        row += 1
+        
+        # Summary metrics
+        summary_mapping = {
+            'total_sales': 'Total Sales Count',
+            'total_revenue': 'Total Revenue',
+            'net_sales': 'Net Sales (excl. tax & discounts)',
+            'total_tax': 'Total Tax Collected',
+            'total_discounts': 'Total Discounts Given',
+            'total_cogs': 'Total Cost of Goods Sold',
+            'total_profit': 'Total Gross Profit',
+            'profit_margin_percent': 'Profit Margin %',
+            'amount_paid': 'Total Amount Paid',
+            'amount_refunded': 'Total Amount Refunded',
+            'outstanding_balance': 'Outstanding Balance',
+        }
+        
+        for key, label in summary_mapping.items():
+            value = report_data['summary'].get(key, '')
+            summary_sheet[f'A{row}'] = label
+            summary_sheet[f'B{row}'] = str(value)
+            summary_sheet[f'A{row}'].font = Font(bold=True)
+            row += 1
+        
+        # Sales Detail Sheet
+        detail_sheet = workbook.create_sheet(title='Sales Detail')
+        
+        # Headers
+        headers = [
+            'Receipt Number', 'Date', 'Time', 'Storefront', 'Cashier',
+            'Customer Name', 'Customer Type', 'Sale Type', 'Status',
+            'Subtotal', 'Discount', 'Tax', 'Total', 
+            'Amount Paid', 'Amount Refunded', 'Amount Due',
+            'Payment Type', 'Notes'
+        ]
+        
+        for col_num, header in enumerate(headers, 1):
+            cell = detail_sheet.cell(row=1, column=col_num)
+            cell.value = header
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
+        
+        row = 2
+        for sale in report_data['sales']:
+            detail_sheet.cell(row=row, column=1, value=sale.get('receipt_number', ''))
+            detail_sheet.cell(row=row, column=2, value=sale.get('date', ''))
+            detail_sheet.cell(row=row, column=3, value=sale.get('time', ''))
+            detail_sheet.cell(row=row, column=4, value=sale.get('storefront', ''))
+            detail_sheet.cell(row=row, column=5, value=sale.get('cashier', ''))
+            detail_sheet.cell(row=row, column=6, value=sale.get('customer_name', ''))
+            detail_sheet.cell(row=row, column=7, value=sale.get('customer_type', ''))
+            detail_sheet.cell(row=row, column=8, value=sale.get('sale_type', ''))
+            detail_sheet.cell(row=row, column=9, value=sale.get('status', ''))
+            detail_sheet.cell(row=row, column=10, value=sale.get('subtotal', ''))
+            detail_sheet.cell(row=row, column=11, value=sale.get('discount', ''))
+            detail_sheet.cell(row=row, column=12, value=sale.get('tax', ''))
+            detail_sheet.cell(row=row, column=13, value=sale.get('total', ''))
+            detail_sheet.cell(row=row, column=14, value=sale.get('amount_paid', ''))
+            detail_sheet.cell(row=row, column=15, value=sale.get('amount_refunded', ''))
+            detail_sheet.cell(row=row, column=16, value=sale.get('amount_due', ''))
+            detail_sheet.cell(row=row, column=17, value=sale.get('payment_type', ''))
+            detail_sheet.cell(row=row, column=18, value=sale.get('notes', ''))
+            row += 1
+        
+        # Line Items Sheet
+        items_sheet = workbook.create_sheet(title='Line Items')
+        
+        item_headers = [
+            'Receipt Number', 'Product Name', 'SKU', 'Category',
+            'Quantity', 'Unit Price', 'Total Price', 'COGS', 'Profit', 'Margin %'
+        ]
+        
+        for col_num, header in enumerate(item_headers, 1):
+            cell = items_sheet.cell(row=1, column=col_num)
+            cell.value = header
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
+        
+        row = 2
+        for sale in report_data['sales']:
+            for item in sale.get('items', []):
+                items_sheet.cell(row=row, column=1, value=sale['receipt_number'])
+                items_sheet.cell(row=row, column=2, value=item['product_name'])
+                items_sheet.cell(row=row, column=3, value=item['sku'])
+                items_sheet.cell(row=row, column=4, value=item['category'])
+                items_sheet.cell(row=row, column=5, value=item['quantity'])
+                items_sheet.cell(row=row, column=6, value=item['unit_price'])
+                items_sheet.cell(row=row, column=7, value=item['total_price'])
+                items_sheet.cell(row=row, column=8, value=item['cogs'])
+                items_sheet.cell(row=row, column=9, value=item['profit'])
+                items_sheet.cell(row=row, column=10, value=item['margin_percent'])
+                row += 1
+        
+        # Auto-size columns
+        for sheet in [summary_sheet, detail_sheet, items_sheet]:
+            for column_cells in sheet.columns:
+                max_length = 0
+                column = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                sheet.column_dimensions[column].width = adjusted_width
+        
+        # Save to bytes
+        with BytesIO() as output:
+            workbook.save(output)
+            return output.getvalue()
+
+
 EXPORTER_MAP = {
     'excel': ExcelReportExporter,
     'docx': WordReportExporter,
     'pdf': PDFReportExporter,
+    'sales_excel': SalesExcelExporter,
 }
