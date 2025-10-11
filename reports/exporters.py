@@ -21,6 +21,12 @@ from .csv_exporters import (
     InventoryCSVExporter,
     AuditLogCSVExporter,
 )
+from .pdf_exporters import (
+    SalesPDFExporter,
+    CustomerPDFExporter,
+    InventoryPDFExporter,
+    AuditLogPDFExporter,
+)
 
 
 class BaseReportExporter(ABC):
@@ -831,10 +837,14 @@ EXPORTER_MAP = {
     'pdf': PDFReportExporter,
     'sales_excel': SalesExcelExporter,
     'sales_csv': SalesCSVExporter,
+    'sales_pdf': SalesPDFExporter,
     'customer_excel': CustomerExcelExporter,
     'customer_csv': CustomerCSVExporter,
+    'customer_pdf': CustomerPDFExporter,
     'inventory_excel': InventoryExcelExporter,
     'inventory_csv': InventoryCSVExporter,
+    'inventory_pdf': InventoryPDFExporter,
     'audit_excel': AuditLogExcelExporter,
     'audit_csv': AuditLogCSVExporter,
+    'audit_pdf': AuditLogPDFExporter,
 }

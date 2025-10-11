@@ -108,11 +108,10 @@ class SalesExportView(APIView):
             content_type = file_exporter.content_type
             extension = file_exporter.file_extension
         elif export_format == 'pdf':
-            # PDF export - to be implemented
-            return Response(
-                {'error': 'PDF export not yet implemented'},
-                status=status.HTTP_501_NOT_IMPLEMENTED
-            )
+            file_exporter = EXPORTER_MAP['sales_pdf']()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
         else:
             return Response(
                 {'error': 'Invalid export format'},
@@ -181,6 +180,11 @@ class CustomerExportView(APIView):
             extension = file_exporter.file_extension
         elif export_format == 'csv':
             file_exporter = EXPORTER_MAP['customer_csv']()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
+        elif export_format == 'pdf':
+            file_exporter = EXPORTER_MAP['customer_pdf']()
             file_bytes = file_exporter.export(data)
             content_type = file_exporter.content_type
             extension = file_exporter.file_extension
