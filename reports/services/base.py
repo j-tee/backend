@@ -47,12 +47,12 @@ class BaseDataExporter(ABC):
         pass
     
     @abstractmethod
-    def serialize_data(self, queryset: QuerySet) -> Dict[str, Any]:
+    def serialize_data(self, queryset: QuerySet, filters: Dict[str, Any] = None) -> Dict[str, Any]:
         """Convert queryset to export format - implement in subclass"""
         pass
     
     def export(self, filters: Dict[str, Any]) -> Dict[str, Any]:
         """Main export method"""
         queryset = self.build_queryset(filters)
-        data = self.serialize_data(queryset)
+        data = self.serialize_data(queryset, filters)
         return data

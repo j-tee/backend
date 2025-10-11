@@ -317,9 +317,195 @@ class SalesExcelExporter(BaseReportExporter):
             return output.getvalue()
 
 
+class CustomerExcelExporter(BaseReportExporter):
+    """Excel exporter for customer data with credit aging"""
+    content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    file_extension = 'xlsx'
+    
+    def export(self, report_data: Dict[str, Any]) -> bytes:
+        workbook = Workbook()
+        
+        # Summary Sheet
+        summary_sheet = workbook.active
+        summary_sheet.title = 'Summary'
+        
+        # Header
+        summary_sheet['A1'] = 'Customer Export Report'
+        summary_sheet['A1'].font = Font(size=16, bold=True)
+        summary_sheet.merge_cells('A1:B1')
+        
+        summary_sheet['A2'] = 'Generated At'
+        summary_sheet['B2'] = report_data['generated_at'].strftime('%Y-%m-%d %H:%M:%S')
+        
+        row = 4
+        summary_sheet[f'A{row}'] = 'Customer Statistics'
+        summary_sheet[f'A{row}'].font = Font(bold=True, size=12)
+        row += 1
+        
+        # Summary metrics
+        summary_mapping = {
+            'total_customers': 'Total Customers',
+            'retail_customers': 'Retail Customers',
+            'wholesale_customers': 'Wholesale Customers',
+            'active_customers': 'Active Customers',
+            'blocked_customers': 'Blocked Customers',
+            'total_credit_limit': 'Total Credit Limit',
+            'total_outstanding_balance': 'Total Outstanding Balance',
+            'total_available_credit': 'Total Available Credit',
+        }
+        
+        for key, label in summary_mapping.items():
+            value = report_data['summary'].get(key, '')
+            summary_sheet[f'A{row}'] = label
+            summary_sheet[f'B{row}'] = str(value)
+            summary_sheet[f'A{row}'].font = Font(bold=True)
+            row += 1
+        
+        # Aging Summary
+        row += 1
+        summary_sheet[f'A{row}'] = 'Aging Analysis Summary'
+        summary_sheet[f'A{row}'].font = Font(bold=True, size=12)
+        row += 1
+        
+        aging_mapping = {
+            'aging_current': 'Current (0-30 days)',
+            'aging_31_60': '31-60 days',
+            'aging_61_90': '61-90 days',
+            'aging_over_90': 'Over 90 days',
+            'total_overdue': 'Total Overdue',
+        }
+        
+        for key, label in aging_mapping.items():
+            value = report_data['summary'].get(key, '')
+            summary_sheet[f'A{row}'] = label
+            summary_sheet[f'B{row}'] = str(value)
+            summary_sheet[f'A{row}'].font = Font(bold=True)
+            row += 1
+        
+        # Customer Detail Sheet
+        detail_sheet = workbook.create_sheet(title='Customer Details')
+        
+        # Headers
+        headers = [
+            'Customer ID', 'Name', 'Email', 'Phone', 'Address',
+            'Customer Type', 'Contact Person',
+            'Credit Limit', 'Outstanding Balance', 'Available Credit',
+            'Credit Terms (days)', 'Credit Blocked',
+            'Total Sales Count', 'Total Sales Amount', 'Average Sale',
+            'Last Sale Date', 'First Sale Date',
+            'Active', 'Created Date', 'Created By'
+        ]
+        
+        for col_num, header in enumerate(headers, 1):
+            cell = detail_sheet.cell(row=1, column=col_num)
+            cell.value = header
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='CCCCCC', end_color='CCCCCC', fill_type='solid')
+        
+        row = 2
+        for customer in report_data['customers']:
+            detail_sheet.cell(row=row, column=1, value=customer.get('customer_id', ''))
+            detail_sheet.cell(row=row, column=2, value=customer.get('name', ''))
+            detail_sheet.cell(row=row, column=3, value=customer.get('email', ''))
+            detail_sheet.cell(row=row, column=4, value=customer.get('phone', ''))
+            detail_sheet.cell(row=row, column=5, value=customer.get('address', ''))
+            detail_sheet.cell(row=row, column=6, value=customer.get('customer_type', ''))
+            detail_sheet.cell(row=row, column=7, value=customer.get('contact_person', ''))
+            detail_sheet.cell(row=row, column=8, value=customer.get('credit_limit', ''))
+            detail_sheet.cell(row=row, column=9, value=customer.get('outstanding_balance', ''))
+            detail_sheet.cell(row=row, column=10, value=customer.get('available_credit', ''))
+            detail_sheet.cell(row=row, column=11, value=customer.get('credit_terms_days', ''))
+            detail_sheet.cell(row=row, column=12, value=customer.get('credit_blocked', ''))
+            detail_sheet.cell(row=row, column=13, value=customer.get('total_sales_count', ''))
+            detail_sheet.cell(row=row, column=14, value=customer.get('total_sales_amount', ''))
+            detail_sheet.cell(row=row, column=15, value=customer.get('average_sale_amount', ''))
+            detail_sheet.cell(row=row, column=16, value=customer.get('last_sale_date', ''))
+            detail_sheet.cell(row=row, column=17, value=customer.get('first_sale_date', ''))
+            detail_sheet.cell(row=row, column=18, value=customer.get('is_active', ''))
+            detail_sheet.cell(row=row, column=19, value=customer.get('created_at', ''))
+            detail_sheet.cell(row=row, column=20, value=customer.get('created_by', ''))
+            row += 1
+        
+        # Aging Report Sheet
+        aging_sheet = workbook.create_sheet(title='Credit Aging')
+        
+        aging_headers = [
+            'Customer Name', 'Customer Type', 'Credit Limit', 'Outstanding Balance',
+            'Current (0-30)', '31-60 Days', '61-90 Days', 'Over 90 Days',
+            'Total Overdue', 'Oldest Invoice (days)', 'Credit Blocked'
+        ]
+        
+        for col_num, header in enumerate(aging_headers, 1):
+            cell = aging_sheet.cell(row=1, column=col_num)
+            cell.value = header
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='FFE6E6', end_color='FFE6E6', fill_type='solid')
+        
+        row = 2
+        for customer in report_data['customers']:
+            aging_sheet.cell(row=row, column=1, value=customer.get('name', ''))
+            aging_sheet.cell(row=row, column=2, value=customer.get('customer_type', ''))
+            aging_sheet.cell(row=row, column=3, value=customer.get('credit_limit', ''))
+            aging_sheet.cell(row=row, column=4, value=customer.get('outstanding_balance', ''))
+            aging_sheet.cell(row=row, column=5, value=customer.get('aging_current', ''))
+            aging_sheet.cell(row=row, column=6, value=customer.get('aging_31_60', ''))
+            aging_sheet.cell(row=row, column=7, value=customer.get('aging_61_90', ''))
+            aging_sheet.cell(row=row, column=8, value=customer.get('aging_over_90', ''))
+            aging_sheet.cell(row=row, column=9, value=customer.get('total_overdue', ''))
+            aging_sheet.cell(row=row, column=10, value=customer.get('oldest_invoice_days', ''))
+            aging_sheet.cell(row=row, column=11, value=customer.get('credit_blocked', ''))
+            row += 1
+        
+        # Credit Transactions Sheet (if available)
+        if report_data.get('credit_transactions'):
+            txn_sheet = workbook.create_sheet(title='Credit Transactions')
+            
+            txn_headers = [
+                'Customer Name', 'Date', 'Transaction Type',
+                'Amount', 'Balance Before', 'Balance After', 'Reference'
+            ]
+            
+            for col_num, header in enumerate(txn_headers, 1):
+                cell = txn_sheet.cell(row=1, column=col_num)
+                cell.value = header
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color='E6F2FF', end_color='E6F2FF', fill_type='solid')
+            
+            row = 2
+            for txn in report_data['credit_transactions']:
+                txn_sheet.cell(row=row, column=1, value=txn.get('customer_name', ''))
+                txn_sheet.cell(row=row, column=2, value=txn.get('date', ''))
+                txn_sheet.cell(row=row, column=3, value=txn.get('transaction_type', ''))
+                txn_sheet.cell(row=row, column=4, value=txn.get('amount', ''))
+                txn_sheet.cell(row=row, column=5, value=txn.get('balance_before', ''))
+                txn_sheet.cell(row=row, column=6, value=txn.get('balance_after', ''))
+                txn_sheet.cell(row=row, column=7, value=txn.get('reference', ''))
+                row += 1
+        
+        # Auto-size columns
+        for sheet in workbook.worksheets:
+            for column_cells in sheet.columns:
+                max_length = 0
+                column = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                sheet.column_dimensions[column].width = adjusted_width
+        
+        # Save to bytes
+        with BytesIO() as output:
+            workbook.save(output)
+            return output.getvalue()
+
+
 EXPORTER_MAP = {
     'excel': ExcelReportExporter,
     'docx': WordReportExporter,
     'pdf': PDFReportExporter,
     'sales_excel': SalesExcelExporter,
+    'customer_excel': CustomerExcelExporter,
 }

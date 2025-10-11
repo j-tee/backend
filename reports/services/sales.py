@@ -70,8 +70,10 @@ class SalesExporter(BaseDataExporter):
         
         return queryset.order_by('-created_at')
     
-    def serialize_data(self, queryset: QuerySet) -> Dict[str, Any]:
+    def serialize_data(self, queryset: QuerySet, filters: Dict[str, Any] = None) -> Dict[str, Any]:
         """Convert sales to export-ready format"""
+        if filters is None:
+            filters = {}
         
         # Summary calculations
         summary = {
