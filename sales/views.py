@@ -1286,6 +1286,131 @@ class SaleViewSet(viewsets.ModelViewSet):
         else:
             # Default: return JSON
             return Response(receipt_data)
+    
+    @action(detail=True, methods=['post', 'patch'], url_path='update_customer')
+    def update_customer(self, request, pk=None):
+        """
+        Update the customer on a DRAFT sale.
+        
+        This endpoint allows updating the customer associated with a sale
+        that is still in DRAFT status. This is essential for POS workflows
+        where the customer is selected after the sale is created.
+        
+        Security & Validation:
+        - Only allows updating customer on DRAFT sales
+        - Validates customer belongs to the same business
+        - Prevents updating completed/cancelled sales
+        - Maintains data integrity
+        
+        Request body:
+        {
+          "customer": "uuid-of-customer"  // Required: UUID of the customer
+        }
+        
+        Returns:
+        - 200 OK: Updated sale object with new customer information
+        - 400 Bad Request: If sale is not DRAFT or customer field missing
+        - 404 Not Found: If customer doesn't exist or doesn't belong to business
+        
+        Example:
+        PATCH /sales/api/sales/{sale_id}/update-customer/
+        {
+          "customer": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        }
+        
+        Response:
+        {
+          "id": "sale-uuid",
+          "customer": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+          "customer_name": "Fred Amugi",
+          "status": "DRAFT",
+          ...
+        }
+        """
+        sale = self.get_object()
+        
+        # 1. Security Check: Only allow customer updates on DRAFT sales
+        if sale.status != 'DRAFT':
+            return Response(
+                {
+                    'error': 'Cannot update customer on a sale that is not in DRAFT status',
+                    'current_status': sale.status,
+                    'allowed_status': 'DRAFT',
+                    'message': 'Customer can only be changed before the sale is completed. '
+                              'To change customer on a completed sale, you must cancel and recreate it.'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 2. Validate customer field is provided
+        customer_id = request.data.get('customer')
+        if not customer_id:
+            return Response(
+                {
+                    'error': 'customer field is required',
+                    'message': 'Please provide a customer UUID in the request body',
+                    'example': {'customer': 'uuid-of-customer'}
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 3. Validate customer exists and belongs to the same business
+        try:
+            customer = Customer.objects.get(
+                id=customer_id,
+                business=sale.business
+            )
+        except Customer.DoesNotExist:
+            return Response(
+                {
+                    'error': 'Customer not found or does not belong to this business',
+                    'customer_id': str(customer_id),
+                    'business_id': str(sale.business.id) if sale.business else None,
+                    'message': 'The customer must exist and belong to the same business as the sale'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except ValidationError:
+            return Response(
+                {
+                    'error': 'Invalid customer ID format',
+                    'message': 'Customer ID must be a valid UUID'
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 4. Store old customer for audit trail (optional)
+        old_customer = sale.customer
+        old_customer_name = old_customer.name if old_customer else None
+        
+        # 5. Update the customer
+        sale.customer = customer
+        sale.save(update_fields=['customer'])
+        
+        # 6. Log the change for audit trail
+        AuditLog.log_event(
+            event_type='sale.customer_updated',
+            user=request.user,
+            sale=sale,
+            event_data={
+                'old_customer_id': str(old_customer.id) if old_customer else None,
+                'old_customer_name': old_customer_name,
+                'new_customer_id': str(customer.id),
+                'new_customer_name': customer.name,
+                'sale_status': sale.status
+            },
+            description=f'Customer updated from "{old_customer_name}" to "{customer.name}" on sale {sale.id}',
+            ip_address=request.META.get('REMOTE_ADDR')
+        )
+        
+        # 7. Return updated sale with customer information
+        serializer = self.get_serializer(sale)
+        return Response({
+            'message': f'Customer updated successfully to {customer.name}',
+            'previous_customer': old_customer_name,
+            'new_customer': customer.name,
+            'sale': serializer.data
+        })
 
 
 class SaleItemViewSet(viewsets.ModelViewSet):
