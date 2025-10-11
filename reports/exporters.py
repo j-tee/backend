@@ -668,6 +668,157 @@ class InventoryExcelExporter:
             return output.getvalue()
 
 
+class AuditLogExcelExporter:
+    """Excel exporter for audit log data"""
+    
+    content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    file_extension = 'xlsx'
+    
+    def export(self, data: Dict[str, Any]) -> bytes:
+        """Export audit logs to Excel format"""
+        workbook = Workbook()
+        
+        # Remove default sheet
+        workbook.remove(workbook.active)
+        
+        # Sheet 1: Summary
+        summary_sheet = workbook.create_sheet('Summary')
+        
+        # Header
+        summary_sheet['A1'] = 'Audit Log Export Summary'
+        summary_sheet['A1'].font = Font(size=14, bold=True)
+        summary_sheet.merge_cells('A1:B1')
+        
+        # Export metadata
+        summary_sheet['A3'] = 'Export Date:'
+        summary_sheet['B3'] = data['summary'].get('export_date', '')
+        summary_sheet['A3'].font = Font(bold=True)
+        
+        summary_sheet['A4'] = 'Date Range:'
+        summary_sheet['B4'] = f"{data['summary'].get('date_range_start', '')} to {data['summary'].get('date_range_end', '')}"
+        summary_sheet['A4'].font = Font(bold=True)
+        
+        # Summary statistics section
+        summary_sheet['A6'] = 'Audit Statistics'
+        summary_sheet['A6'].font = Font(size=12, bold=True)
+        summary_sheet['A6'].fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        summary_sheet['B6'].fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        
+        row = 7
+        metrics = [
+            ('Total Events', 'total_events'),
+            ('First Event', 'first_event_time'),
+            ('Last Event', 'last_event_time'),
+            ('Unique Users', 'unique_users'),
+            ('Unique Event Types', 'unique_event_types'),
+        ]
+        
+        for label, key in metrics:
+            summary_sheet.cell(row=row, column=1, value=label)
+            summary_sheet.cell(row=row, column=1).font = Font(bold=True)
+            summary_sheet.cell(row=row, column=2, value=data['summary'].get(key, 0))
+            row += 1
+        
+        # Event type breakdown
+        row += 1
+        summary_sheet.cell(row=row, column=1, value='Top Event Types')
+        summary_sheet.cell(row=row, column=1).font = Font(size=12, bold=True)
+        summary_sheet.cell(row=row, column=1).fill = PatternFill(start_color='FFE6CC', end_color='FFE6CC', fill_type='solid')
+        summary_sheet.cell(row=row, column=2).fill = PatternFill(start_color='FFE6CC', end_color='FFE6CC', fill_type='solid')
+        row += 1
+        
+        # Event headers
+        summary_sheet.cell(row=row, column=1, value='Event Type')
+        summary_sheet.cell(row=row, column=2, value='Count')
+        for col in range(1, 3):
+            summary_sheet.cell(row=row, column=col).font = Font(bold=True)
+        row += 1
+        
+        # Event data
+        idx = 1
+        while f'event_{idx}_type' in data['summary']:
+            summary_sheet.cell(row=row, column=1, value=data['summary'][f'event_{idx}_type'])
+            summary_sheet.cell(row=row, column=2, value=data['summary'][f'event_{idx}_count'])
+            row += 1
+            idx += 1
+        
+        # User activity breakdown
+        row += 1
+        summary_sheet.cell(row=row, column=1, value='Top Users')
+        summary_sheet.cell(row=row, column=1).font = Font(size=12, bold=True)
+        summary_sheet.cell(row=row, column=1).fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
+        summary_sheet.cell(row=row, column=2).fill = PatternFill(start_color='CCE5FF', end_color='CCE5FF', fill_type='solid')
+        row += 1
+        
+        # User headers
+        summary_sheet.cell(row=row, column=1, value='User')
+        summary_sheet.cell(row=row, column=2, value='Activity Count')
+        for col in range(1, 3):
+            summary_sheet.cell(row=row, column=col).font = Font(bold=True)
+        row += 1
+        
+        # User data
+        idx = 1
+        while f'user_{idx}_name' in data['summary']:
+            summary_sheet.cell(row=row, column=1, value=data['summary'][f'user_{idx}_name'])
+            summary_sheet.cell(row=row, column=2, value=data['summary'][f'user_{idx}_count'])
+            row += 1
+            idx += 1
+        
+        # Sheet 2: Audit Logs
+        logs_sheet = workbook.create_sheet('Audit Logs')
+        
+        # Headers
+        headers = [
+            'Log ID', 'Timestamp', 'Event Type', 'Event Label', 'User Email', 'User Name',
+            'Entity Type', 'Entity ID', 'Entity Name', 'Description', 'Event Details',
+            'IP Address', 'User Agent'
+        ]
+        
+        for col, header in enumerate(headers, 1):
+            cell = logs_sheet.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid')
+            cell.font = Font(bold=True, color='FFFFFF')
+        
+        # Data rows
+        row = 2
+        for log in data.get('audit_logs', []):
+            logs_sheet.cell(row=row, column=1, value=log.get('log_id', ''))
+            logs_sheet.cell(row=row, column=2, value=log.get('timestamp', ''))
+            logs_sheet.cell(row=row, column=3, value=log.get('event_type', ''))
+            logs_sheet.cell(row=row, column=4, value=log.get('event_label', ''))
+            logs_sheet.cell(row=row, column=5, value=log.get('user_email', ''))
+            logs_sheet.cell(row=row, column=6, value=log.get('user_name', ''))
+            logs_sheet.cell(row=row, column=7, value=log.get('entity_type', ''))
+            logs_sheet.cell(row=row, column=8, value=log.get('entity_id', ''))
+            logs_sheet.cell(row=row, column=9, value=log.get('entity_name', ''))
+            logs_sheet.cell(row=row, column=10, value=log.get('description', ''))
+            logs_sheet.cell(row=row, column=11, value=log.get('event_details', ''))
+            logs_sheet.cell(row=row, column=12, value=log.get('ip_address', ''))
+            logs_sheet.cell(row=row, column=13, value=log.get('user_agent', ''))
+            row += 1
+        
+        # Auto-size columns
+        for sheet in workbook.worksheets:
+            for column_cells in sheet.columns:
+                max_length = 0
+                column = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 60)  # Max 60 for audit logs
+                sheet.column_dimensions[column].width = adjusted_width
+        
+        # Save to bytes
+        with BytesIO() as output:
+            workbook.save(output)
+            return output.getvalue()
+
+
 EXPORTER_MAP = {
     'excel': ExcelReportExporter,
     'docx': WordReportExporter,
@@ -675,4 +826,5 @@ EXPORTER_MAP = {
     'sales_excel': SalesExcelExporter,
     'customer_excel': CustomerExcelExporter,
     'inventory_excel': InventoryExcelExporter,
+    'audit_excel': AuditLogExcelExporter,
 }

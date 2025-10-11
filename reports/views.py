@@ -14,10 +14,12 @@ from .serializers import (
     SalesExportRequestSerializer,
     CustomerExportRequestSerializer,
     InventoryExportRequestSerializer,
+    AuditLogExportRequestSerializer,
 )
 from .services.inventory import InventoryValuationReportBuilder, InventoryExporter
 from .services.sales import SalesExporter
 from .services.customers import CustomerExporter
+from .services.audit import AuditLogExporter
 
 
 class InventoryValuationReportView(APIView):
@@ -259,6 +261,72 @@ class InventoryExportView(APIView):
         # Generate filename
         timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
         filename = f"inventory_export_{timestamp}.{extension}"
+        
+        response = HttpResponse(file_bytes, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        
+        return response
+
+
+class AuditLogExportView(APIView):
+    """Export audit logs for compliance and security tracking"""
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, *args, **kwargs):
+        """Generate audit log export"""
+        serializer = AuditLogExportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        
+        # Extract format
+        export_format = validated.pop('format', 'excel')
+        
+        # CSV not yet implemented
+        if export_format == 'csv':
+            return Response(
+                {'error': 'CSV format not yet implemented'},
+                status=status.HTTP_501_NOT_IMPLEMENTED
+            )
+        
+        try:
+            # Create exporter
+            exporter = AuditLogExporter(user=request.user)
+            
+            # Export data
+            data = exporter.export(validated)
+            
+            # Check if we have any audit logs
+            if not data.get('audit_logs'):
+                return Response(
+                    {'error': 'No audit logs found for the given criteria'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get appropriate exporter class
+            exporter_class = EXPORTER_MAP.get(f'audit_{export_format}')
+            
+            if not exporter_class:
+                return Response(
+                    {'error': f'Unsupported format: {export_format}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Generate file
+            file_exporter = exporter_class()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Export failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Generate filename
+        timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"audit_logs_{timestamp}.{extension}"
         
         response = HttpResponse(file_bytes, content_type=content_type)
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
