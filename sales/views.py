@@ -350,6 +350,107 @@ class SaleViewSet(viewsets.ModelViewSet):
         })
     
     @action(detail=True, methods=['post'])
+    def toggle_sale_type(self, request, pk=None):
+        """
+        Toggle sale type between RETAIL and WHOLESALE.
+        Updates all sale items to use the appropriate pricing.
+        Can only be done for DRAFT sales.
+        """
+        sale = self.get_object()
+        
+        # Validate sale is in DRAFT status
+        if sale.status != 'DRAFT':
+            return Response(
+                {'error': 'Can only change sale type for draft sales'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get new type from request, or toggle automatically
+        new_type = request.data.get('type')
+        if new_type:
+            if new_type not in ['RETAIL', 'WHOLESALE']:
+                return Response(
+                    {'error': 'Invalid sale type. Must be RETAIL or WHOLESALE'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # Toggle: RETAIL -> WHOLESALE, WHOLESALE -> RETAIL
+            new_type = 'WHOLESALE' if sale.type == 'RETAIL' else 'RETAIL'
+        
+        # If already the requested type, no changes needed
+        if sale.type == new_type:
+            return Response({
+                'message': f'Sale already set to {new_type}',
+                'sale': SaleSerializer(sale).data
+            })
+        
+        old_type = sale.type
+        
+        with transaction.atomic():
+            # Update sale type
+            sale.type = new_type
+            sale.save()
+            
+            # Update all sale items with new pricing
+            updated_items = []
+            for item in sale.sale_items.all():
+                # Get stock product for this item
+                stock_product = item.stock_product
+                if not stock_product:
+                    # Try to find latest stock product for the product
+                    stock_product = StockProduct.objects.filter(
+                        product=item.product
+                    ).order_by('-created_at').first()
+                
+                if stock_product:
+                    # Determine new price based on new sale type
+                    if new_type == 'WHOLESALE':
+                        if stock_product.wholesale_price and stock_product.wholesale_price > Decimal('0'):
+                            new_price = stock_product.wholesale_price
+                        else:
+                            # Fallback to retail if wholesale not set
+                            new_price = stock_product.retail_price
+                    else:  # RETAIL
+                        new_price = stock_product.retail_price
+                    
+                    # Update item price
+                    old_price = item.unit_price
+                    item.unit_price = new_price
+                    item.save()
+                    
+                    updated_items.append({
+                        'product_name': item.product.name,
+                        'old_price': str(old_price),
+                        'new_price': str(new_price)
+                    })
+            
+            # Recalculate sale totals
+            sale.calculate_totals()
+            sale.save()
+            
+            # Log the change
+            AuditLog.log_event(
+                event_type='sale.type_changed',
+                user=request.user,
+                sale=sale,
+                event_data={
+                    'old_type': old_type,
+                    'new_type': new_type,
+                    'items_updated': len(updated_items),
+                    'updated_items': updated_items
+                },
+                description=f'Sale type changed from {old_type} to {new_type}',
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT')
+            )
+        
+        return Response({
+            'message': f'Sale type changed from {old_type} to {new_type}',
+            'sale': SaleSerializer(sale).data,
+            'updated_items': updated_items
+        })
+    
+    @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
         """Complete sale (checkout)"""
         sale = self.get_object()

@@ -414,6 +414,142 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
         serializer = StorefrontSaleProductSerializer(catalog_items, many=True)
         return Response({'storefront': str(storefront.id), 'products': serializer.data}, status=status.HTTP_200_OK)
 
+    @action(detail=False, methods=['get'], url_path='multi-storefront-catalog')
+    def multi_storefront_catalog(self, request):
+        """
+        Return combined catalog from all storefronts the user has access to.
+        
+        For business owners: returns products from ALL storefronts in their business
+        For employees: returns products from storefronts they're assigned to
+        
+        Each product includes storefront information to show where it's available.
+        """
+        user = request.user
+        include_zero = request.query_params.get('include_zero', '').lower() == 'true'
+        
+        # Get accessible storefronts
+        accessible_storefronts = []
+        
+        # Check if user is business owner/manager
+        business_ids = _business_ids_for_user(user)
+        if business_ids:
+            # Business owner/manager - get all storefronts in their businesses
+            accessible_storefronts = list(StoreFront.objects.filter(
+                business_link__business_id__in=business_ids
+            ).select_related('business_link__business'))
+        else:
+            # Regular employee - get assigned storefronts only
+            from inventory.models import StoreFrontEmployee
+            assigned_storefronts = StoreFrontEmployee.objects.filter(
+                user=user,
+                is_active=True
+            ).select_related('storefront', 'storefront__business_link__business')
+            accessible_storefronts = [emp.storefront for emp in assigned_storefronts]
+        
+        if not accessible_storefronts:
+            return Response({
+                'storefronts': [],
+                'products': [],
+                'message': 'No accessible storefronts found for this user'
+            }, status=status.HTTP_200_OK)
+        
+        # Collect products from all accessible storefronts
+        combined_products = {}  # product_id -> product data with storefront info
+        
+        for storefront in accessible_storefronts:
+            # Get inventory for this storefront
+            inventory_qs = StoreFrontInventory.objects.filter(storefront=storefront)
+            if not include_zero:
+                inventory_qs = inventory_qs.filter(quantity__gt=0)
+            
+            inventory_totals = {
+                row['product_id']: row['total_quantity']
+                for row in inventory_qs.values('product_id').annotate(total_quantity=Sum('quantity'))
+            }
+            
+            if not inventory_totals:
+                continue
+            
+            # Get stock products for pricing
+            stock_products = (
+                StockProduct.objects.filter(product_id__in=inventory_totals.keys())
+                .select_related('product', 'product__category')
+                .order_by('product_id', '-created_at')
+            )
+            
+            stock_map = {}
+            for stock_product in stock_products:
+                if stock_product.product_id not in stock_map:
+                    stock_map[stock_product.product_id] = {
+                        'product': stock_product.product,
+                        'latest': stock_product,
+                        'stock_product_ids': []
+                    }
+                stock_map[stock_product.product_id]['stock_product_ids'].append(stock_product.id)
+            
+            # Add products to combined catalog
+            for product_id, quantity in inventory_totals.items():
+                if product_id not in stock_map:
+                    continue
+                
+                entry = stock_map[product_id]
+                latest = entry['latest']
+                product = entry['product']
+                
+                retail_price = latest.retail_price if latest and latest.retail_price is not None else Decimal('0.00')
+                wholesale_price = latest.wholesale_price if latest and latest.wholesale_price is not None else None
+                if wholesale_price is not None and wholesale_price <= Decimal('0.00'):
+                    wholesale_price = None
+                
+                # If product already in combined catalog, add this storefront location
+                if product_id in combined_products:
+                    combined_products[product_id]['locations'].append({
+                        'storefront_id': str(storefront.id),
+                        'storefront_name': storefront.name,
+                        'available_quantity': int(quantity)
+                    })
+                    combined_products[product_id]['total_available'] += int(quantity)
+                else:
+                    # New product - add to catalog
+                    combined_products[product_id] = {
+                        'product_id': product.id,
+                        'product_name': product.name,
+                        'sku': product.sku,
+                        'category_name': product.category.name if product.category else None,
+                        'retail_price': retail_price,
+                        'wholesale_price': wholesale_price,
+                        'total_available': int(quantity),
+                        'locations': [{
+                            'storefront_id': str(storefront.id),
+                            'storefront_name': storefront.name,
+                            'available_quantity': int(quantity)
+                        }],
+                        'stock_product_ids': entry['stock_product_ids'],
+                        'last_stocked_at': latest.created_at if latest else None,
+                    }
+        
+        # Convert to list and sort
+        products_list = list(combined_products.values())
+        products_list.sort(key=lambda item: item['product_name'].lower())
+        
+        # Prepare storefront summary
+        storefront_summary = [
+            {
+                'id': str(sf.id),
+                'name': sf.name,
+                'business_id': str(sf.business_link.business_id) if sf.business_link else None,
+                'business_name': sf.business_link.business.name if sf.business_link else None
+            }
+            for sf in accessible_storefronts
+        ]
+        
+        return Response({
+            'storefronts': storefront_summary,
+            'products': products_list,
+            'total_products': len(products_list),
+            'total_storefronts': len(accessible_storefronts)
+        }, status=status.HTTP_200_OK)
+
 
 class ProductViewSet(viewsets.ModelViewSet):
     """ViewSet for managing products with pagination, filtering, and ordering."""
@@ -625,13 +761,17 @@ class ProductViewSet(viewsets.ModelViewSet):
         
         # Warehouse on hand = Recorded batch - Storefront on hand
         warehouse_on_hand = recorded_quantity_decimal - storefront_total_decimal
+        
+        # Calculate sellable storefront inventory (storefront - sold)
+        storefront_sellable = storefront_total_decimal - completed_units
 
-        # Reconciliation formula: Start with current physical stock, add back what was removed/sold
-        # recorded_batch = warehouse_on_hand + storefront_on_hand + sold - shrinkage + corrections - reservations
+        # Reconciliation formula CORRECTED:
+        # The recorded batch should equal: warehouse + storefront_transferred (not sellable)
+        # Because sold units were part of the storefront_transferred, we don't add them separately
+        # Formula: recorded_batch = warehouse_on_hand + storefront_on_hand (transferred)
         formula_baseline = (
             warehouse_on_hand
-            + storefront_total_decimal
-            - completed_units  # SUBTRACT sold units (they're gone)
+            + storefront_total_decimal  # Transferred quantity (fixed, doesn't change)
             - shrinkage_units
             + correction_units
             - reservations_linked_units
@@ -661,6 +801,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             },
             'storefront': {
                 'total_on_hand': to_number(storefront_total_decimal),
+                'sellable_now': to_number(storefront_sellable),  # NEW: Available for sale
                 'breakdown': storefront_breakdown,
             },
             'sales': {
@@ -682,6 +823,7 @@ class ProductViewSet(viewsets.ModelViewSet):
             'formula': {
                 'warehouse_inventory_on_hand': to_number(warehouse_on_hand),
                 'storefront_on_hand': to_number(storefront_total_decimal),
+                'storefront_sellable': to_number(storefront_sellable),
                 'completed_sales_units': to_number(completed_units),
                 'shrinkage_units': to_number(shrinkage_units),
                 'correction_units': to_number(correction_units),
@@ -690,7 +832,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                 'recorded_batch_quantity': to_number(recorded_quantity_decimal),
                 'initial_batch_quantity': to_number(computed_initial_decimal),
                 'baseline_vs_recorded_delta': to_number(recorded_quantity_decimal - formula_baseline),
-                'formula_explanation': 'warehouse_on_hand + storefront_on_hand - sold - shrinkage + corrections - reservations',
+                'formula_explanation': 'warehouse_on_hand + storefront_transferred - shrinkage + corrections - reservations',
             },
         }
 

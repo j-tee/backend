@@ -254,37 +254,47 @@ class SaleSerializer(serializers.ModelSerializer):
     subtotal = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        required=False,
+        default=0
     )
     discount_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        required=False,
+        default=0
     )
     tax_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        required=False,
+        default=0
     )
     total_amount = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        read_only=True  # System-calculated
     )
     amount_paid = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        read_only=True  # System-managed via payments
     )
     amount_refunded = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        read_only=True  # System-managed via refunds
     )
     amount_due = serializers.DecimalField(
         max_digits=12,
         decimal_places=2,
-        coerce_to_string=False
+        coerce_to_string=False,
+        read_only=True  # System-calculated
     )
     
     # Credit payment tracking fields
@@ -304,6 +314,7 @@ class SaleSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = [
             'id', 'receipt_number', 'subtotal', 'total_amount', 'amount_due',
+            'amount_paid', 'amount_refunded',  # System-managed fields
             'created_at', 'updated_at', 'completed_at'
         ]
     
@@ -498,7 +509,13 @@ class AddSaleItemSerializer(serializers.Serializer):
         allow_null=True
     )
     quantity = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal('0.01'))
-    unit_price = serializers.DecimalField(max_digits=12, decimal_places=2, min_value=Decimal('0'))
+    unit_price = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2, 
+        min_value=Decimal('0'),
+        required=False,  # Now optional - will auto-determine based on sale type
+        allow_null=True
+    )
     discount_percentage = serializers.DecimalField(
         max_digits=5, 
         decimal_places=2, 
@@ -519,6 +536,8 @@ class AddSaleItemSerializer(serializers.Serializer):
         DATA INTEGRITY CHECK: Ensure product has storefront inventory before allowing sale.
         This prevents sales from happening without proper stock flow:
         Warehouse → Transfer Request → Fulfillment → StoreFront → Sales
+        
+        Also auto-determines price based on sale type (RETAIL vs WHOLESALE).
         """
         from inventory.models import StoreFrontInventory
         
@@ -531,6 +550,30 @@ class AddSaleItemSerializer(serializers.Serializer):
         product = data.get('product')
         quantity = data.get('quantity', Decimal('0'))
         storefront = sale.storefront
+        stock_product = data.get('stock_product')
+        
+        # AUTO-DETERMINE PRICE based on sale type if not explicitly provided
+        if data.get('unit_price') is None or data.get('unit_price') == Decimal('0'):
+            # Get the latest stock product if not provided
+            if not stock_product:
+                stock_product = StockProduct.objects.filter(
+                    product=product
+                ).order_by('-created_at').first()
+            
+            if stock_product:
+                # Use wholesale price if sale type is WHOLESALE, otherwise use retail price
+                if sale.type == 'WHOLESALE':
+                    if stock_product.wholesale_price and stock_product.wholesale_price > Decimal('0'):
+                        data['unit_price'] = stock_product.wholesale_price
+                    else:
+                        # Fallback to retail if wholesale not set
+                        data['unit_price'] = stock_product.retail_price
+                else:  # RETAIL
+                    data['unit_price'] = stock_product.retail_price
+            else:
+                raise serializers.ValidationError({
+                    'unit_price': f'Could not determine price for product "{product.name}". No stock product found.'
+                })
         
         # Check if product has storefront inventory
         try:
