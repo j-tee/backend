@@ -1204,6 +1204,88 @@ class SaleViewSet(viewsets.ModelViewSet):
                 },
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
+    
+    @action(detail=True, methods=['get'])
+    def receipt(self, request, pk=None):
+        """
+        Get comprehensive receipt/invoice data for a completed sale.
+        
+        This endpoint returns all information needed to display or print a receipt:
+        - Business details (name, address, TIN, phone)
+        - Storefront details
+        - Customer information (if applicable)
+        - Line items with products, quantities, and prices
+        - Payment information
+        - Totals and calculations
+        
+        Only completed sales can have receipts generated.
+        
+        Query parameters:
+        - format: 'json' (default) or 'html' or 'pdf'
+        
+        Response includes:
+        - Full business and storefront information
+        - Customer details for personalized receipts
+        - Complete line item breakdown
+        - Payment method and amounts
+        - Receipt number and timestamps
+        - Sale type (RETAIL/WHOLESALE) for proper display
+        """
+        from .receipt_serializers import ReceiptSerializer
+        from .receipt_generator import generate_receipt_html, generate_receipt_pdf
+        
+        sale = self.get_object()
+        
+        # Only allow receipt generation for completed sales
+        if sale.status not in ['COMPLETED', 'PARTIAL', 'REFUNDED']:
+            return Response(
+                {
+                    'error': 'Receipt can only be generated for completed sales',
+                    'current_status': sale.status,
+                    'allowed_statuses': ['COMPLETED', 'PARTIAL', 'REFUNDED']
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Serialize receipt data
+        serializer = ReceiptSerializer(sale)
+        receipt_data = serializer.data
+        
+        # Check requested format
+        format_type = request.query_params.get('format', 'json').lower()
+        
+        if format_type == 'html':
+            # Return HTML for printing
+            html_content = generate_receipt_html(receipt_data)
+            return HttpResponse(html_content, content_type='text/html')
+        
+        elif format_type == 'pdf':
+            # Return PDF file (requires weasyprint)
+            try:
+                pdf_bytes = generate_receipt_pdf(receipt_data)
+                response = HttpResponse(pdf_bytes, content_type='application/pdf')
+                response['Content-Disposition'] = f'attachment; filename="receipt-{sale.receipt_number}.pdf"'
+                return response
+            except ImportError:
+                return Response(
+                    {
+                        'error': 'PDF generation not available',
+                        'message': 'WeasyPrint library is not installed. Install with: pip install weasyprint'
+                    },
+                    status=status.HTTP_501_NOT_IMPLEMENTED
+                )
+            except Exception as e:
+                return Response(
+                    {
+                        'error': 'Failed to generate PDF',
+                        'details': str(e)
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+        
+        else:
+            # Default: return JSON
+            return Response(receipt_data)
 
 
 class SaleItemViewSet(viewsets.ModelViewSet):
