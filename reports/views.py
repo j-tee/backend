@@ -13,8 +13,9 @@ from .serializers import (
     InventoryValuationReportRequestSerializer,
     SalesExportRequestSerializer,
     CustomerExportRequestSerializer,
+    InventoryExportRequestSerializer,
 )
-from .services.inventory import InventoryValuationReportBuilder
+from .services.inventory import InventoryValuationReportBuilder, InventoryExporter
 from .services.sales import SalesExporter
 from .services.customers import CustomerExporter
 
@@ -198,3 +199,68 @@ class CustomerExportView(APIView):
         
         return response
 
+
+class InventoryExportView(APIView):
+    """Export inventory snapshot with stock levels and valuation"""
+    
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, *args, **kwargs):
+        """Generate inventory export"""
+        serializer = InventoryExportRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        validated = serializer.validated_data
+        
+        # Extract format
+        export_format = validated.pop('format', 'excel')
+        
+        # CSV not yet implemented
+        if export_format == 'csv':
+            return Response(
+                {'error': 'CSV format not yet implemented'},
+                status=status.HTTP_501_NOT_IMPLEMENTED
+            )
+        
+        try:
+            # Create exporter
+            exporter = InventoryExporter(user=request.user)
+            
+            # Export data
+            data = exporter.export(validated)
+            
+            # Check if we have any stock items
+            if not data.get('stock_items'):
+                return Response(
+                    {'error': 'No inventory items found for the given criteria'},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get appropriate exporter class
+            exporter_class = EXPORTER_MAP.get(f'inventory_{export_format}')
+            
+            if not exporter_class:
+                return Response(
+                    {'error': f'Unsupported format: {export_format}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Generate file
+            file_exporter = exporter_class()
+            file_bytes = file_exporter.export(data)
+            content_type = file_exporter.content_type
+            extension = file_exporter.file_extension
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Export failed: {str(e)}'},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+        
+        # Generate filename
+        timestamp = timezone.now().strftime('%Y%m%d_%H%M%S')
+        filename = f"inventory_export_{timestamp}.{extension}"
+        
+        response = HttpResponse(file_bytes, content_type=content_type)
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        
+        return response

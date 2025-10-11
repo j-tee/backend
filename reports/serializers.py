@@ -91,17 +91,30 @@ class InventoryExportRequestSerializer(serializers.Serializer):
         ('csv', 'CSV (.csv)'),
     )
     
-    format = serializers.ChoiceField(choices=FORMAT_CHOICES, default='excel')
-    warehouse_id = serializers.UUIDField(required=False)
-    storefront_id = serializers.UUIDField(required=False)
-    category_id = serializers.UUIDField(required=False)
-    include_zero_stock = serializers.BooleanField(default=False)
-    min_value = serializers.DecimalField(
-        required=False,
-        max_digits=12,
-        decimal_places=2,
-        min_value=0
+    STOCK_STATUS_CHOICES = (
+        ('in_stock', 'In Stock'),
+        ('low_stock', 'Low Stock'),
+        ('out_of_stock', 'Out of Stock'),
     )
+    
+    format = serializers.ChoiceField(choices=FORMAT_CHOICES, default='excel')
+    storefront_id = serializers.UUIDField(required=False)
+    category = serializers.CharField(required=False)
+    stock_status = serializers.ChoiceField(choices=STOCK_STATUS_CHOICES, required=False)
+    min_quantity = serializers.IntegerField(required=False, min_value=0)
+    exclude_zero_value = serializers.BooleanField(default=False)
+    include_movement_history = serializers.BooleanField(default=False)
+    movement_start_date = serializers.DateField(required=False)
+    movement_end_date = serializers.DateField(required=False)
+    
+    def validate(self, data):
+        # If movement history requested, validate date range
+        if data.get('movement_start_date') and data.get('movement_end_date'):
+            if data['movement_start_date'] > data['movement_end_date']:
+                raise serializers.ValidationError(
+                    "movement_start_date must be before or equal to movement_end_date"
+                )
+        return data
 
 
 class AuditLogExportRequestSerializer(serializers.Serializer):

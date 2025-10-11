@@ -502,10 +502,177 @@ class CustomerExcelExporter(BaseReportExporter):
             return output.getvalue()
 
 
+class InventoryExcelExporter:
+    """Excel exporter for inventory data"""
+    
+    content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    file_extension = 'xlsx'
+    
+    def export(self, data: Dict[str, Any]) -> bytes:
+        """Export inventory data to Excel format"""
+        workbook = Workbook()
+        
+        # Remove default sheet
+        workbook.remove(workbook.active)
+        
+        # Sheet 1: Summary
+        summary_sheet = workbook.create_sheet('Summary')
+        
+        # Header
+        summary_sheet['A1'] = 'Inventory Export Summary'
+        summary_sheet['A1'].font = Font(size=14, bold=True)
+        summary_sheet.merge_cells('A1:B1')
+        
+        # Export metadata
+        summary_sheet['A3'] = 'Export Date:'
+        summary_sheet['B3'] = data['summary'].get('export_date', '')
+        summary_sheet['A3'].font = Font(bold=True)
+        
+        # Summary statistics section
+        summary_sheet['A5'] = 'Inventory Statistics'
+        summary_sheet['A5'].font = Font(size=12, bold=True)
+        summary_sheet['A5'].fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        summary_sheet['B5'].fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        
+        row = 6
+        metrics = [
+            ('Total Unique Products', 'total_unique_products'),
+            ('Total Quantity in Stock', 'total_quantity_in_stock'),
+            ('Total Inventory Value', 'total_inventory_value'),
+            ('Out of Stock Items', 'out_of_stock_items'),
+            ('Low Stock Items', 'low_stock_items'),
+            ('In Stock Items', 'in_stock_items'),
+            ('Number of Storefronts', 'storefronts_count'),
+        ]
+        
+        for label, key in metrics:
+            summary_sheet.cell(row=row, column=1, value=label)
+            summary_sheet.cell(row=row, column=1).font = Font(bold=True)
+            summary_sheet.cell(row=row, column=2, value=data['summary'].get(key, 0))
+            row += 1
+        
+        # Storefront breakdown
+        row += 1
+        summary_sheet.cell(row=row, column=1, value='Storefront Breakdown')
+        summary_sheet.cell(row=row, column=1).font = Font(size=12, bold=True)
+        summary_sheet.cell(row=row, column=1).fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        summary_sheet.cell(row=row, column=2).fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        summary_sheet.cell(row=row, column=3).fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        summary_sheet.cell(row=row, column=4).fill = PatternFill(start_color='E0E0E0', end_color='E0E0E0', fill_type='solid')
+        row += 1
+        
+        # Storefront headers
+        summary_sheet.cell(row=row, column=1, value='Storefront')
+        summary_sheet.cell(row=row, column=2, value='Items')
+        summary_sheet.cell(row=row, column=3, value='Quantity')
+        summary_sheet.cell(row=row, column=4, value='Value')
+        for col in range(1, 5):
+            summary_sheet.cell(row=row, column=col).font = Font(bold=True)
+        row += 1
+        
+        # Storefront data
+        idx = 1
+        while f'storefront_{idx}_name' in data['summary']:
+            summary_sheet.cell(row=row, column=1, value=data['summary'][f'storefront_{idx}_name'])
+            summary_sheet.cell(row=row, column=2, value=data['summary'][f'storefront_{idx}_items'])
+            summary_sheet.cell(row=row, column=3, value=data['summary'][f'storefront_{idx}_quantity'])
+            summary_sheet.cell(row=row, column=4, value=data['summary'][f'storefront_{idx}_value'])
+            row += 1
+            idx += 1
+        
+        # Sheet 2: Stock Items
+        items_sheet = workbook.create_sheet('Stock Items')
+        
+        # Headers
+        headers = [
+            'Product ID', 'Product Name', 'SKU', 'Barcode', 'Storefront',
+            'Quantity in Stock', 'Reorder Level', 'Unit of Measure', 'Stock Status',
+            'Unit Cost', 'Selling Price', 'Total Value', 'Profit Margin', 'Margin %',
+            'Last Updated', 'Created At', 'Created By'
+        ]
+        
+        for col, header in enumerate(headers, 1):
+            cell = items_sheet.cell(row=1, column=col, value=header)
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
+        
+        # Data rows
+        row = 2
+        for item in data.get('stock_items', []):
+            items_sheet.cell(row=row, column=1, value=item.get('product_id', ''))
+            items_sheet.cell(row=row, column=2, value=item.get('product_name', ''))
+            items_sheet.cell(row=row, column=3, value=item.get('sku', ''))
+            items_sheet.cell(row=row, column=4, value=item.get('barcode', ''))
+            items_sheet.cell(row=row, column=5, value=item.get('storefront', ''))
+            items_sheet.cell(row=row, column=6, value=item.get('quantity_in_stock', 0))
+            items_sheet.cell(row=row, column=7, value=item.get('reorder_level', 0))
+            items_sheet.cell(row=row, column=8, value=item.get('unit_of_measure', ''))
+            items_sheet.cell(row=row, column=9, value=item.get('stock_status', ''))
+            items_sheet.cell(row=row, column=10, value=item.get('unit_cost', ''))
+            items_sheet.cell(row=row, column=11, value=item.get('selling_price', ''))
+            items_sheet.cell(row=row, column=12, value=item.get('total_value', ''))
+            items_sheet.cell(row=row, column=13, value=item.get('profit_margin', ''))
+            items_sheet.cell(row=row, column=14, value=item.get('margin_percentage', ''))
+            items_sheet.cell(row=row, column=15, value=item.get('last_updated', ''))
+            items_sheet.cell(row=row, column=16, value=item.get('created_at', ''))
+            items_sheet.cell(row=row, column=17, value=item.get('created_by', ''))
+            row += 1
+        
+        # Sheet 3: Stock Movements (if included)
+        if data.get('stock_movements'):
+            movements_sheet = workbook.create_sheet('Stock Movements')
+            
+            # Headers
+            movement_headers = [
+                'Date', 'Product Name', 'SKU', 'Storefront', 'Adjustment Type',
+                'Quantity Before', 'Quantity Adjusted', 'Quantity After', 'Reason', 'Performed By'
+            ]
+            
+            for col, header in enumerate(movement_headers, 1):
+                cell = movements_sheet.cell(row=1, column=col, value=header)
+                cell.font = Font(bold=True)
+                cell.fill = PatternFill(start_color='CCEBFF', end_color='CCEBFF', fill_type='solid')
+            
+            # Data rows
+            row = 2
+            for movement in data['stock_movements']:
+                movements_sheet.cell(row=row, column=1, value=movement.get('date', ''))
+                movements_sheet.cell(row=row, column=2, value=movement.get('product_name', ''))
+                movements_sheet.cell(row=row, column=3, value=movement.get('sku', ''))
+                movements_sheet.cell(row=row, column=4, value=movement.get('storefront', ''))
+                movements_sheet.cell(row=row, column=5, value=movement.get('adjustment_type', ''))
+                movements_sheet.cell(row=row, column=6, value=movement.get('quantity_before', ''))
+                movements_sheet.cell(row=row, column=7, value=movement.get('quantity_adjusted', ''))
+                movements_sheet.cell(row=row, column=8, value=movement.get('quantity_after', ''))
+                movements_sheet.cell(row=row, column=9, value=movement.get('reason', ''))
+                movements_sheet.cell(row=row, column=10, value=movement.get('performed_by', ''))
+                row += 1
+        
+        # Auto-size columns
+        for sheet in workbook.worksheets:
+            for column_cells in sheet.columns:
+                max_length = 0
+                column = get_column_letter(column_cells[0].column)
+                for cell in column_cells:
+                    try:
+                        if cell.value:
+                            max_length = max(max_length, len(str(cell.value)))
+                    except:
+                        pass
+                adjusted_width = min(max_length + 2, 50)
+                sheet.column_dimensions[column].width = adjusted_width
+        
+        # Save to bytes
+        with BytesIO() as output:
+            workbook.save(output)
+            return output.getvalue()
+
+
 EXPORTER_MAP = {
     'excel': ExcelReportExporter,
     'docx': WordReportExporter,
     'pdf': PDFReportExporter,
     'sales_excel': SalesExcelExporter,
     'customer_excel': CustomerExcelExporter,
+    'inventory_excel': InventoryExcelExporter,
 }
