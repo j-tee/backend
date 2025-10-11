@@ -499,4 +499,37 @@ After implementation, verify:
 
 ---
 
-**See Also**: `WHOLESALE_RETAIL_IMPLEMENTATION.md` for complete backend details
+## 🆕 Customer Selection Update
+
+The backend now supports updating the customer on DRAFT sales! This is critical for POS workflows.
+
+### Quick Integration
+
+```typescript
+// Update customer after sale creation
+const updateCustomer = async (saleId: string, customerId: string) => {
+  const response = await fetch(
+    `/sales/api/sales/${saleId}/update_customer/`,
+    {
+      method: 'PATCH',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Token ${authToken}`
+      },
+      body: JSON.stringify({ customer: customerId })
+    }
+  );
+  
+  const result = await response.json();
+  setCurrentSale(result.sale);
+  toast.success(result.message);
+};
+```
+
+**Full Documentation**: See `CUSTOMER_UPDATE_ENDPOINT.md` for complete API reference, examples, and integration guide.
+
+---
+
+**See Also**: 
+- `WHOLESALE_RETAIL_IMPLEMENTATION.md` for complete backend details
+- `CUSTOMER_UPDATE_ENDPOINT.md` for customer update functionality
