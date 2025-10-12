@@ -367,18 +367,179 @@ class CustomerAnalyticsReportView(BaseReportView):
     
     GET /reports/api/sales/customer-analytics/
     
-    Placeholder - Will be implemented in Customer Reports module
+    Query Parameters:
+    - start_date: YYYY-MM-DD (default: 30 days ago)
+    - end_date: YYYY-MM-DD (default: today)
+    - storefront_id: UUID (optional)
+    - sort_by: revenue, frequency, avg_order, recency (default: revenue)
+    - page, page_size (pagination)
+    
+    Returns:
+    - Top customers by purchase metrics
+    - Customer purchase frequency
+    - Average order value per customer
+    - Recency analysis
+    - Customer contribution percentages
     """
     
     permission_classes = [IsAuthenticated]
     
     def get(self, request, *args, **kwargs):
-        return ReportResponse.error(
-            ReportError.create(
-                'NOT_IMPLEMENTED',
-                'This report will be implemented in Phase 5: Customer Reports',
-                {}
+        from django.db.models import Min, Max
+        from django.utils import timezone
+        
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get date range
+        start_date, end_date, error = self.get_date_range(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get pagination params
+        page, page_size = self.get_pagination_params(request)
+        
+        # Get sort parameter
+        sort_by = request.query_params.get('sort_by', 'revenue')
+        if sort_by not in ['revenue', 'frequency', 'avg_order', 'recency']:
+            sort_by = 'revenue'
+        
+        # Get base queryset - completed sales with customers
+        queryset = Sale.objects.filter(
+            business_id=business_id,
+            status='COMPLETED',
+            customer__isnull=False,  # Only sales with customers
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        )
+        
+        # Apply optional filters
+        storefront_id = request.query_params.get('storefront_id')
+        if storefront_id:
+            queryset = queryset.filter(storefront_id=storefront_id)
+        
+        # Aggregate by customer
+        customer_data = queryset.values(
+            'customer__id',
+            'customer__name',
+            'customer__email',
+        ).annotate(
+            total_spent=Sum('total_amount'),
+            order_count=Count('id'),
+            first_purchase=Min('created_at'),
+            last_purchase=Max('created_at')
+        )
+        
+        # Build summary
+        total_customers = customer_data.count()
+        total_revenue = AggregationHelper.sum_field(queryset, 'total_amount')
+        total_orders = queryset.count()
+        
+        avg_revenue_per_customer = AggregationHelper.safe_divide(
+            total_revenue,
+            Decimal(str(total_customers))
+        ) if total_customers > 0 else Decimal('0.00')
+        
+        avg_orders_per_customer = total_orders / total_customers if total_customers > 0 else 0
+        
+        # Calculate repeat customer rate
+        repeat_customers = sum(1 for c in customer_data if c['order_count'] > 1)
+        repeat_rate = AggregationHelper.calculate_percentage(
+            Decimal(str(repeat_customers)),
+            Decimal(str(total_customers))
+        ) if total_customers > 0 else Decimal('0.00')
+        
+        summary = {
+            'total_customers': total_customers,
+            'total_revenue': float(total_revenue),
+            'total_orders': total_orders,
+            'average_revenue_per_customer': float(avg_revenue_per_customer),
+            'average_orders_per_customer': round(avg_orders_per_customer, 2),
+            'repeat_customer_rate': float(repeat_rate),
+        }
+        
+        # Build results with calculated fields
+        results = []
+        for item in customer_data:
+            total_spent = Decimal(str(item['total_spent'] or 0))
+            order_count = item['order_count']
+            
+            avg_order_value = AggregationHelper.safe_divide(
+                total_spent,
+                Decimal(str(order_count))
             )
+            
+            contribution_pct = AggregationHelper.calculate_percentage(
+                total_spent,
+                total_revenue
+            ) if total_revenue > 0 else Decimal('0.00')
+            
+            # Calculate days since last purchase
+            last_purchase = item['last_purchase']
+            if last_purchase:
+                days_since = (timezone.now().date() - last_purchase.date()).days
+            else:
+                days_since = None
+            
+            results.append({
+                'customer_id': str(item['customer__id']),
+                'customer_name': item['customer__name'],
+                'customer_email': item['customer__email'],
+                'total_spent': float(total_spent),
+                'order_count': order_count,
+                'average_order_value': float(avg_order_value),
+                'contribution_percentage': float(contribution_pct),
+                'first_purchase_date': item['first_purchase'].date().isoformat() if item['first_purchase'] else None,
+                'last_purchase_date': item['last_purchase'].date().isoformat() if item['last_purchase'] else None,
+                'days_since_last_purchase': days_since,
+            })
+        
+        # Sort by requested field
+        sort_field_map = {
+            'revenue': 'total_spent',
+            'frequency': 'order_count',
+            'avg_order': 'average_order_value',
+            'recency': 'days_since_last_purchase',
+        }
+        sort_field = sort_field_map[sort_by]
+        
+        # For recency, sort ascending (most recent first)
+        reverse = (sort_by != 'recency')
+        
+        # Handle None values in recency sorting
+        if sort_by == 'recency':
+            results = sorted(
+                results,
+                key=lambda x: x[sort_field] if x[sort_field] is not None else float('inf'),
+                reverse=False
+            )
+        else:
+            results = sorted(results, key=lambda x: x[sort_field], reverse=reverse)
+        
+        # Paginate
+        total_count = len(results)
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_results = results[start:end]
+        
+        # Add rank
+        for idx, item in enumerate(paginated_results, start=start + 1):
+            item['rank'] = idx
+        
+        # Build metadata
+        metadata = self.build_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            filters={
+                'storefront_id': storefront_id,
+                'sort_by': sort_by,
+            }
+        )
+        
+        return ReportResponse.paginated(
+            summary, paginated_results, metadata, page, page_size, total_count
         )
 
 
@@ -388,16 +549,252 @@ class RevenueTrendsReportView(BaseReportView):
     
     GET /reports/api/sales/revenue-trends/
     
-    Placeholder - Will enhance in Phase 3: Financial Reports
+    Query Parameters:
+    - start_date: YYYY-MM-DD (default: 30 days ago)
+    - end_date: YYYY-MM-DD (default: today)
+    - storefront_id: UUID (optional)
+    - grouping: daily, weekly, monthly (default: daily)
+    - compare: boolean (default: false) - compare to previous period
+    
+    Returns:
+    - Time-series revenue data
+    - Growth rates
+    - Trend indicators
+    - Comparison with previous period (if requested)
     """
     
     permission_classes = [IsAuthenticated]
     
     def get(self, request, *args, **kwargs):
-        return ReportResponse.error(
-            ReportError.create(
-                'NOT_IMPLEMENTED',
-                'This report will be fully implemented in Phase 3: Financial Reports',
-                {}
-            )
+        from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
+        from datetime import timedelta
+        
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get date range
+        start_date, end_date, error = self.get_date_range(request, max_days=365)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get grouping parameter
+        grouping = request.query_params.get('grouping', 'daily')
+        if grouping not in ['daily', 'weekly', 'monthly']:
+            grouping = 'daily'
+        
+        # Get comparison flag
+        compare = request.query_params.get('compare', '').lower() == 'true'
+        
+        # Get base queryset
+        queryset = Sale.objects.filter(
+            business_id=business_id,
+            status='COMPLETED',
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
         )
+        
+        # Apply optional filters
+        storefront_id = request.query_params.get('storefront_id')
+        if storefront_id:
+            queryset = queryset.filter(storefront_id=storefront_id)
+        
+        # Get previous period data if comparison requested
+        previous_data = None
+        if compare:
+            duration = (end_date - start_date).days
+            prev_end = start_date - timedelta(days=1)
+            prev_start = prev_end - timedelta(days=duration)
+            
+            prev_queryset = Sale.objects.filter(
+                business_id=business_id,
+                status='COMPLETED',
+                created_at__date__gte=prev_start,
+                created_at__date__lte=prev_end
+            )
+            if storefront_id:
+                prev_queryset = prev_queryset.filter(storefront_id=storefront_id)
+            
+            previous_data = {
+                'start_date': prev_start,
+                'end_date': prev_end,
+                'queryset': prev_queryset
+            }
+        
+        # Build summary
+        summary = self._build_summary(queryset, start_date, end_date, previous_data)
+        
+        # Build results (time-series data)
+        results = self._build_time_series(queryset, grouping, start_date, end_date)
+        
+        # Build metadata
+        metadata = self.build_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            filters={
+                'storefront_id': storefront_id,
+                'grouping': grouping,
+                'compare_to_previous': compare,
+            }
+        )
+        
+        return ReportResponse.success(summary, results, metadata)
+    
+    def _build_summary(
+        self, queryset, start_date, end_date, previous_data
+    ) -> Dict[str, Any]:
+        """Build summary metrics"""
+        
+        total_revenue = AggregationHelper.sum_field(queryset, 'total_amount')
+        total_orders = queryset.count()
+        total_profit = AggregationHelper.sum_field(queryset, 'total_profit')
+        
+        # Calculate averages
+        days_in_period = (end_date - start_date).days + 1
+        avg_daily_revenue = AggregationHelper.safe_divide(
+            total_revenue,
+            Decimal(str(days_in_period))
+        )
+        
+        avg_order_value = AggregationHelper.safe_divide(
+            total_revenue,
+            Decimal(str(total_orders))
+        ) if total_orders > 0 else Decimal('0.00')
+        
+        # Find peak day
+        daily_sales = queryset.extra(
+            select={'date': 'DATE(created_at)'}
+        ).values('date').annotate(
+            revenue=Sum('total_amount')
+        ).order_by('-revenue').first()
+        
+        peak_day = daily_sales['date'] if daily_sales else None
+        peak_revenue = Decimal(str(daily_sales['revenue'])) if daily_sales else Decimal('0.00')
+        
+        summary = {
+            'period_start': str(start_date),
+            'period_end': str(end_date),
+            'total_revenue': float(total_revenue),
+            'total_profit': float(total_profit),
+            'total_orders': total_orders,
+            'average_daily_revenue': float(avg_daily_revenue),
+            'average_order_value': float(avg_order_value),
+            'peak_day': str(peak_day) if peak_day else None,
+            'peak_revenue': float(peak_revenue),
+        }
+        
+        # Add comparison if previous period data provided
+        if previous_data:
+            prev_revenue = AggregationHelper.sum_field(
+                previous_data['queryset'], 'total_amount'
+            )
+            prev_orders = previous_data['queryset'].count()
+            prev_profit = AggregationHelper.sum_field(
+                previous_data['queryset'], 'total_profit'
+            )
+            
+            revenue_growth = AggregationHelper.calculate_growth_rate(
+                total_revenue, prev_revenue
+            )
+            order_growth = AggregationHelper.calculate_growth_rate(
+                Decimal(str(total_orders)), Decimal(str(prev_orders))
+            )
+            profit_growth = AggregationHelper.calculate_growth_rate(
+                total_profit, prev_profit
+            )
+            
+            summary['previous_period'] = {
+                'start': str(previous_data['start_date']),
+                'end': str(previous_data['end_date']),
+                'revenue': float(prev_revenue),
+                'profit': float(prev_profit),
+                'orders': prev_orders,
+            }
+            
+            summary['comparison'] = {
+                'revenue_growth': float(revenue_growth),
+                'order_growth': float(order_growth),
+                'profit_growth': float(profit_growth),
+                'revenue_change': float(total_revenue - prev_revenue),
+                'order_change': total_orders - prev_orders,
+            }
+        
+        return summary
+    
+    def _build_time_series(
+        self, queryset, grouping: str, start_date, end_date
+    ) -> List[Dict[str, Any]]:
+        """Build time-series data"""
+        
+        from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
+        
+        # Select truncation function based on grouping
+        trunc_func = {
+            'daily': TruncDate('created_at'),
+            'weekly': TruncWeek('created_at'),
+            'monthly': TruncMonth('created_at'),
+        }[grouping]
+        
+        # Group by period
+        time_series = list(
+            queryset
+            .annotate(period=trunc_func)
+            .values('period')
+            .annotate(
+                revenue=Sum('total_amount'),
+                profit=Sum('total_profit'),
+                order_count=Count('id')
+            )
+            .order_by('period')
+        )
+        
+        # Format results
+        results = []
+        prev_revenue = None
+        
+        for idx, item in enumerate(time_series):
+            revenue = Decimal(str(item['revenue'] or 0))
+            profit = Decimal(str(item['profit'] or 0))
+            order_count = item['order_count']
+            
+            # Calculate profit margin
+            profit_margin = AggregationHelper.calculate_percentage(
+                profit, revenue
+            ) if revenue > 0 else Decimal('0.00')
+            
+            # Calculate period-over-period growth
+            growth_rate = None
+            if prev_revenue is not None and prev_revenue > 0:
+                growth_rate = float(
+                    AggregationHelper.calculate_growth_rate(revenue, prev_revenue)
+                )
+            
+            # Determine trend
+            trend = 'stable'
+            if growth_rate is not None:
+                if growth_rate > 5:
+                    trend = 'up'
+                elif growth_rate < -5:
+                    trend = 'down'
+            
+            result = {
+                'period': item['period'].date().isoformat() if item['period'] else None,
+                'revenue': float(revenue),
+                'profit': float(profit),
+                'profit_margin': float(profit_margin),
+                'order_count': order_count,
+                'average_order_value': float(
+                    revenue / order_count if order_count > 0 else 0
+                ),
+            }
+            
+            if growth_rate is not None:
+                result['growth_rate'] = growth_rate
+                result['trend'] = trend
+            
+            results.append(result)
+            prev_revenue = revenue
+        
+        return results
+
