@@ -44,6 +44,14 @@ from .inventory_reports import (
     WarehouseAnalyticsReportView,
 )
 
+# Analytical report views - Customer (Phase 5)
+from .customer_reports import (
+    CustomerLifetimeValueReportView,
+    CustomerSegmentationReportView,
+    PurchasePatternAnalysisReportView,
+    CustomerRetentionMetricsReportView,
+)
+
 __all__ = [
     # Exports
     'InventoryValuationReportView',
@@ -74,4 +82,10 @@ __all__ = [
     'LowStockAlertsReportView',
     'StockMovementHistoryReportView',
     'WarehouseAnalyticsReportView',
+    
+    # Customer Reports
+    'CustomerLifetimeValueReportView',
+    'CustomerSegmentationReportView',
+    'PurchasePatternAnalysisReportView',
+    'CustomerRetentionMetricsReportView',
 ]

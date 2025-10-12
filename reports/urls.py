@@ -41,6 +41,14 @@ from .views.inventory_reports import (
     WarehouseAnalyticsReportView,
 )
 
+# Customer Report views (NEW - Phase 5)
+from .views.customer_reports import (
+    CustomerLifetimeValueReportView,
+    CustomerSegmentationReportView,
+    PurchasePatternAnalysisReportView,
+    CustomerRetentionMetricsReportView,
+)
+
 # Router for automation viewsets
 router = DefaultRouter()
 router.register(r'schedules', ExportScheduleViewSet, basename='export-schedule')
@@ -76,15 +84,15 @@ urlpatterns = [
     path('api/financial/collection-rates/', CollectionRatesReportView.as_view(), name='collection-rates-report'),
     path('api/financial/cash-flow/', CashFlowReportView.as_view(), name='cash-flow-report'),
     
-    # Inventory Reports (Phase 4) - In Progress
+    # Inventory Reports (Phase 4) - Complete
     path('api/inventory/stock-levels/', StockLevelsSummaryReportView.as_view(), name='stock-levels-report'),
     path('api/inventory/low-stock-alerts/', LowStockAlertsReportView.as_view(), name='low-stock-alerts-report'),
     path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
     path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
     
-    # Customer Reports (Phase 5) - Coming soon
-    # path('api/customer/top-customers/', ...),
-    # path('api/customer/purchase-patterns/', ...),
-    # path('api/customer/credit-utilization/', ...),
-    # path('api/customer/segmentation/', ...),
+    # Customer Reports (Phase 5) - In Progress
+    path('api/customer/lifetime-value/', CustomerLifetimeValueReportView.as_view(), name='customer-lifetime-value-report'),
+    path('api/customer/segmentation/', CustomerSegmentationReportView.as_view(), name='customer-segmentation-report'),
+    path('api/customer/purchase-patterns/', PurchasePatternAnalysisReportView.as_view(), name='purchase-patterns-report'),
+    path('api/customer/retention/', CustomerRetentionMetricsReportView.as_view(), name='customer-retention-report'),
 ]
