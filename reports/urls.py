@@ -25,6 +25,14 @@ from .views.sales_reports import (
     RevenueTrendsReportView,
 )
 
+# Financial Report views (NEW - Phase 3)
+from .views.financial_reports import (
+    RevenueProfitReportView,
+    ARAgingReportView,
+    CollectionRatesReportView,
+    CashFlowReportView,
+)
+
 # Router for automation viewsets
 router = DefaultRouter()
 router.register(r'schedules', ExportScheduleViewSet, basename='export-schedule')
@@ -48,17 +56,17 @@ urlpatterns = [
     # ===== ANALYTICAL REPORTS (Phase 1+) =====
     # (GET endpoints that return JSON analytics)
     
-    # Sales Reports (Phase 2)
+    # Sales Reports (Phase 2) - Complete
     path('api/sales/summary/', SalesSummaryReportView.as_view(), name='sales-summary-report'),
     path('api/sales/products/', ProductPerformanceReportView.as_view(), name='product-performance-report'),
     path('api/sales/customer-analytics/', CustomerAnalyticsReportView.as_view(), name='customer-analytics-report'),
     path('api/sales/revenue-trends/', RevenueTrendsReportView.as_view(), name='revenue-trends-report'),
     
-    # Financial Reports (Phase 3) - Coming soon
-    # path('api/financial/revenue-profit/', ...),
-    # path('api/financial/ar-aging/', ...),
-    # path('api/financial/collection-rates/', ...),
-    # path('api/financial/cash-flow/', ...),
+    # Financial Reports (Phase 3) - In Progress
+    path('api/financial/revenue-profit/', RevenueProfitReportView.as_view(), name='revenue-profit-report'),
+    path('api/financial/ar-aging/', ARAgingReportView.as_view(), name='ar-aging-report'),
+    path('api/financial/collection-rates/', CollectionRatesReportView.as_view(), name='collection-rates-report'),
+    path('api/financial/cash-flow/', CashFlowReportView.as_view(), name='cash-flow-report'),
     
     # Inventory Reports (Phase 4) - Coming soon
     # path('api/inventory/stock-levels/', ...),

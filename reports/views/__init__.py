@@ -20,12 +20,20 @@ from .automation import (
     ExportNotificationSettingsViewSet,
 )
 
-# Analytical report views (NEW)
+# Analytical report views - Sales (Phase 2)
 from .sales_reports import (
     SalesSummaryReportView,
     ProductPerformanceReportView,
     CustomerAnalyticsReportView,
     RevenueTrendsReportView,
+)
+
+# Analytical report views - Financial (Phase 3)
+from .financial_reports import (
+    RevenueProfitReportView,
+    ARAgingReportView,
+    CollectionRatesReportView,
+    CashFlowReportView,
 )
 
 __all__ = [
@@ -46,4 +54,10 @@ __all__ = [
     'ProductPerformanceReportView',
     'CustomerAnalyticsReportView',
     'RevenueTrendsReportView',
+    
+    # Financial Reports
+    'RevenueProfitReportView',
+    'ARAgingReportView',
+    'CollectionRatesReportView',
+    'CashFlowReportView',
 ]
