@@ -33,6 +33,14 @@ from .views.financial_reports import (
     CashFlowReportView,
 )
 
+# Inventory Report views (NEW - Phase 4)
+from .views.inventory_reports import (
+    StockLevelsSummaryReportView,
+    LowStockAlertsReportView,
+    StockMovementHistoryReportView,
+    WarehouseAnalyticsReportView,
+)
+
 # Router for automation viewsets
 router = DefaultRouter()
 router.register(r'schedules', ExportScheduleViewSet, basename='export-schedule')
@@ -62,17 +70,17 @@ urlpatterns = [
     path('api/sales/customer-analytics/', CustomerAnalyticsReportView.as_view(), name='customer-analytics-report'),
     path('api/sales/revenue-trends/', RevenueTrendsReportView.as_view(), name='revenue-trends-report'),
     
-    # Financial Reports (Phase 3) - In Progress
+    # Financial Reports (Phase 3) - Complete
     path('api/financial/revenue-profit/', RevenueProfitReportView.as_view(), name='revenue-profit-report'),
     path('api/financial/ar-aging/', ARAgingReportView.as_view(), name='ar-aging-report'),
     path('api/financial/collection-rates/', CollectionRatesReportView.as_view(), name='collection-rates-report'),
     path('api/financial/cash-flow/', CashFlowReportView.as_view(), name='cash-flow-report'),
     
-    # Inventory Reports (Phase 4) - Coming soon
-    # path('api/inventory/stock-levels/', ...),
-    # path('api/inventory/low-stock-alerts/', ...),
-    # path('api/inventory/movements/', ...),
-    # path('api/inventory/warehouse-analytics/', ...),
+    # Inventory Reports (Phase 4) - In Progress
+    path('api/inventory/stock-levels/', StockLevelsSummaryReportView.as_view(), name='stock-levels-report'),
+    path('api/inventory/low-stock-alerts/', LowStockAlertsReportView.as_view(), name='low-stock-alerts-report'),
+    path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
+    path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
     
     # Customer Reports (Phase 5) - Coming soon
     # path('api/customer/top-customers/', ...),

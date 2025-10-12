@@ -36,6 +36,14 @@ from .financial_reports import (
     CashFlowReportView,
 )
 
+# Analytical report views - Inventory (Phase 4)
+from .inventory_reports import (
+    StockLevelsSummaryReportView,
+    LowStockAlertsReportView,
+    StockMovementHistoryReportView,
+    WarehouseAnalyticsReportView,
+)
+
 __all__ = [
     # Exports
     'InventoryValuationReportView',
@@ -60,4 +68,10 @@ __all__ = [
     'ARAgingReportView',
     'CollectionRatesReportView',
     'CashFlowReportView',
+    
+    # Inventory Reports
+    'StockLevelsSummaryReportView',
+    'LowStockAlertsReportView',
+    'StockMovementHistoryReportView',
+    'WarehouseAnalyticsReportView',
 ]
