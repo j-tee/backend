@@ -13,6 +13,7 @@ from sales.models import Sale, SaleItem, Payment
 from reports.services.report_base import BaseReportView
 from reports.utils.response import ReportResponse, ReportError
 from reports.utils.aggregation import AggregationHelper, PercentageCalculator
+from reports.utils.profit_calculator import ProfitCalculator
 
 
 class SalesSummaryReportView(BaseReportView):
@@ -64,7 +65,7 @@ class SalesSummaryReportView(BaseReportView):
         
         sale_type = request.query_params.get('sale_type')
         if sale_type and sale_type in ['RETAIL', 'WHOLESALE']:
-            queryset = queryset.filter(sale_type=sale_type)
+            queryset = queryset.filter(type=sale_type)
         
         # Only completed sales
         queryset = queryset.filter(status='COMPLETED')
@@ -110,13 +111,11 @@ class SalesSummaryReportView(BaseReportView):
             total=Sum('quantity')
         )['total'] or 0
         
-        # Total profit (if available)
-        total_profit = AggregationHelper.sum_field(queryset, 'total_profit')
+        # Calculate profit using the same logic as sales summary
+        total_profit = ProfitCalculator.calculate_total_profit(queryset)
         
         # Profit margin
-        profit_margin = AggregationHelper.calculate_percentage(
-            total_profit, total_revenue
-        ) if total_revenue > 0 else Decimal('0.00')
+        profit_margin = ProfitCalculator.calculate_profit_margin(total_profit, total_revenue)
         
         return {
             'total_sales': total_sales,
@@ -140,7 +139,7 @@ class SalesSummaryReportView(BaseReportView):
             payments.values('payment_method')
             .annotate(
                 count=Count('id'),
-                total=Sum('amount')
+                total=Sum('amount_paid')
             )
             .order_by('-total')
         )
@@ -162,7 +161,7 @@ class SalesSummaryReportView(BaseReportView):
         """Get sales breakdown by sale type"""
         
         breakdown = list(
-            queryset.values('sale_type')
+            queryset.values('type')
             .annotate(
                 count=Count('id'),
                 total=Sum('total_amount')
@@ -287,7 +286,11 @@ class ProductPerformanceReportView(BaseReportView):
         total_products = queryset.values('product').distinct().count()
         total_items_sold = AggregationHelper.sum_field(queryset, 'quantity')
         total_revenue = AggregationHelper.sum_field(queryset, 'total_price')
-        total_profit = AggregationHelper.sum_field(queryset, 'profit')
+        
+        # Note: Profit calculation for individual SaleItems is complex because it requires
+        # looking up cost from StockProduct. For now, we'll return 0 or calculate it
+        # differently. The sales-level profit is more accurate via ProfitCalculator.
+        total_profit = Decimal('0.00')  # TODO: Implement SaleItem-level profit calculation
         
         profit_margin = AggregationHelper.calculate_percentage(
             total_profit, total_revenue
@@ -314,15 +317,16 @@ class ProductPerformanceReportView(BaseReportView):
         ).annotate(
             quantity_sold=Sum('quantity'),
             revenue=Sum('total_price'),
-            profit=Sum('profit'),
             times_sold=Count('sale', distinct=True)
         )
         
         # Calculate profit margin for each
+        # Note: Profit calculation requires cost lookup from StockProduct,
+        # which is complex in aggregation. Returning 0 for now.
         results = []
         for item in product_data:
             revenue = Decimal(str(item['revenue'] or 0))
-            profit = Decimal(str(item['profit'] or 0))
+            profit = Decimal('0.00')  # TODO: Implement product-level profit calculation
             
             profit_margin = AggregationHelper.calculate_percentage(
                 profit, revenue
@@ -648,7 +652,7 @@ class RevenueTrendsReportView(BaseReportView):
         
         total_revenue = AggregationHelper.sum_field(queryset, 'total_amount')
         total_orders = queryset.count()
-        total_profit = AggregationHelper.sum_field(queryset, 'total_profit')
+        total_profit = ProfitCalculator.calculate_total_profit(queryset)
         
         # Calculate averages
         days_in_period = (end_date - start_date).days + 1
@@ -690,9 +694,7 @@ class RevenueTrendsReportView(BaseReportView):
                 previous_data['queryset'], 'total_amount'
             )
             prev_orders = previous_data['queryset'].count()
-            prev_profit = AggregationHelper.sum_field(
-                previous_data['queryset'], 'total_profit'
-            )
+            prev_profit = ProfitCalculator.calculate_total_profit(previous_data['queryset'])
             
             revenue_growth = AggregationHelper.calculate_growth_rate(
                 total_revenue, prev_revenue
@@ -743,11 +745,17 @@ class RevenueTrendsReportView(BaseReportView):
             .values('period')
             .annotate(
                 revenue=Sum('total_amount'),
-                profit=Sum('total_profit'),
                 order_count=Count('id')
             )
             .order_by('period')
         )
+        
+        # Calculate profit for each period
+        # Note: We need to calculate profit separately for each period since it's not a direct field
+        period_profits = {}
+        for item in time_series:
+            period_sales = queryset.filter(created_at__date=item['period'].date() if hasattr(item['period'], 'date') else item['period'])
+            period_profits[str(item['period'])] = ProfitCalculator.calculate_total_profit(period_sales)
         
         # Format results
         results = []
@@ -755,7 +763,7 @@ class RevenueTrendsReportView(BaseReportView):
         
         for idx, item in enumerate(time_series):
             revenue = Decimal(str(item['revenue'] or 0))
-            profit = Decimal(str(item['profit'] or 0))
+            profit = period_profits.get(str(item['period']), Decimal('0.00'))
             order_count = item['order_count']
             
             # Calculate profit margin

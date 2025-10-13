@@ -28,17 +28,18 @@ class BusinessFilterMixin:
         Returns:
             Business ID or None
         """
+        from accounts.models import BusinessMembership
+        
         user = request.user
         
-        # Get business from user's primary business (through business_memberships)
-        if hasattr(user, 'primary_business') and user.primary_business:
-            return user.primary_business.id
+        # Use the same approach as working ViewSets
+        membership = BusinessMembership.objects.filter(
+            user=user,
+            is_active=True
+        ).first()
         
-        # Fallback: try to get from active business memberships
-        if hasattr(user, 'business_memberships'):
-            membership = user.business_memberships.filter(is_active=True).first()
-            if membership:
-                return membership.business.id
+        if membership:
+            return membership.business.id
         
         return None
     
