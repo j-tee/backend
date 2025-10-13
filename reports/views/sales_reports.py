@@ -754,8 +754,26 @@ class RevenueTrendsReportView(BaseReportView):
         # Note: We need to calculate profit separately for each period since it's not a direct field
         period_profits = {}
         for item in time_series:
-            period_sales = queryset.filter(created_at__date=item['period'].date() if hasattr(item['period'], 'date') else item['period'])
-            period_profits[str(item['period'])] = ProfitCalculator.calculate_total_profit(period_sales)
+            period = item['period']
+            # Convert datetime to date if needed
+            if hasattr(period, 'date'):
+                period_date = period.date()
+            else:
+                period_date = period
+            
+            # Filter sales for this period based on grouping type
+            if grouping == 'daily':
+                period_sales = queryset.filter(created_at__date=period_date)
+            elif grouping == 'weekly':
+                # For weekly, filter by the week start date
+                period_sales = queryset.annotate(week=TruncWeek('created_at')).filter(week=period)
+            elif grouping == 'monthly':
+                # For monthly, filter by the month start date
+                period_sales = queryset.annotate(month=TruncMonth('created_at')).filter(month=period)
+            else:
+                period_sales = queryset.filter(created_at__date=period_date)
+            
+            period_profits[str(period)] = ProfitCalculator.calculate_total_profit(period_sales)
         
         # Format results
         results = []
