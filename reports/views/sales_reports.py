@@ -5,6 +5,7 @@ Endpoints for sales analysis and insights.
 """
 
 from decimal import Decimal
+from datetime import date
 from typing import Dict, Any, List
 from django.db.models import Sum, Count, Avg, Q, F
 from rest_framework.permissions import IsAuthenticated
@@ -801,8 +802,19 @@ class RevenueTrendsReportView(BaseReportView):
                 elif growth_rate < -5:
                     trend = 'down'
             
+            # Convert period to ISO format string
+            period_value = item['period']
+            if period_value:
+                # Check if it's already a date or needs conversion from datetime
+                if hasattr(period_value, 'date') and not isinstance(period_value, date):
+                    period_str = period_value.date().isoformat()
+                else:
+                    period_str = period_value.isoformat()
+            else:
+                period_str = None
+            
             result = {
-                'period': item['period'].date().isoformat() if item['period'] else None,
+                'period': period_str,
                 'revenue': float(revenue),
                 'profit': float(profit),
                 'profit_margin': float(profit_margin),
