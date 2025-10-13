@@ -157,8 +157,12 @@ class StockLevelsSummaryReportView(BaseReportView):
         low_stock_count = queryset.filter(quantity__lt=10, quantity__gt=0).values('product').distinct().count()
         out_of_stock_count = queryset.filter(quantity=0).values('product').distinct().count()
         
+        # Total variants (total stock product entries across all warehouses/suppliers)
+        total_variants = queryset.count()
+        
         return {
             'total_products': total_products,
+            'total_variants': total_variants,
             'total_stock_units': int(totals['total_units'] or 0),
             'total_stock_value': str(totals['total_value'] or Decimal('0.00')),
             'warehouses_count': warehouses_count,
