@@ -111,19 +111,24 @@ class StockLevelsSummaryReportView(BaseReportView):
         # Build product-level stock levels (paginated)
         stock_levels, pagination = self._build_stock_levels(queryset, request)
         
-        return ReportResponse.success({
-            'summary': summary,
+        # Combine summary with breakdowns
+        summary_data = {
+            **summary,
             'by_warehouse': by_warehouse,
-            'by_category': by_category,
-            'stock_levels': stock_levels
-        }, meta={
+            'by_category': by_category
+        }
+        
+        # Metadata
+        metadata = {
             'warehouse_id': warehouse_id,
             'category_id': category_id,
             'product_id': product_id,
             'supplier_id': supplier_id,
             'include_zero_stock': include_zero_stock,
-            'pagination': pagination
-        })
+            **pagination
+        }
+        
+        return ReportResponse.success(summary_data, stock_levels, metadata)
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
         """Build overall summary statistics"""
@@ -369,16 +374,16 @@ class LowStockAlertsReportView(BaseReportView):
             'total_pages': (total_count + page_size - 1) // page_size
         }
         
-        return ReportResponse.success({
-            'summary': summary,
-            'alerts': paginated_alerts
-        }, meta={
+        # Metadata
+        metadata = {
             'warehouse_id': warehouse_id,
             'category_id': category_id,
             'priority': priority,
             'days_threshold': days_threshold,
-            'pagination': pagination
-        })
+            **pagination
+        }
+        
+        return ReportResponse.success(summary, paginated_alerts, metadata)
     
     def _build_alerts(self, queryset, days_threshold: int) -> List[Dict]:
         """Build low stock alerts with sales velocity"""
@@ -555,11 +560,14 @@ class StockMovementHistoryReportView(BaseReportView):
             movement_type, adjustment_type, request
         )
         
-        return ReportResponse.success({
-            'summary': summary,
-            'time_series': time_series,
-            'movements': movements
-        }, meta={
+        # Combine summary with time series
+        summary_data = {
+            **summary,
+            'time_series': time_series
+        }
+        
+        # Metadata
+        metadata = {
             'date_range': {
                 'start': start_date.isoformat(),
                 'end': end_date.isoformat()
@@ -569,8 +577,10 @@ class StockMovementHistoryReportView(BaseReportView):
             'movement_type': movement_type,
             'adjustment_type': adjustment_type,
             'grouping': grouping,
-            'pagination': pagination
-        })
+            **pagination
+        }
+        
+        return ReportResponse.success(summary_data, movements, metadata)
     
     def _build_summary(self, start_date, end_date, warehouse_id, product_id,
                       movement_type, adjustment_type) -> Dict[str, Any]:
@@ -954,11 +964,14 @@ class WarehouseAnalyticsReportView(BaseReportView):
         # Build product velocity classification
         product_velocity = self._build_product_velocity(start_date, end_date, warehouse_id)
         
-        return ReportResponse.success({
-            'summary': summary,
-            'warehouses': warehouses,
+        # Combine summary with product velocity
+        summary_data = {
+            **summary,
             'product_velocity': product_velocity
-        }, meta={
+        }
+        
+        # Metadata
+        metadata = {
             'date_range': {
                 'start': start_date.isoformat(),
                 'end': end_date.isoformat()
@@ -966,7 +979,9 @@ class WarehouseAnalyticsReportView(BaseReportView):
             'warehouse_id': warehouse_id,
             'min_turnover_rate': min_turnover,
             'max_turnover_rate': max_turnover
-        })
+        }
+        
+        return ReportResponse.success(summary_data, warehouses, metadata)
     
     def _build_summary(self, start_date, end_date, warehouse_id) -> Dict[str, Any]:
         """Build overall summary"""
