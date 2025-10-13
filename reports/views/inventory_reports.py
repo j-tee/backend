@@ -397,7 +397,7 @@ class LowStockAlertsReportView(BaseReportView):
         # Calculate sales velocity per product
         sales_velocity = SaleItem.objects.filter(
             sale__created_at__date__gte=thirty_days_ago,
-            sale__payment_status__in=['paid', 'partial']
+            sale__status__in=['COMPLETED', 'PARTIAL']
         ).values('product').annotate(
             total_sold=Sum('quantity')
         )
@@ -607,7 +607,7 @@ class StockMovementHistoryReportView(BaseReportView):
         sales_qs = SaleItem.objects.filter(
             sale__created_at__date__gte=start_date,
             sale__created_at__date__lte=end_date,
-            sale__payment_status__in=['paid', 'partial']
+            sale__status__in=['COMPLETED', 'PARTIAL']
         )
         
         if warehouse_id:
@@ -736,7 +736,7 @@ class StockMovementHistoryReportView(BaseReportView):
             sales_qs = SaleItem.objects.filter(
                 sale__created_at__date__gte=start_date,
                 sale__created_at__date__lte=end_date,
-                sale__payment_status__in=['paid', 'partial']
+                sale__status__in=['COMPLETED', 'PARTIAL']
             )
             
             if product_id:
@@ -846,7 +846,7 @@ class StockMovementHistoryReportView(BaseReportView):
             sales_qs = SaleItem.objects.filter(
                 sale__created_at__date__gte=start_date,
                 sale__created_at__date__lte=end_date,
-                sale__payment_status__in=['paid', 'partial']
+                sale__status__in=['COMPLETED', 'PARTIAL']
             ).select_related(
                 'product',
                 'sale',
@@ -1177,7 +1177,7 @@ class WarehouseAnalyticsReportView(BaseReportView):
             product=stock_product.product,
             sale__created_at__date__gte=start_date,
             sale__created_at__date__lte=end_date,
-            sale__payment_status__in=['paid', 'partial']
+            sale__status__in=['COMPLETED', 'PARTIAL']
         ).aggregate(
             total_sold=Sum('quantity')
         )
@@ -1210,7 +1210,7 @@ class WarehouseAnalyticsReportView(BaseReportView):
                 product=stock.product,
                 sale__created_at__date__gte=start_date,
                 sale__created_at__date__lte=end_date,
-                sale__payment_status__in=['paid', 'partial']
+                sale__status__in=['COMPLETED', 'PARTIAL']
             ).count()
             
             if sales_count == 0:
