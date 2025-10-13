@@ -414,14 +414,14 @@ class LowStockAlertsReportView(BaseReportView):
             product_id = str(stock.product.id)
             
             # Calculate average daily sales
-            total_sold_30days = velocity_lookup.get(product_id, 0)
-            avg_daily_sales = total_sold_30days / 30.0
+            total_sold_30days = Decimal(str(velocity_lookup.get(product_id, 0)))
+            avg_daily_sales = total_sold_30days / Decimal('30.0')
             
             # Calculate days until stockout
             if avg_daily_sales > 0:
-                days_until_stockout = stock.quantity / avg_daily_sales
+                days_until_stockout = Decimal(str(stock.quantity)) / avg_daily_sales
             else:
-                days_until_stockout = 999  # No recent sales, not urgent
+                days_until_stockout = Decimal('999')  # No recent sales, not urgent
             
             # Determine priority
             if days_until_stockout < 5 or stock.quantity < 5:
@@ -435,7 +435,7 @@ class LowStockAlertsReportView(BaseReportView):
             
             # Calculate recommended order quantity
             # Order enough for 30 days + safety stock (10 days)
-            recommended_qty = int((avg_daily_sales * 40) - stock.quantity) if avg_daily_sales > 0 else 50
+            recommended_qty = int((avg_daily_sales * Decimal('40')) - Decimal(str(stock.quantity))) if avg_daily_sales > 0 else 50
             recommended_qty = max(recommended_qty, 10)  # Minimum order of 10
             
             # Get latest restock date (from stock_product created_at or adjustments)
@@ -456,8 +456,8 @@ class LowStockAlertsReportView(BaseReportView):
                 'unit_cost': str(stock.landed_unit_cost),
                 'estimated_order_cost': str(stock.landed_unit_cost * recommended_qty),
                 'priority': priority,
-                'days_until_stockout': round(days_until_stockout, 1),
-                'average_daily_sales': round(avg_daily_sales, 2),
+                'days_until_stockout': round(float(days_until_stockout), 1),
+                'average_daily_sales': round(float(avg_daily_sales), 2),
                 'last_restock_date': last_restock_date.isoformat()
             })
         
@@ -1182,21 +1182,21 @@ class WarehouseAnalyticsReportView(BaseReportView):
             total_sold=Sum('quantity')
         )
         
-        units_sold = sales_stats['total_sold'] or 0
+        units_sold = float(sales_stats['total_sold'] or 0)
         
         if units_sold == 0:
             return 0.0
         
         # Average inventory level (simplified: current quantity)
         # In a more sophisticated system, this would be the average over the period
-        avg_inventory = stock_product.quantity
+        avg_inventory = float(stock_product.quantity)
         
         if avg_inventory == 0:
             # If current stock is 0 but had sales, assume average was half of sold
-            avg_inventory = units_sold / 2
+            avg_inventory = units_sold / 2.0
         
         # Calculate turnover rate
-        turnover_rate = units_sold / avg_inventory if avg_inventory > 0 else 0
+        turnover_rate = units_sold / avg_inventory if avg_inventory > 0 else 0.0
         
         return turnover_rate
     

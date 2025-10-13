@@ -17,6 +17,7 @@ from sales.models import Sale, SaleItem, Payment, Customer
 from reports.services.report_base import BaseReportView
 from reports.utils.response import ReportResponse, ReportError
 from reports.utils.aggregation import AggregationHelper
+from reports.utils.profit_calculator import ProfitCalculator
 
 
 class RevenueProfitReportView(BaseReportView):
@@ -99,13 +100,16 @@ class RevenueProfitReportView(BaseReportView):
         # Get aggregated totals
         totals = queryset.aggregate(
             revenue=Sum('total_amount'),
-            profit=Sum('total_profit'),
             count=Count('id')
         )
         
         total_revenue = Decimal(str(totals['revenue'] or 0))
-        total_profit = Decimal(str(totals['profit'] or 0))
         total_count = totals['count']
+        
+        # Calculate profit using ProfitCalculator
+        sale_costs = ProfitCalculator.calculate_sale_costs(queryset)
+        total_profit = sum(costs['profit'] for costs in sale_costs.values())
+        total_profit = ProfitCalculator.to_decimal(total_profit)
         
         # Calculate COGS (Cost of Goods Sold)
         total_cost = total_revenue - total_profit
@@ -117,32 +121,38 @@ class RevenueProfitReportView(BaseReportView):
         
         # Revenue by sale type
         revenue_by_type = {}
-        type_breakdown = queryset.values('sale_type').annotate(
-            revenue=Sum('total_amount'),
-            profit=Sum('total_profit')
-        )
-        for item in type_breakdown:
-            sale_type = item['sale_type'] or 'UNKNOWN'
-            revenue_by_type[sale_type] = {
-                'revenue': float(item['revenue'] or 0),
-                'profit': float(item['profit'] or 0),
-                'margin': float(
-                    AggregationHelper.calculate_percentage(
-                        Decimal(str(item['profit'] or 0)),
-                        Decimal(str(item['revenue'] or 0))
+        for sale_type in ['RETAIL', 'WHOLESALE']:
+            type_queryset = queryset.filter(type=sale_type)
+            type_totals = type_queryset.aggregate(revenue=Sum('total_amount'))
+            type_revenue = Decimal(str(type_totals['revenue'] or 0))
+            
+            if type_revenue > 0:
+                type_costs = ProfitCalculator.calculate_sale_costs(type_queryset)
+                type_profit = sum(costs['profit'] for costs in type_costs.values())
+                type_profit = ProfitCalculator.to_decimal(type_profit)
+                
+                revenue_by_type[sale_type] = {
+                    'revenue': float(type_revenue),
+                    'profit': float(type_profit),
+                    'margin': float(
+                        AggregationHelper.calculate_percentage(type_profit, type_revenue)
                     )
-                ) if item['revenue'] else 0.0
-            }
+                }
         
-        # Find best and worst margins
-        sales_with_margins = queryset.exclude(
-            total_amount=0
-        ).annotate(
-            margin=F('total_profit') * 100.0 / F('total_amount')
-        )
-        
-        best_margin = sales_with_margins.aggregate(Max('margin'))['margin__max'] or 0
-        worst_margin = sales_with_margins.aggregate(Min('margin'))['margin__min'] or 0
+        # Calculate best and worst margins (simplified without DB calculation)
+        best_margin = 0.0
+        worst_margin = 0.0
+        if sale_costs:
+            margins = []
+            for sale_id, costs in sale_costs.items():
+                sale = queryset.filter(id=sale_id).first()
+                if sale and sale.total_amount > 0:
+                    margin = float((costs['profit'] / ProfitCalculator.to_decimal(sale.total_amount)) * 100)
+                    margins.append(margin)
+            
+            if margins:
+                best_margin = max(margins)
+                worst_margin = min(margins)
         
         return {
             'total_revenue': float(total_revenue),
@@ -177,26 +187,32 @@ class RevenueProfitReportView(BaseReportView):
             .values('period')
             .annotate(
                 revenue=Sum('total_amount'),
-                profit=Sum('total_profit'),
                 count=Count('id')
             )
             .order_by('period')
         )
         
-        # Format results
+        # Calculate profit for each period
         results = []
         for item in time_series:
+            period = item['period']
             revenue = Decimal(str(item['revenue'] or 0))
-            profit = Decimal(str(item['profit'] or 0))
-            cost = revenue - profit
             count = item['count']
+            
+            # Get sales for this period and calculate profit
+            period_sales = queryset.filter(created_at__date=period.date() if hasattr(period, 'date') else period)
+            sale_costs = ProfitCalculator.calculate_sale_costs(period_sales)
+            profit = sum(costs['profit'] for costs in sale_costs.values())
+            profit = ProfitCalculator.to_decimal(profit)
+            
+            cost = revenue - profit
             
             margin = AggregationHelper.calculate_percentage(
                 profit, revenue
             ) if revenue > 0 else Decimal('0.00')
             
             results.append({
-                'period': item['period'].date().isoformat() if item['period'] else None,
+                'period': period.date().isoformat() if hasattr(period, 'date') else str(period),
                 'revenue': float(revenue),
                 'cost': float(cost),
                 'profit': float(profit),
@@ -264,7 +280,7 @@ class ARAgingReportView(BaseReportView):
         # Get customers with credit balances
         customers_query = Customer.objects.filter(
             business_id=business_id,
-            credit_balance__gt=min_balance
+            outstanding_balance__gt=min_balance
         ).select_related('business')
         
         # Apply optional customer filter
@@ -285,10 +301,10 @@ class ARAgingReportView(BaseReportView):
         
         for customer in customers_query:
             # Get customer's credit transactions to determine aging
-            # For now, we'll use a simplified approach based on credit_balance
+            # For now, we'll use a simplified approach based on outstanding_balance
             # In a full implementation, we'd track individual invoices/transactions
             
-            balance = customer.credit_balance
+            balance = customer.outstanding_balance
             if balance <= 0:
                 continue
             
@@ -484,16 +500,23 @@ class CollectionRatesReportView(BaseReportView):
     
     def get(self, request):
         """Generate collection rates report"""
-        # Parse filters
-        filters = self.parse_filters(request)
-        start_date = filters.get('start_date', timezone.now().date() - timedelta(days=90))
-        end_date = filters.get('end_date', timezone.now().date())
-        storefront_id = filters.get('storefront_id')
-        grouping = request.GET.get('grouping', 'monthly')
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get date range
+        start_date, end_date, error = self.get_date_range(request, default_days=90)
+        if error:
+            return ReportResponse.error(error)
+        
+        storefront_id = request.query_params.get('storefront_id')
+        grouping = request.query_params.get('grouping', 'monthly')
         
         # Build queryset for credit sales
         queryset = Sale.objects.filter(
-            sale_type='credit',
+            business_id=business_id,
+            type='CREDIT',
             created_at__date__gte=start_date,
             created_at__date__lte=end_date
         )
@@ -507,17 +530,17 @@ class CollectionRatesReportView(BaseReportView):
         # Build time series
         time_series = self._build_time_series(queryset, grouping, start_date, end_date)
         
-        return ReportResponse.success({
-            'summary': summary,
-            'time_series': time_series
-        }, meta={
-            'date_range': {
-                'start': start_date.isoformat(),
-                'end': end_date.isoformat()
-            },
-            'grouping': grouping,
-            'storefront_id': storefront_id
-        })
+        # Build metadata
+        metadata = self.build_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            filters={
+                'grouping': grouping,
+                'storefront_id': storefront_id
+            }
+        )
+        
+        return ReportResponse.success(summary, time_series, metadata)
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
         """Build summary statistics for collection rates"""
@@ -527,18 +550,26 @@ class CollectionRatesReportView(BaseReportView):
             total_count=Count('id')
         )
         
-        # Get collected amounts (sales with payments)
-        collected_stats = queryset.filter(
-            payment_status__in=['paid', 'partial']
+        # Get collected amounts from payments
+        from sales.models import Payment
+        sale_ids = queryset.values_list('id', flat=True)
+        collected_stats = Payment.objects.filter(
+            sale_id__in=sale_ids,
+            status='COMPLETED'
         ).aggregate(
-            collected_amount=Sum('amount_paid'),
-            collected_count=Count('id')
+            collected_amount=Sum('amount_paid')
         )
+        
+        # Count sales that have been fully or partially paid
+        collected_count = queryset.filter(
+            status__in=['COMPLETED', 'PARTIAL']
+        ).filter(
+            amount_paid__gt=0
+        ).count()
         
         total_amount = total_stats['total_amount'] or Decimal('0.00')
         total_count = total_stats['total_count'] or 0
         collected_amount = collected_stats['collected_amount'] or Decimal('0.00')
-        collected_count = collected_stats['collected_count'] or 0
         outstanding_amount = total_amount - collected_amount
         outstanding_count = total_count - collected_count
         
@@ -565,19 +596,20 @@ class CollectionRatesReportView(BaseReportView):
     
     def _calculate_average_collection_period(self, queryset) -> float:
         """Calculate average days to collect payment"""
-        # Get sales with at least one payment
+        # Get sales with at least one completed payment
+        from sales.models import Payment
         sales_with_payments = queryset.filter(
-            payment_status__in=['paid', 'partial']
-        ).prefetch_related('payment_set')
+            amount_paid__gt=0
+        ).prefetch_related('payments')
         
         total_days = 0
         count = 0
         
         for sale in sales_with_payments:
             # Get last payment date
-            last_payment = sale.payment_set.order_by('-payment_date').first()
+            last_payment = sale.payments.filter(status='COMPLETED').order_by('-created_at').first()
             if last_payment:
-                days_to_collect = (last_payment.payment_date - sale.created_at.date()).days
+                days_to_collect = (last_payment.created_at.date() - sale.created_at.date()).days
                 total_days += days_to_collect
                 count += 1
         
@@ -612,8 +644,12 @@ class CollectionRatesReportView(BaseReportView):
                 created_at__date__lt=self._get_period_end(period_date, grouping)
             )
             
-            collected_stats = period_sales.filter(
-                payment_status__in=['paid', 'partial']
+            # Get collected amounts from payments for this period
+            from sales.models import Payment
+            sale_ids = period_sales.values_list('id', flat=True)
+            collected_stats = Payment.objects.filter(
+                sale_id__in=sale_ids,
+                status='COMPLETED'
             ).aggregate(
                 collected_amount=Sum('amount_paid')
             )
@@ -719,25 +755,33 @@ class CashFlowReportView(BaseReportView):
     
     def get(self, request):
         """Generate cash flow report"""
-        # Parse filters
-        filters = self.parse_filters(request)
-        start_date = filters.get('start_date', timezone.now().date() - timedelta(days=30))
-        end_date = filters.get('end_date', timezone.now().date())
-        storefront_id = filters.get('storefront_id')
-        grouping = request.GET.get('grouping', 'daily')
-        payment_method = request.GET.get('payment_method')
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Get date range
+        start_date, end_date, error = self.get_date_range(request, default_days=30)
+        if error:
+            return ReportResponse.error(error)
+        
+        storefront_id = request.query_params.get('storefront_id')
+        grouping = request.query_params.get('grouping', 'daily')
+        payment_method = request.query_params.get('payment_method')
         
         # Build queryset for payments (inflows)
         queryset = Payment.objects.filter(
-            payment_date__gte=start_date,
-            payment_date__lte=end_date
+            sale__business_id=business_id,
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            status='COMPLETED'
         )
         
         if storefront_id:
             queryset = queryset.filter(sale__storefront_id=storefront_id)
         
         if payment_method:
-            queryset = queryset.filter(payment_method=payment_method)
+            queryset = queryset.filter(method=payment_method)
         
         # Build summary
         summary = self._build_summary(queryset)
@@ -745,48 +789,48 @@ class CashFlowReportView(BaseReportView):
         # Build time series
         time_series = self._build_time_series(queryset, grouping, start_date, end_date)
         
-        return ReportResponse.success({
-            'summary': summary,
-            'time_series': time_series
-        }, meta={
-            'date_range': {
-                'start': start_date.isoformat(),
-                'end': end_date.isoformat()
-            },
-            'grouping': grouping,
-            'storefront_id': storefront_id,
-            'payment_method': payment_method,
-            'note': 'Tier 1: Only tracking inflows (payments). Outflows will be added in Tier 2.'
-        })
+        # Build metadata
+        metadata = self.build_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            filters={
+                'grouping': grouping,
+                'storefront_id': storefront_id,
+                'payment_method': payment_method,
+                'note': 'Tier 1: Only tracking inflows (payments). Outflows will be added in Tier 2.'
+            }
+        )
+        
+        return ReportResponse.success(summary, time_series, metadata)
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
         """Build summary cash flow statistics"""
         # Total inflows
         total_inflows = queryset.aggregate(
-            total=Sum('amount')
+            total=Sum('amount_paid')
         )['total'] or Decimal('0.00')
         
         # Inflows by payment method
         inflow_by_method = {}
-        method_breakdown = queryset.values('payment_method').annotate(
-            total=Sum('amount')
+        method_breakdown = queryset.values('method').annotate(
+            total=Sum('amount_paid')
         )
         for item in method_breakdown:
-            inflow_by_method[item['payment_method']] = str(item['total'])
+            inflow_by_method[item['method']] = str(item['total'])
         
         # Ensure all methods are represented
-        for method in ['cash', 'card', 'bank_transfer', 'mobile_money']:
+        for method in ['CASH', 'CARD', 'BANK_TRANSFER', 'MOBILE_MONEY']:
             if method not in inflow_by_method:
                 inflow_by_method[method] = '0.00'
         
         # Inflows by sale type (cash sales vs credit payments)
         cash_sales_amount = queryset.filter(
-            sale__sale_type='cash'
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            sale__type='CASH'
+        ).aggregate(total=Sum('amount_paid'))['total'] or Decimal('0.00')
         
         credit_payments_amount = queryset.filter(
-            sale__sale_type='credit'
-        ).aggregate(total=Sum('amount'))['total'] or Decimal('0.00')
+            sale__type='CREDIT'
+        ).aggregate(total=Sum('amount_paid'))['total'] or Decimal('0.00')
         
         # Note: No outflows in Tier 1
         total_outflows = Decimal('0.00')
@@ -822,9 +866,9 @@ class CashFlowReportView(BaseReportView):
         
         # Group payments by period
         period_data = queryset.annotate(
-            period=trunc_func('payment_date')
+            period=trunc_func('created_at')
         ).values('period').annotate(
-            inflows=Sum('amount'),
+            inflows=Sum('amount_paid'),
             transaction_count=Count('id')
         ).order_by('period')
         
