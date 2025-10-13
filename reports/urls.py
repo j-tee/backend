@@ -75,6 +75,7 @@ urlpatterns = [
     # Sales Reports (Phase 2) - Complete
     path('api/sales/summary/', SalesSummaryReportView.as_view(), name='sales-summary-report'),
     path('api/sales/products/', ProductPerformanceReportView.as_view(), name='product-performance-report'),
+    path('api/sales/product-performance/', ProductPerformanceReportView.as_view(), name='product-performance-report-alt'),  # Alternative URL
     path('api/sales/customer-analytics/', CustomerAnalyticsReportView.as_view(), name='customer-analytics-report'),
     path('api/sales/revenue-trends/', RevenueTrendsReportView.as_view(), name='revenue-trends-report'),
     
@@ -90,8 +91,9 @@ urlpatterns = [
     path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
     path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
     
-    # Customer Reports (Phase 5) - In Progress
+    # Customer Reports (Phase 5) - Complete
     path('api/customer/lifetime-value/', CustomerLifetimeValueReportView.as_view(), name='customer-lifetime-value-report'),
+    path('api/customer/top-customers/', CustomerLifetimeValueReportView.as_view(), name='customer-top-customers-alt'),  # Alternative URL
     path('api/customer/segmentation/', CustomerSegmentationReportView.as_view(), name='customer-segmentation-report'),
     path('api/customer/purchase-patterns/', PurchasePatternAnalysisReportView.as_view(), name='purchase-patterns-report'),
     path('api/customer/retention/', CustomerRetentionMetricsReportView.as_view(), name='customer-retention-report'),

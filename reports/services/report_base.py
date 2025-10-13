@@ -30,12 +30,15 @@ class BusinessFilterMixin:
         """
         user = request.user
         
-        # Get business from user's profile or active business
-        if hasattr(user, 'business'):
-            return user.business.id
-        elif hasattr(user, 'businesses') and user.businesses.exists():
-            # Get first business if user has multiple
-            return user.businesses.first().id
+        # Get business from user's primary business (through business_memberships)
+        if hasattr(user, 'primary_business') and user.primary_business:
+            return user.primary_business.id
+        
+        # Fallback: try to get from active business memberships
+        if hasattr(user, 'business_memberships'):
+            membership = user.business_memberships.filter(is_active=True).first()
+            if membership:
+                return membership.business.id
         
         return None
     
