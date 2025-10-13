@@ -137,7 +137,14 @@ class StockLevelsSummaryReportView(BaseReportView):
         # Aggregate totals
         totals = queryset.aggregate(
             total_units=Sum('quantity'),
-            total_value=Sum(F('quantity') * F('landed_unit_cost'), output_field=DecimalField())
+            total_value=Sum(
+                F('quantity') * (
+                    F('unit_cost') + 
+                    Coalesce(F('unit_tax_amount'), Value(0)) + 
+                    Coalesce(F('unit_additional_cost'), Value(0))
+                ),
+                output_field=DecimalField()
+            )
         )
         
         # Count low stock and out of stock
@@ -162,7 +169,14 @@ class StockLevelsSummaryReportView(BaseReportView):
         ).annotate(
             total_products=Count('product', distinct=True),
             total_units=Sum('quantity'),
-            total_value=Sum(F('quantity') * F('landed_unit_cost'), output_field=DecimalField()),
+            total_value=Sum(
+                F('quantity') * (
+                    F('unit_cost') + 
+                    Coalesce(F('unit_tax_amount'), Value(0)) + 
+                    Coalesce(F('unit_additional_cost'), Value(0))
+                ),
+                output_field=DecimalField()
+            ),
             low_stock_count=Count('id', filter=Q(quantity__lt=10, quantity__gt=0))
         ).order_by('-total_value')
         
@@ -185,7 +199,14 @@ class StockLevelsSummaryReportView(BaseReportView):
         ).annotate(
             total_products=Count('product', distinct=True),
             total_units=Sum('quantity'),
-            total_value=Sum(F('quantity') * F('landed_unit_cost'), output_field=DecimalField())
+            total_value=Sum(
+                F('quantity') * (
+                    F('unit_cost') + 
+                    Coalesce(F('unit_tax_amount'), Value(0)) + 
+                    Coalesce(F('unit_additional_cost'), Value(0))
+                ),
+                output_field=DecimalField()
+            )
         ).order_by('-total_value')
         
         return [
@@ -964,7 +985,14 @@ class WarehouseAnalyticsReportView(BaseReportView):
         total_products = stock_qs.values('product').distinct().count()
         
         stock_stats = stock_qs.aggregate(
-            total_value=Sum(F('quantity') * F('landed_unit_cost'), output_field=DecimalField()),
+            total_value=Sum(
+                F('quantity') * (
+                    F('unit_cost') + 
+                    Coalesce(F('unit_tax_amount'), Value(0)) + 
+                    Coalesce(F('unit_additional_cost'), Value(0))
+                ),
+                output_field=DecimalField()
+            ),
             total_units=Sum('quantity')
         )
         
@@ -1009,7 +1037,14 @@ class WarehouseAnalyticsReportView(BaseReportView):
             
             stock_stats = stock_qs.aggregate(
                 total_units=Sum('quantity'),
-                total_value=Sum(F('quantity') * F('landed_unit_cost'), output_field=DecimalField())
+                total_value=Sum(
+                    F('quantity') * (
+                        F('unit_cost') + 
+                        Coalesce(F('unit_tax_amount'), Value(0)) + 
+                        Coalesce(F('unit_additional_cost'), Value(0))
+                    ),
+                    output_field=DecimalField()
+                )
             )
             
             # Calculate warehouse turnover rate
