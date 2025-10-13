@@ -755,23 +755,20 @@ class RevenueTrendsReportView(BaseReportView):
         period_profits = {}
         for item in time_series:
             period = item['period']
-            # Convert datetime to date if needed
-            if hasattr(period, 'date'):
-                period_date = period.date()
-            else:
-                period_date = period
             
             # Filter sales for this period based on grouping type
             if grouping == 'daily':
-                period_sales = queryset.filter(created_at__date=period_date)
+                # period is already a date object from TruncDate
+                period_sales = queryset.filter(created_at__date=period)
             elif grouping == 'weekly':
-                # For weekly, filter by the week start date
+                # For weekly, filter by the week start date (period is a datetime)
                 period_sales = queryset.annotate(week=TruncWeek('created_at')).filter(week=period)
             elif grouping == 'monthly':
-                # For monthly, filter by the month start date
+                # For monthly, filter by the month start date (period is a datetime)
                 period_sales = queryset.annotate(month=TruncMonth('created_at')).filter(month=period)
             else:
-                period_sales = queryset.filter(created_at__date=period_date)
+                # Default to daily filtering
+                period_sales = queryset.filter(created_at__date=period)
             
             period_profits[str(period)] = ProfitCalculator.calculate_total_profit(period_sales)
         
