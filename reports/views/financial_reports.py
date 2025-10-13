@@ -781,7 +781,7 @@ class CashFlowReportView(BaseReportView):
             queryset = queryset.filter(sale__storefront_id=storefront_id)
         
         if payment_method:
-            queryset = queryset.filter(method=payment_method)
+            queryset = queryset.filter(payment_method=payment_method)
         
         # Build summary
         summary = self._build_summary(queryset)
@@ -812,11 +812,11 @@ class CashFlowReportView(BaseReportView):
         
         # Inflows by payment method
         inflow_by_method = {}
-        method_breakdown = queryset.values('method').annotate(
+        method_breakdown = queryset.values('payment_method').annotate(
             total=Sum('amount_paid')
         )
         for item in method_breakdown:
-            inflow_by_method[item['method']] = str(item['total'])
+            inflow_by_method[item['payment_method']] = str(item['total'])
         
         # Ensure all methods are represented
         for method in ['CASH', 'CARD', 'BANK_TRANSFER', 'MOBILE_MONEY']:
