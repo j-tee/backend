@@ -65,8 +65,12 @@ class StockLevelsSummaryReportView(BaseReportView):
     
     def get(self, request):
         """Generate stock levels summary report"""
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
         # Parse filters
-        filters = self.parse_filters(request)
         warehouse_id = request.GET.get('warehouse_id')
         category_id = request.GET.get('category_id')
         product_id = request.GET.get('product_id')
@@ -78,7 +82,7 @@ class StockLevelsSummaryReportView(BaseReportView):
         # Build queryset
         queryset = StockProduct.objects.select_related(
             'product', 'warehouse', 'product__category', 'supplier'
-        )
+        ).filter(product__business_id=business_id)
         
         if warehouse_id:
             queryset = queryset.filter(warehouse_id=warehouse_id)
@@ -243,7 +247,18 @@ class StockLevelsSummaryReportView(BaseReportView):
         stock_levels.sort(key=lambda x: Decimal(x['total_value']), reverse=True)
         
         # Apply pagination
-        paginated_data, pagination = self.paginate_data(stock_levels, request)
+        page, page_size = self.get_pagination_params(request)
+        total_count = len(stock_levels)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_data = stock_levels[start_idx:end_idx]
+        
+        pagination = {
+            'page': page,
+            'page_size': page_size,
+            'total_count': total_count,
+            'total_pages': (total_count + page_size - 1) // page_size
+        }
         
         return paginated_data, pagination
 
@@ -285,6 +300,11 @@ class LowStockAlertsReportView(BaseReportView):
     
     def get(self, request):
         """Generate low stock alerts report"""
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
         # Parse filters
         warehouse_id = request.GET.get('warehouse_id')
         category_id = request.GET.get('category_id')
@@ -294,7 +314,10 @@ class LowStockAlertsReportView(BaseReportView):
         # Build queryset for stock products
         queryset = StockProduct.objects.select_related(
             'product', 'warehouse', 'product__category', 'supplier'
-        ).filter(quantity__gt=0)  # Only products with some stock
+        ).filter(
+            product__business_id=business_id,
+            quantity__gt=0  # Only products with some stock
+        )
         
         if warehouse_id:
             queryset = queryset.filter(warehouse_id=warehouse_id)
@@ -312,7 +335,18 @@ class LowStockAlertsReportView(BaseReportView):
         summary = self._build_summary(alerts)
         
         # Apply pagination
-        paginated_alerts, pagination = self.paginate_data(alerts, request)
+        page, page_size = self.get_pagination_params(request)
+        total_count = len(alerts)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_alerts = alerts[start_idx:end_idx]
+        
+        pagination = {
+            'page': page,
+            'page_size': page_size,
+            'total_count': total_count,
+            'total_pages': (total_count + page_size - 1) // page_size
+        }
         
         return ReportResponse.success({
             'summary': summary,
@@ -466,10 +500,16 @@ class StockMovementHistoryReportView(BaseReportView):
     
     def get(self, request):
         """Generate stock movement history report"""
-        # Parse filters
-        filters = self.parse_filters(request)
-        start_date = filters.get('start_date', timezone.now().date() - timedelta(days=30))
-        end_date = filters.get('end_date', timezone.now().date())
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Parse date range
+        start_date, end_date, error = self.get_date_range(request, default_days=30)
+        if error:
+            return ReportResponse.error(error)
+        
         warehouse_id = request.GET.get('warehouse_id')
         product_id = request.GET.get('product_id')
         movement_type = request.GET.get('movement_type', 'all')
@@ -802,7 +842,18 @@ class StockMovementHistoryReportView(BaseReportView):
         movements.sort(key=lambda x: x['created_at'], reverse=True)
         
         # Apply pagination
-        paginated_movements, pagination = self.paginate_data(movements, request)
+        page, page_size = self.get_pagination_params(request)
+        total_count = len(movements)
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paginated_movements = movements[start_idx:end_idx]
+        
+        pagination = {
+            'page': page,
+            'page_size': page_size,
+            'total_count': total_count,
+            'total_pages': (total_count + page_size - 1) // page_size
+        }
         
         return paginated_movements, pagination
     
@@ -856,11 +907,18 @@ class WarehouseAnalyticsReportView(BaseReportView):
     
     def get(self, request):
         """Generate warehouse analytics report"""
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+        
+        # Parse date range
+        start_date, end_date, error = self.get_date_range(request, default_days=90)
+        if error:
+            return ReportResponse.error(error)
+        
         # Parse filters
         warehouse_id = request.GET.get('warehouse_id')
-        filters = self.parse_filters(request)
-        start_date = filters.get('start_date', timezone.now().date() - timedelta(days=90))
-        end_date = filters.get('end_date', timezone.now().date())
         min_turnover = request.GET.get('min_turnover_rate')
         max_turnover = request.GET.get('max_turnover_rate')
         
