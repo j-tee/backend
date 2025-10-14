@@ -2627,24 +2627,10 @@ class StockAvailabilityView(APIView):
             product=product,
         ).first()
 
-        # Get transferred quantity to storefront
-        transferred_quantity = Decimal(str(inventory_entry.quantity)) if inventory_entry else Decimal('0')
-        
-        # Calculate completed sales from this storefront
-        sold_quantity = Decimal('0')
-        if SALES_APP_AVAILABLE and SaleItem is not None:
-            sold = (
-                SaleItem.objects.filter(
-                    product=product,
-                    sale__storefront_id=storefront_id,
-                    sale__status='COMPLETED'
-                )
-                .aggregate(total=Sum('quantity'))
-            )
-            sold_quantity = Decimal(str(sold['total'] or 0))
-        
-        # Total available = transferred - sold
-        total_available = transferred_quantity - sold_quantity
+        # StoreFrontInventory.quantity already represents current inventory
+        # (it gets decremented by commit_stock() when sales are completed)
+        # So we use it directly without subtracting sold items again
+        total_available = Decimal(str(inventory_entry.quantity)) if inventory_entry else Decimal('0')
         if total_available < Decimal('0'):
             total_available = Decimal('0')
 
