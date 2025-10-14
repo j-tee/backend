@@ -2710,8 +2710,6 @@ class StockAvailabilityView(APIView):
             'total_available': self._decimal_to_native(total_available),
             'reserved_quantity': self._decimal_to_native(reserved_quantity),
             'unreserved_quantity': self._decimal_to_native(unreserved_quantity),
-            'transferred_quantity': self._decimal_to_native(transferred_quantity),
-            'sold_quantity': self._decimal_to_native(sold_quantity),
             'batches': batches_data,
             'reservations': reservations_data,
         }
