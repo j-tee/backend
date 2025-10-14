@@ -65,6 +65,25 @@ class CustomPageNumberPagination(PageNumberPagination):
     max_page_size = 100  # Maximum allowed page size
 
 
+class CatalogPagination(PageNumberPagination):
+    """Pagination class for sale catalog endpoints."""
+    page_size = 50  # Default page size for catalog
+    page_size_query_param = 'page_size'
+    max_page_size = 200  # Maximum allowed page size for catalog
+    
+    def get_paginated_response(self, data):
+        """Return paginated response with additional metadata."""
+        return Response({
+            'count': self.page.paginator.count,
+            'next': self.get_next_link(),
+            'previous': self.get_previous_link(),
+            'page_size': self.page_size,
+            'total_pages': self.page.paginator.num_pages,
+            'current_page': self.page.number,
+            **data
+        })
+
+
 class ProductFilter(FilterSet):
     """Filter class for Product model."""
     search = CharFilter(method='filter_search', label='Search in name and SKU')
@@ -337,34 +356,88 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='sale-catalog')
     def sale_catalog(self, request, pk=None):
-        """Return POS catalog data limited to products with stock metadata."""
-
+        """
+        Enhanced sale catalog with server-side filtering and pagination.
+        
+        Query Parameters:
+        - search: Search by product name, SKU, or barcode (case-insensitive)
+        - category: Filter by category ID (UUID)
+        - min_price: Minimum retail price (inclusive)
+        - max_price: Maximum retail price (inclusive)
+        - in_stock_only: Show only products with available_quantity > 0 (default: true)
+        - page: Page number for pagination (default: 1)
+        - page_size: Items per page (default: 50, max: 200)
+        - include_zero: Legacy parameter, opposite of in_stock_only
+        """
         storefront = self.get_object()
 
+        # Get query parameters with backward compatibility
+        search_query = request.query_params.get('search', '').strip()
+        category_id = request.query_params.get('category')
+        min_price = request.query_params.get('min_price')
+        max_price = request.query_params.get('max_price')
+        
+        # Handle in_stock_only with backward compatibility for include_zero
         include_zero = request.query_params.get('include_zero', '').lower() == 'true'
+        in_stock_only_param = request.query_params.get('in_stock_only', '').lower()
+        
+        if in_stock_only_param == 'false':
+            in_stock_only = False
+        elif include_zero:
+            in_stock_only = False
+        else:
+            in_stock_only = True  # Default to in-stock only
 
-        inventory_qs = StoreFrontInventory.objects.filter(storefront=storefront)
-        if not include_zero:
+        # Build the base queryset with inventory aggregation
+        inventory_qs = StoreFrontInventory.objects.filter(
+            storefront=storefront
+        ).select_related('product', 'product__category')
+        
+        # Filter: In stock only
+        if in_stock_only:
             inventory_qs = inventory_qs.filter(quantity__gt=0)
-
+        
+        # Get inventory totals
         inventory_totals = {
             row['product_id']: row['total_quantity']
             for row in inventory_qs.values('product_id').annotate(total_quantity=Sum('quantity'))
         }
-
+        
         if not inventory_totals:
-            return Response({'storefront': str(storefront.id), 'products': []}, status=status.HTTP_200_OK)
+            paginator = CatalogPagination()
+            return paginator.get_paginated_response({'products': []})
 
-        stock_products = (
+        # Get stock products for the filtered inventory
+        stock_products_qs = (
             StockProduct.objects.filter(product_id__in=inventory_totals.keys())
             .select_related('product', 'product__category')
-            .order_by('product_id', '-created_at')
         )
-
+        
+        # Apply filters on the product level
+        if search_query:
+            stock_products_qs = stock_products_qs.filter(
+                Q(product__name__icontains=search_query) |
+                Q(product__sku__icontains=search_query) |
+                Q(product__barcode__icontains=search_query)
+            )
+        
+        if category_id:
+            try:
+                category_uuid = UUID(category_id)
+                stock_products_qs = stock_products_qs.filter(product__category_id=category_uuid)
+            except (TypeError, ValueError):
+                # Invalid UUID, ignore filter
+                pass
+        
+        # Note: Price filters will be applied after aggregation since prices are on StockProduct
+        stock_products_qs = stock_products_qs.order_by('product_id', '-created_at')
+        
+        # Build stock map with latest pricing
         stock_map: dict = {}
-        for stock_product in stock_products:
+        for stock_product in stock_products_qs:
+            product_id = stock_product.product_id
             entry = stock_map.setdefault(
-                stock_product.product_id,
+                product_id,
                 {
                     'product': stock_product.product,
                     'latest': None,
@@ -377,17 +450,12 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
             if entry['latest'] is None:
                 entry['latest'] = stock_product
 
-        filtered_inventory = {
-            product_id: quantity
-            for product_id, quantity in inventory_totals.items()
-            if product_id in stock_map
-        }
-
-        if not filtered_inventory:
-            return Response({'storefront': str(storefront.id), 'products': []}, status=status.HTTP_200_OK)
-
+        # Build catalog items
         catalog_items = []
-        for product_id, quantity in filtered_inventory.items():
+        for product_id, quantity in inventory_totals.items():
+            if product_id not in stock_map:
+                continue
+            
             entry = stock_map[product_id]
             latest = entry['latest']
             product = entry['product']
@@ -396,12 +464,32 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
             wholesale_price = latest.wholesale_price if latest and latest.wholesale_price is not None else None
             if wholesale_price is not None and wholesale_price <= Decimal('0.00'):
                 wholesale_price = None
+            
+            # Apply price range filters
+            if min_price:
+                try:
+                    min_price_decimal = Decimal(str(min_price))
+                    if retail_price < min_price_decimal:
+                        continue
+                except (ValueError, TypeError, ArithmeticError):
+                    pass
+            
+            if max_price:
+                try:
+                    max_price_decimal = Decimal(str(max_price))
+                    if retail_price > max_price_decimal:
+                        continue
+                except (ValueError, TypeError, ArithmeticError):
+                    pass
 
             catalog_items.append({
                 'product_id': product.id,
                 'product_name': product.name,
-                'sku': product.sku,
+                'sku': product.sku or '',
+                'barcode': product.barcode,
                 'category_name': product.category.name if product.category else None,
+                'unit': product.unit if hasattr(product, 'unit') else None,
+                'product_image': product.image.url if hasattr(product, 'image') and product.image else None,
                 'available_quantity': int(quantity),
                 'retail_price': retail_price,
                 'wholesale_price': wholesale_price,
@@ -409,23 +497,56 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
                 'last_stocked_at': latest.created_at if latest else None,
             })
 
+        # Sort by product name for consistent ordering
         catalog_items.sort(key=lambda item: item['product_name'].lower())
 
-        serializer = StorefrontSaleProductSerializer(catalog_items, many=True)
-        return Response({'storefront': str(storefront.id), 'products': serializer.data}, status=status.HTTP_200_OK)
+        # Apply pagination
+        paginator = CatalogPagination()
+        page = paginator.paginate_queryset(catalog_items, request)
+        
+        # Serialize paginated results
+        serializer = StorefrontSaleProductSerializer(page, many=True)
+        
+        return paginator.get_paginated_response({'products': serializer.data})
 
     @action(detail=False, methods=['get'], url_path='multi-storefront-catalog')
     def multi_storefront_catalog(self, request):
         """
-        Return combined catalog from all storefronts the user has access to.
+        Enhanced multi-storefront catalog with server-side filtering and pagination.
         
         For business owners: returns products from ALL storefronts in their business
         For employees: returns products from storefronts they're assigned to
         
-        Each product includes storefront information to show where it's available.
+        Query Parameters:
+        - search: Search by product name, SKU, or barcode (case-insensitive)
+        - category: Filter by category ID (UUID)
+        - storefront: Filter to specific storefront(s) - can be repeated
+        - min_price: Minimum retail price (inclusive)
+        - max_price: Maximum retail price (inclusive)
+        - in_stock_only: Show only products with total_available > 0 (default: true)
+        - page: Page number for pagination (default: 1)
+        - page_size: Items per page (default: 50, max: 200)
+        - include_zero: Legacy parameter, opposite of in_stock_only
         """
         user = request.user
+        
+        # Get query parameters
+        search_query = request.query_params.get('search', '').strip()
+        category_id = request.query_params.get('category')
+        storefront_filter = request.query_params.getlist('storefront')
+        min_price = request.query_params.get('min_price')
+        max_price = request.query_params.get('max_price')
+        
+        # Handle in_stock_only with backward compatibility for include_zero
         include_zero = request.query_params.get('include_zero', '').lower() == 'true'
+        in_stock_only_param = request.query_params.get('in_stock_only', '').lower()
+        
+        if in_stock_only_param == 'false':
+            in_stock_only = False
+        elif include_zero:
+            in_stock_only = False
+        else:
+            in_stock_only = True  # Default to in-stock only
         
         # Get accessible storefronts
         accessible_storefronts = []
@@ -446,109 +567,188 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
             ).select_related('storefront', 'storefront__business_link__business')
             accessible_storefronts = [emp.storefront for emp in assigned_storefronts]
         
+        # Apply storefront filter if specified
+        if storefront_filter:
+            try:
+                storefront_uuids = [UUID(sf_id) for sf_id in storefront_filter]
+                accessible_storefronts = [
+                    sf for sf in accessible_storefronts 
+                    if sf.id in storefront_uuids
+                ]
+            except (TypeError, ValueError):
+                # Invalid UUIDs, ignore filter
+                pass
+        
         if not accessible_storefronts:
-            return Response({
+            paginator = CatalogPagination()
+            return paginator.get_paginated_response({
                 'storefronts': [],
-                'products': [],
-                'message': 'No accessible storefronts found for this user'
-            }, status=status.HTTP_200_OK)
+                'products': []
+            })
         
-        # Collect products from all accessible storefronts
-        combined_products = {}  # product_id -> product data with storefront info
+        # Get all inventory items across storefronts
+        inventory_qs = StoreFrontInventory.objects.filter(
+            storefront__in=accessible_storefronts
+        ).select_related('product', 'product__category', 'storefront')
         
-        for storefront in accessible_storefronts:
-            # Get inventory for this storefront
-            inventory_qs = StoreFrontInventory.objects.filter(storefront=storefront)
-            if not include_zero:
-                inventory_qs = inventory_qs.filter(quantity__gt=0)
+        # Apply in-stock filter
+        if in_stock_only:
+            inventory_qs = inventory_qs.filter(quantity__gt=0)
+        
+        # Get stock products for pricing and additional filtering
+        product_ids = set(inventory_qs.values_list('product_id', flat=True))
+        
+        if not product_ids:
+            paginator = CatalogPagination()
+            storefront_summary = [
+                {
+                    'id': str(sf.id),
+                    'name': sf.name,
+                }
+                for sf in accessible_storefronts
+            ]
+            return paginator.get_paginated_response({
+                'storefronts': storefront_summary,
+                'products': []
+            })
+        
+        stock_products_qs = (
+            StockProduct.objects.filter(product_id__in=product_ids)
+            .select_related('product', 'product__category')
+        )
+        
+        # Apply search filter
+        if search_query:
+            stock_products_qs = stock_products_qs.filter(
+                Q(product__name__icontains=search_query) |
+                Q(product__sku__icontains=search_query) |
+                Q(product__barcode__icontains=search_query)
+            )
+        
+        # Apply category filter
+        if category_id:
+            try:
+                category_uuid = UUID(category_id)
+                stock_products_qs = stock_products_qs.filter(product__category_id=category_uuid)
+            except (TypeError, ValueError):
+                pass
+        
+        stock_products_qs = stock_products_qs.order_by('product_id', '-created_at')
+        
+        # Build stock map with latest pricing
+        stock_map = {}
+        for stock_product in stock_products_qs:
+            product_id = stock_product.product_id
+            if product_id not in stock_map:
+                stock_map[product_id] = {
+                    'product': stock_product.product,
+                    'latest': stock_product,
+                    'stock_product_ids': []
+                }
+            stock_map[product_id]['stock_product_ids'].append(stock_product.id)
+        
+        # Filter inventory to only include products that passed filters
+        filtered_product_ids = set(stock_map.keys())
+        inventory_items = inventory_qs.filter(product_id__in=filtered_product_ids)
+        
+        # Aggregate by product
+        product_map = defaultdict(lambda: {
+            'locations': [],
+            'stock_product_ids': [],
+            'total_available': 0,
+        })
+        
+        for inv in inventory_items:
+            product_id = inv.product_id
+            product_key = str(product_id)
             
-            inventory_totals = {
-                row['product_id']: row['total_quantity']
-                for row in inventory_qs.values('product_id').annotate(total_quantity=Sum('quantity'))
-            }
-            
-            if not inventory_totals:
+            if product_id not in stock_map:
                 continue
             
-            # Get stock products for pricing
-            stock_products = (
-                StockProduct.objects.filter(product_id__in=inventory_totals.keys())
-                .select_related('product', 'product__category')
-                .order_by('product_id', '-created_at')
-            )
+            entry = stock_map[product_id]
+            latest = entry['latest']
+            product = entry['product']
             
-            stock_map = {}
-            for stock_product in stock_products:
-                if stock_product.product_id not in stock_map:
-                    stock_map[stock_product.product_id] = {
-                        'product': stock_product.product,
-                        'latest': stock_product,
-                        'stock_product_ids': []
-                    }
-                stock_map[stock_product.product_id]['stock_product_ids'].append(stock_product.id)
-            
-            # Add products to combined catalog
-            for product_id, quantity in inventory_totals.items():
-                if product_id not in stock_map:
-                    continue
-                
-                entry = stock_map[product_id]
-                latest = entry['latest']
-                product = entry['product']
-                
+            # Initialize product data if not already set
+            if 'product_name' not in product_map[product_key]:
                 retail_price = latest.retail_price if latest and latest.retail_price is not None else Decimal('0.00')
                 wholesale_price = latest.wholesale_price if latest and latest.wholesale_price is not None else None
                 if wholesale_price is not None and wholesale_price <= Decimal('0.00'):
                     wholesale_price = None
                 
-                # If product already in combined catalog, add this storefront location
-                if product_id in combined_products:
-                    combined_products[product_id]['locations'].append({
-                        'storefront_id': str(storefront.id),
-                        'storefront_name': storefront.name,
-                        'available_quantity': int(quantity)
-                    })
-                    combined_products[product_id]['total_available'] += int(quantity)
-                else:
-                    # New product - add to catalog
-                    combined_products[product_id] = {
-                        'product_id': product.id,
-                        'product_name': product.name,
-                        'sku': product.sku,
-                        'category_name': product.category.name if product.category else None,
-                        'retail_price': retail_price,
-                        'wholesale_price': wholesale_price,
-                        'total_available': int(quantity),
-                        'locations': [{
-                            'storefront_id': str(storefront.id),
-                            'storefront_name': storefront.name,
-                            'available_quantity': int(quantity)
-                        }],
-                        'stock_product_ids': entry['stock_product_ids'],
-                        'last_stocked_at': latest.created_at if latest else None,
-                    }
+                # Apply price range filters
+                skip_product = False
+                if min_price:
+                    try:
+                        min_price_decimal = Decimal(str(min_price))
+                        if retail_price < min_price_decimal:
+                            skip_product = True
+                    except (ValueError, TypeError, ArithmeticError):
+                        pass
+                
+                if max_price:
+                    try:
+                        max_price_decimal = Decimal(str(max_price))
+                        if retail_price > max_price_decimal:
+                            skip_product = True
+                    except (ValueError, TypeError, ArithmeticError):
+                        pass
+                
+                if skip_product:
+                    # Remove from product_map to skip this product
+                    del product_map[product_key]
+                    continue
+                
+                product_map[product_key].update({
+                    'product_id': str(product.id),
+                    'product_name': product.name,
+                    'sku': product.sku or '',
+                    'barcode': product.barcode,
+                    'category_name': product.category.name if product.category else None,
+                    'unit': product.unit if hasattr(product, 'unit') else None,
+                    'product_image': product.image.url if hasattr(product, 'image') and product.image else None,
+                    'retail_price': retail_price,
+                    'wholesale_price': wholesale_price,
+                    'last_stocked_at': latest.created_at.isoformat() if latest and latest.created_at else None,
+                })
+            
+            # Add location data
+            product_map[product_key]['total_available'] += inv.quantity
+            product_map[product_key]['locations'].append({
+                'storefront_id': str(inv.storefront.id),
+                'storefront_name': inv.storefront.name,
+                'available_quantity': int(inv.quantity),
+            })
+            
+            # Add stock product IDs (unique)
+            if entry['stock_product_ids']:
+                existing_ids = set(product_map[product_key]['stock_product_ids'])
+                for sp_id in entry['stock_product_ids']:
+                    if sp_id not in existing_ids:
+                        product_map[product_key]['stock_product_ids'].append(sp_id)
+                        existing_ids.add(sp_id)
         
-        # Convert to list and sort
-        products_list = list(combined_products.values())
-        products_list.sort(key=lambda item: item['product_name'].lower())
+        # Convert to list and sort by product name
+        products_list = list(product_map.values())
+        products_list.sort(key=lambda x: x.get('product_name', '').lower())
+        
+        # Apply pagination
+        paginator = CatalogPagination()
+        page = paginator.paginate_queryset(products_list, request)
         
         # Prepare storefront summary
         storefront_summary = [
             {
                 'id': str(sf.id),
                 'name': sf.name,
-                'business_id': str(sf.business_link.business_id) if sf.business_link else None,
-                'business_name': sf.business_link.business.name if sf.business_link else None
             }
             for sf in accessible_storefronts
         ]
         
-        return Response({
+        return paginator.get_paginated_response({
             'storefronts': storefront_summary,
-            'products': products_list,
-            'total_products': len(products_list),
-            'total_storefronts': len(accessible_storefronts)
-        }, status=status.HTTP_200_OK)
+            'products': page
+        })
 
 
 class ProductViewSet(viewsets.ModelViewSet):

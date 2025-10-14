@@ -31,8 +31,8 @@ class UserProfileInline(admin.StackedInline):
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
     inlines = [UserProfileInline]
-    list_display = ['name', 'email', 'role', 'subscription_status', 'is_active', 'created_at']
-    list_filter = ['role', 'subscription_status', 'is_active', 'is_staff', 'created_at']
+    list_display = ['name', 'email', 'role', 'account_type', 'platform_role', 'is_active', 'created_at']
+    list_filter = ['role', 'account_type', 'platform_role', 'is_active', 'is_staff', 'created_at']
     search_fields = ['name', 'email']
     readonly_fields = ['id', 'created_at', 'updated_at', 'last_login']
     ordering = ['-created_at']
@@ -40,14 +40,15 @@ class UserAdmin(BaseUserAdmin):
     fieldsets = (
         (None, {'fields': ('id', 'email', 'password')}),
         ('Personal info', {'fields': ('name', 'picture_url')}),
-        ('Permissions', {'fields': ('role', 'subscription_status', 'is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
+        ('Business & Platform', {'fields': ('account_type', 'platform_role', 'role')}),
+        ('Permissions', {'fields': ('is_active', 'is_staff', 'is_superuser', 'groups', 'user_permissions')}),
         ('Important dates', {'fields': ('last_login', 'created_at', 'updated_at')}),
     )
     
     add_fieldsets = (
         (None, {
             'classes': ('wide',),
-            'fields': ('name', 'email', 'password1', 'password2', 'role'),
+            'fields': ('name', 'email', 'password1', 'password2', 'role', 'account_type', 'platform_role'),
         }),
     )
     
@@ -94,11 +95,19 @@ class AuditLogAdmin(admin.ModelAdmin):
 
 @admin.register(Business)
 class BusinessAdmin(admin.ModelAdmin):
-    list_display = ['name', 'owner', 'email', 'tin', 'is_active', 'created_at']
+    list_display = ['name', 'owner', 'email', 'tin', 'subscription_status', 'is_active', 'created_at']
     search_fields = ['name', 'tin', 'email', 'owner__name', 'owner__email']
-    list_filter = ['is_active', 'created_at']
+    list_filter = ['subscription_status', 'is_active', 'created_at']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['name']
+    
+    fieldsets = (
+        (None, {'fields': ('id', 'name', 'tin', 'owner')}),
+        ('Contact', {'fields': ('email', 'phone_numbers', 'website', 'social_handles')}),
+        ('Address', {'fields': ('address',)}),
+        ('Status', {'fields': ('subscription_status', 'is_active')}),
+        ('Dates', {'fields': ('created_at', 'updated_at')}),
+    )
 
 
 @admin.register(BusinessMembership)

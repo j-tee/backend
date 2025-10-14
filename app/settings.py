@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'rest_framework.authtoken',
     'corsheaders',
     'rules',
+    'guardian',  # Django Guardian for object-level permissions
     'accounts.apps.AccountsConfig',
     'inventory',
     'sales',
@@ -137,6 +138,7 @@ AUTHENTICATION_BACKENDS = [
     'accounts.auth_backends.EmailBackend',
     'django.contrib.auth.backends.ModelBackend',
     'rules.permissions.ObjectPermissionBackend',
+    'guardian.backends.ObjectPermissionBackend',  # Guardian object permissions
 ]
 
 
