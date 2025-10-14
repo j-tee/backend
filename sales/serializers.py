@@ -588,20 +588,53 @@ class AddSaleItemSerializer(serializers.Serializer):
             })
         
         # Calculate available quantity at storefront
-        # (StoreFrontInventory.quantity - already sold from this storefront)
+        # (StoreFrontInventory.quantity - already sold - currently reserved)
         from .models import SaleItem
+        from inventory.models import StockReservation
+        
+        # Get completed sales from this storefront
         sold_from_storefront = SaleItem.objects.filter(
             product=product,
             sale__storefront=storefront,
             sale__status='COMPLETED'
         ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
         
-        available_at_storefront = storefront_inv.quantity - sold_from_storefront
+        # Get active reservations for this product at this storefront
+        # (excluding the current sale's reservations if updating)
+        current_sale_id = self.context.get('sale').id if self.context.get('sale') else None
+        reservations_query = StockReservation.objects.filter(
+            stock_product__product=product,
+            status='ACTIVE'
+        )
+        
+        # Exclude current sale's reservations (they'll be updated)
+        if current_sale_id:
+            reservations_query = reservations_query.exclude(
+                cart_session_id=str(current_sale_id)
+            )
+        
+        # Only count reservations from sales at THIS storefront
+        reserved_quantity = Decimal('0')
+        for reservation in reservations_query:
+            try:
+                from uuid import UUID
+                sale_id = UUID(str(reservation.cart_session_id))
+                # Check if this reservation's sale is for this storefront
+                from .models import Sale
+                sale = Sale.objects.filter(id=sale_id, storefront=storefront).first()
+                if sale:
+                    reserved_quantity += Decimal(str(reservation.quantity))
+            except (ValueError, TypeError):
+                # Invalid cart_session_id, skip
+                pass
+        
+        available_at_storefront = storefront_inv.quantity - sold_from_storefront - reserved_quantity
         
         if available_at_storefront < quantity:
             raise serializers.ValidationError({
                 'quantity': f'Insufficient storefront inventory for "{product.name}". '
                           f'Available: {available_at_storefront}, Requested: {quantity}. '
+                          f'(Total: {storefront_inv.quantity}, Sold: {sold_from_storefront}, Reserved: {reserved_quantity}) '
                           f'Create a transfer request to move more stock to this storefront.'
             })
         
