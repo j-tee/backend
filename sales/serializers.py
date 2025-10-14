@@ -587,16 +587,10 @@ class AddSaleItemSerializer(serializers.Serializer):
                           f'Please create a transfer request and fulfill it first.'
             })
         
-        # Calculate available quantity at storefront
-        # (StoreFrontInventory.quantity - already sold from this storefront)
-        from .models import SaleItem
-        sold_from_storefront = SaleItem.objects.filter(
-            product=product,
-            sale__storefront=storefront,
-            sale__status='COMPLETED'
-        ).aggregate(total=Sum('quantity'))['total'] or Decimal('0')
-        
-        available_at_storefront = storefront_inv.quantity - sold_from_storefront
+        # StoreFrontInventory.quantity is already the current inventory
+        # (it gets decremented by commit_stock() when sales are completed)
+        # So we just need to check the current quantity directly
+        available_at_storefront = storefront_inv.quantity
         
         if available_at_storefront < quantity:
             raise serializers.ValidationError({
