@@ -2427,7 +2427,26 @@ class StockAvailabilityView(APIView):
             product=product,
         ).first()
 
-        total_available = Decimal(str(inventory_entry.quantity)) if inventory_entry else Decimal('0')
+        # Get transferred quantity to storefront
+        transferred_quantity = Decimal(str(inventory_entry.quantity)) if inventory_entry else Decimal('0')
+        
+        # Calculate completed sales from this storefront
+        sold_quantity = Decimal('0')
+        if SALES_APP_AVAILABLE and SaleItem is not None:
+            sold = (
+                SaleItem.objects.filter(
+                    product=product,
+                    sale__storefront_id=storefront_id,
+                    sale__status='COMPLETED'
+                )
+                .aggregate(total=Sum('quantity'))
+            )
+            sold_quantity = Decimal(str(sold['total'] or 0))
+        
+        # Total available = transferred - sold
+        total_available = transferred_quantity - sold_quantity
+        if total_available < Decimal('0'):
+            total_available = Decimal('0')
 
         reserved_quantity = Decimal('0')
         reservations_data: list[dict] = []
@@ -2505,6 +2524,8 @@ class StockAvailabilityView(APIView):
             'total_available': self._decimal_to_native(total_available),
             'reserved_quantity': self._decimal_to_native(reserved_quantity),
             'unreserved_quantity': self._decimal_to_native(unreserved_quantity),
+            'transferred_quantity': self._decimal_to_native(transferred_quantity),
+            'sold_quantity': self._decimal_to_native(sold_quantity),
             'batches': batches_data,
             'reservations': reservations_data,
         }
