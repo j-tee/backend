@@ -619,6 +619,22 @@ class CompleteSaleSerializer(serializers.Serializer):
         min_value=Decimal('0')
     )
     notes = serializers.CharField(required=False, allow_blank=True)
+    # AR system fields (for credit sales)
+    due_date = serializers.DateField(required=False, allow_null=True)
+    ar_notes = serializers.CharField(required=False, allow_blank=True)
+    
+    def validate(self, data):
+        """Custom validation - skip payment validation for credit sales"""
+        payment_type = data.get('payment_type')
+        
+        # For credit sales, payments should be empty (will create AR instead)
+        if payment_type == 'CREDIT':
+            # Remove payments data if sent (frontend might send it by mistake)
+            data['payments'] = []
+        
+        return data
+
+
 
 
 class RecordPaymentSerializer(serializers.Serializer):
