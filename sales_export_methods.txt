@@ -1,0 +1,122 @@
+
+    def _handle_export(self, request, export_format):
+        """Handle export requests in CSV, Excel, or PDF format"""
+        # Get business ID
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return Response(
+                {'error': str(error)},
+                status=http_status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get date range
+        start_date, end_date, error = self.get_date_range(request)
+        if error:
+            return Response(
+                {'error': str(error)},
+                status=http_status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get base queryset
+        queryset = Sale.objects.filter(business_id=business_id)
+        
+        # Apply date filter
+        queryset = queryset.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
+        )
+        
+        # Apply optional filters
+        storefront_id = request.query_params.get('storefront_id')
+        if storefront_id:
+            queryset = queryset.filter(storefront_id=storefront_id)
+        
+        sale_type = request.query_params.get('sale_type')
+        if sale_type and sale_type in ['RETAIL', 'WHOLESALE']:
+            queryset = queryset.filter(type=sale_type)
+        
+        # Only completed sales
+        queryset = queryset.filter(status='COMPLETED')
+        
+        # Get period type
+        period_type = request.query_params.get('period_type', 'daily')
+        
+        # Build data
+        summary = self._build_summary(queryset, start_date, end_date, period_type, 0.0)
+        breakdown = self._build_period_breakdown(queryset, period_type)
+        top_hours = self._build_hourly_analysis(queryset)
+        
+        # Export based on format
+        if export_format == 'csv':
+            return self._export_csv(summary, breakdown, top_hours, start_date, end_date)
+        elif export_format == 'excel':
+            return Response(
+                {'error': 'Excel format not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        elif export_format == 'pdf':
+            return Response(
+                {'error': 'PDF format not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+    
+    def _export_csv(self, summary, breakdown, top_hours, start_date, end_date):
+        """Export sales summary as CSV"""
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Header
+        writer.writerow(['Sales Summary Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+        
+        # Summary section
+        writer.writerow(['SUMMARY METRICS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Sales (Revenue)', f"${summary['total_sales']:,.2f}"])
+        writer.writerow(['Total Transactions', summary['total_transactions']])
+        writer.writerow(['Average Transaction Value', f"${summary['average_transaction_value']:,.2f}"])
+        writer.writerow(['Total Items Sold', summary['total_items_sold']])
+        writer.writerow(['Total Customers', summary['total_customers']])
+        writer.writerow(['Total Discounts Given', f"${summary['total_discounts_given']:,.2f}"])
+        writer.writerow(['Net Sales', f"${summary['net_sales']:,.2f}"])
+        writer.writerow(['Growth Rate vs Previous Period', f"{summary['growth_rate']:.1f}%"])
+        writer.writerow([])
+        
+        # Daily breakdown section
+        writer.writerow(['DAILY BREAKDOWN'])
+        writer.writerow(['Date', 'Sales', 'Transactions', 'Avg Value', 'Items Sold', 'Customers'])
+        
+        for item in breakdown:
+            writer.writerow([
+                item['period'],
+                f"${item['sales']:,.2f}",
+                item['transactions'],
+                f"${item['avg_value']:,.2f}",
+                item['items_sold'],
+                item['customers']
+            ])
+        
+        writer.writerow([])
+        
+        # Top selling hours section
+        writer.writerow(['TOP SELLING HOURS'])
+        writer.writerow(['Hour', 'Sales', 'Transactions'])
+        
+        for item in top_hours:
+            hour_str = f"{item['hour']}:00" if item['hour'] < 12 else f"{item['hour']}:00"
+            writer.writerow([
+                hour_str,
+                f"${item['sales']:,.2f}",
+                item['transactions']
+            ])
+        
+        # Generate response
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        filename = f'sales-summary-{start_date}-to-{end_date}.csv'
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        
+        return response
+

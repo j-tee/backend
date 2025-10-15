@@ -95,7 +95,7 @@ class RevenueProfitReportView(BaseReportView):
         return ReportResponse.success(summary, results, metadata)
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
-        """Build summary metrics"""
+        """Build summary metrics with retail/wholesale breakdown"""
         
         # Get aggregated totals
         totals = queryset.aggregate(
@@ -119,25 +119,39 @@ class RevenueProfitReportView(BaseReportView):
             total_profit, total_revenue
         ) if total_revenue > 0 else Decimal('0.00')
         
-        # Revenue by sale type
-        revenue_by_type = {}
-        for sale_type in ['RETAIL', 'WHOLESALE']:
-            type_queryset = queryset.filter(type=sale_type)
-            type_totals = type_queryset.aggregate(revenue=Sum('total_amount'))
-            type_revenue = Decimal(str(type_totals['revenue'] or 0))
-            
-            if type_revenue > 0:
-                type_costs = ProfitCalculator.calculate_sale_costs(type_queryset)
-                type_profit = sum(costs['profit'] for costs in type_costs.values())
-                type_profit = ProfitCalculator.to_decimal(type_profit)
-                
-                revenue_by_type[sale_type] = {
-                    'revenue': float(type_revenue),
-                    'profit': float(type_profit),
-                    'margin': float(
-                        AggregationHelper.calculate_percentage(type_profit, type_revenue)
-                    )
-                }
+        # Retail metrics
+        retail_queryset = queryset.filter(type='RETAIL')
+        retail_totals = retail_queryset.aggregate(
+            revenue=Sum('total_amount'),
+            count=Count('id')
+        )
+        retail_revenue = Decimal(str(retail_totals['revenue'] or 0))
+        retail_count = retail_totals['count']
+        
+        retail_costs = ProfitCalculator.calculate_sale_costs(retail_queryset)
+        retail_profit = sum(costs['profit'] for costs in retail_costs.values())
+        retail_profit = ProfitCalculator.to_decimal(retail_profit)
+        retail_cost = retail_revenue - retail_profit
+        retail_margin = AggregationHelper.calculate_percentage(
+            retail_profit, retail_revenue
+        ) if retail_revenue > 0 else Decimal('0.00')
+        
+        # Wholesale metrics
+        wholesale_queryset = queryset.filter(type='WHOLESALE')
+        wholesale_totals = wholesale_queryset.aggregate(
+            revenue=Sum('total_amount'),
+            count=Count('id')
+        )
+        wholesale_revenue = Decimal(str(wholesale_totals['revenue'] or 0))
+        wholesale_count = wholesale_totals['count']
+        
+        wholesale_costs = ProfitCalculator.calculate_sale_costs(wholesale_queryset)
+        wholesale_profit = sum(costs['profit'] for costs in wholesale_costs.values())
+        wholesale_profit = ProfitCalculator.to_decimal(wholesale_profit)
+        wholesale_cost = wholesale_revenue - wholesale_profit
+        wholesale_margin = AggregationHelper.calculate_percentage(
+            wholesale_profit, wholesale_revenue
+        ) if wholesale_revenue > 0 else Decimal('0.00')
         
         # Calculate best and worst margins (simplified without DB calculation)
         best_margin = 0.0
@@ -165,13 +179,30 @@ class RevenueProfitReportView(BaseReportView):
             'average_sale_value': float(
                 total_revenue / total_count if total_count > 0 else 0
             ),
-            'revenue_by_type': revenue_by_type,
             'best_margin': float(best_margin),
             'worst_margin': float(worst_margin),
+            # Retail breakdown
+            'retail': {
+                'revenue': float(retail_revenue),
+                'cost': float(retail_cost),
+                'profit': float(retail_profit),
+                'profit_margin': float(retail_margin),
+                'orders': retail_count,
+                'avg_order_value': float(retail_revenue / retail_count if retail_count > 0 else 0),
+            },
+            # Wholesale breakdown
+            'wholesale': {
+                'revenue': float(wholesale_revenue),
+                'cost': float(wholesale_cost),
+                'profit': float(wholesale_profit),
+                'profit_margin': float(wholesale_margin),
+                'orders': wholesale_count,
+                'avg_order_value': float(wholesale_revenue / wholesale_count if wholesale_count > 0 else 0),
+            },
         }
     
     def _build_time_series(self, queryset, grouping: str) -> List[Dict[str, Any]]:
-        """Build time-series profit analysis"""
+        """Build time-series profit analysis with retail/wholesale breakdown"""
         
         # Select truncation function
         trunc_func = {
@@ -199,17 +230,48 @@ class RevenueProfitReportView(BaseReportView):
             revenue = Decimal(str(item['revenue'] or 0))
             count = item['count']
             
-            # Get sales for this period and calculate profit
-            period_sales = queryset.filter(created_at__date=period.date() if hasattr(period, 'date') else period)
+            # Get sales for this period
+            if grouping == 'daily':
+                period_sales = queryset.filter(created_at__date=period)
+            elif grouping == 'weekly':
+                period_sales = queryset.annotate(week=TruncWeek('created_at')).filter(week=period)
+            else:  # monthly
+                period_sales = queryset.annotate(month=TruncMonth('created_at')).filter(month=period)
+            
+            # Calculate overall profit
             sale_costs = ProfitCalculator.calculate_sale_costs(period_sales)
             profit = sum(costs['profit'] for costs in sale_costs.values())
             profit = ProfitCalculator.to_decimal(profit)
-            
             cost = revenue - profit
-            
             margin = AggregationHelper.calculate_percentage(
                 profit, revenue
             ) if revenue > 0 else Decimal('0.00')
+            
+            # Calculate retail metrics
+            retail_period_sales = period_sales.filter(type='RETAIL')
+            retail_totals = retail_period_sales.aggregate(
+                revenue=Sum('total_amount'),
+                count=Count('id')
+            )
+            retail_revenue = Decimal(str(retail_totals['revenue'] or 0))
+            retail_count = retail_totals['count']
+            
+            retail_costs = ProfitCalculator.calculate_sale_costs(retail_period_sales)
+            retail_profit = sum(costs['profit'] for costs in retail_costs.values())
+            retail_profit = ProfitCalculator.to_decimal(retail_profit)
+            
+            # Calculate wholesale metrics
+            wholesale_period_sales = period_sales.filter(type='WHOLESALE')
+            wholesale_totals = wholesale_period_sales.aggregate(
+                revenue=Sum('total_amount'),
+                count=Count('id')
+            )
+            wholesale_revenue = Decimal(str(wholesale_totals['revenue'] or 0))
+            wholesale_count = wholesale_totals['count']
+            
+            wholesale_costs = ProfitCalculator.calculate_sale_costs(wholesale_period_sales)
+            wholesale_profit = sum(costs['profit'] for costs in wholesale_costs.values())
+            wholesale_profit = ProfitCalculator.to_decimal(wholesale_profit)
             
             results.append({
                 'period': period.date().isoformat() if hasattr(period, 'date') else str(period),
@@ -219,6 +281,20 @@ class RevenueProfitReportView(BaseReportView):
                 'margin': float(margin),
                 'order_count': count,
                 'average_order_value': float(revenue / count if count > 0 else 0),
+                # Retail breakdown
+                'retail': {
+                    'revenue': float(retail_revenue),
+                    'profit': float(retail_profit),
+                    'orders': retail_count,
+                    'avg_order_value': float(retail_revenue / retail_count if retail_count > 0 else 0),
+                },
+                # Wholesale breakdown
+                'wholesale': {
+                    'revenue': float(wholesale_revenue),
+                    'profit': float(wholesale_profit),
+                    'orders': wholesale_count,
+                    'avg_order_value': float(wholesale_revenue / wholesale_count if wholesale_count > 0 else 0),
+                },
             })
         
         return results
@@ -278,6 +354,9 @@ class ARAgingReportView(BaseReportView):
             min_balance = Decimal('0')
         
         # Get customers with credit balances
+        # Query using AccountsReceivable table for accurate AR tracking
+        from sales.models import AccountsReceivable
+        
         customers_query = Customer.objects.filter(
             business_id=business_id,
             outstanding_balance__gt=min_balance
@@ -288,7 +367,7 @@ class ARAgingReportView(BaseReportView):
         if customer_id:
             customers_query = customers_query.filter(id=customer_id)
         
-        # Build aging data
+        # Build aging data using AccountsReceivable records
         aging_data = []
         total_ar = Decimal('0')
         aging_totals = {
@@ -299,30 +378,92 @@ class ARAgingReportView(BaseReportView):
             'over_90_days': Decimal('0'),
         }
         
+        # Retail/Wholesale aging totals
+        retail_aging_totals = {
+            'current': Decimal('0'),
+            '1_30_days': Decimal('0'),
+            '31_60_days': Decimal('0'),
+            '61_90_days': Decimal('0'),
+            'over_90_days': Decimal('0'),
+        }
+        wholesale_aging_totals = {
+            'current': Decimal('0'),
+            '1_30_days': Decimal('0'),
+            '31_60_days': Decimal('0'),
+            '61_90_days': Decimal('0'),
+            'over_90_days': Decimal('0'),
+        }
+        retail_ar = Decimal('0')
+        wholesale_ar = Decimal('0')
+        
         for customer in customers_query:
-            # Get customer's credit transactions to determine aging
-            # For now, we'll use a simplified approach based on outstanding_balance
-            # In a full implementation, we'd track individual invoices/transactions
-            
             balance = customer.outstanding_balance
             if balance <= 0:
                 continue
             
             total_ar += balance
             
-            # Simplified aging: distribute balance across buckets
-            # In reality, you'd track each credit transaction separately
-            # For now, assume all balance is in "current" bucket
-            # This is a placeholder that should be enhanced with actual transaction tracking
+            # Query AccountsReceivable records for this customer
+            # Use actual AR records with computed aging_category
+            ar_records = AccountsReceivable.objects.filter(
+                customer=customer,
+                status__in=['PENDING', 'PARTIAL', 'OVERDUE']
+            ).select_related('sale')
             
-            aging_buckets = self._calculate_aging_buckets(
-                customer, as_of_date, balance
-            )
+            # Initialize aging buckets for this customer
+            aging_buckets = {
+                'current': Decimal('0'),
+                '1_30_days': Decimal('0'),
+                '31_60_days': Decimal('0'),
+                '61_90_days': Decimal('0'),
+                'over_90_days': Decimal('0'),
+            }
             
-            for bucket, amount in aging_buckets.items():
+            retail_sales_amount = Decimal('0')
+            wholesale_sales_amount = Decimal('0')
+            retail_aging = {k: Decimal('0') for k in aging_buckets.keys()}
+            wholesale_aging = {k: Decimal('0') for k in aging_buckets.keys()}
+            
+            # Process each AR record using its auto-calculated aging_category
+            for ar in ar_records:
+                amount = ar.amount_outstanding
+                
+                # Map AR aging_category to report bucket names
+                if ar.aging_category == 'CURRENT':
+                    bucket = 'current'
+                elif ar.aging_category == '1-30_DAYS':
+                    bucket = '1_30_days'
+                elif ar.aging_category == '31-60_DAYS':
+                    bucket = '31_60_days'
+                elif ar.aging_category == '61-90_DAYS':
+                    bucket = '61_90_days'
+                elif ar.aging_category == 'OVER_90_DAYS':
+                    bucket = 'over_90_days'
+                else:
+                    bucket = 'current'  # Default fallback
+                
+                aging_buckets[bucket] += amount
                 aging_totals[bucket] += amount
+                
+                # Separate by retail/wholesale based on sale type
+                if ar.sale.type == 'RETAIL':
+                    retail_sales_amount += amount
+                    retail_ar += amount
+                    retail_aging[bucket] += amount
+                    retail_aging_totals[bucket] += amount
+                elif ar.sale.type == 'WHOLESALE':
+                    wholesale_sales_amount += amount
+                    wholesale_ar += amount
+                    wholesale_aging[bucket] += amount
+                    wholesale_aging_totals[bucket] += amount
             
-            # Calculate risk level
+            for bucket, amount in retail_aging.items():
+                retail_aging_totals[bucket] += amount
+            
+            for bucket, amount in wholesale_aging.items():
+                wholesale_aging_totals[bucket] += amount
+            
+            # Calculate risk level using actual aging data
             risk_level = self._calculate_risk_level(
                 aging_buckets, balance, customer.credit_limit
             )
@@ -346,6 +487,9 @@ class ARAgingReportView(BaseReportView):
                 '61_90_days': float(aging_buckets['61_90_days']),
                 'over_90_days': float(aging_buckets['over_90_days']),
                 'risk_level': risk_level,
+                # Retail/Wholesale breakdown using actual AR data
+                'retail_balance': float(retail_sales_amount),
+                'wholesale_balance': float(wholesale_sales_amount),
             })
         
         # Sort by balance descending
@@ -360,6 +504,15 @@ class ARAgingReportView(BaseReportView):
         
         at_risk_amount = aging_totals['61_90_days'] + aging_totals['over_90_days']
         
+        # Calculate retail/wholesale percentages
+        retail_percentage = AggregationHelper.calculate_percentage(
+            retail_ar, total_ar
+        ) if total_ar > 0 else Decimal('0.00')
+        
+        wholesale_percentage = AggregationHelper.calculate_percentage(
+            wholesale_ar, total_ar
+        ) if total_ar > 0 else Decimal('0.00')
+        
         summary = {
             'as_of_date': str(as_of_date),
             'total_ar_outstanding': float(total_ar),
@@ -373,6 +526,30 @@ class ARAgingReportView(BaseReportView):
             },
             'percentage_overdue': float(percentage_overdue),
             'at_risk_amount': float(at_risk_amount),
+            # Retail breakdown
+            'retail': {
+                'ar_outstanding': float(retail_ar),
+                'percentage_of_total': float(retail_percentage),
+                'aging_buckets': {
+                    'current': float(retail_aging_totals['current']),
+                    '1_30_days': float(retail_aging_totals['1_30_days']),
+                    '31_60_days': float(retail_aging_totals['31_60_days']),
+                    '61_90_days': float(retail_aging_totals['61_90_days']),
+                    'over_90_days': float(retail_aging_totals['over_90_days']),
+                },
+            },
+            # Wholesale breakdown
+            'wholesale': {
+                'ar_outstanding': float(wholesale_ar),
+                'percentage_of_total': float(wholesale_percentage),
+                'aging_buckets': {
+                    'current': float(wholesale_aging_totals['current']),
+                    '1_30_days': float(wholesale_aging_totals['1_30_days']),
+                    '31_60_days': float(wholesale_aging_totals['31_60_days']),
+                    '61_90_days': float(wholesale_aging_totals['61_90_days']),
+                    'over_90_days': float(wholesale_aging_totals['over_90_days']),
+                },
+            },
         }
         
         # Paginate
@@ -405,26 +582,20 @@ class ARAgingReportView(BaseReportView):
         """
         Calculate aging buckets for customer balance
         
-        NOTE: This is a simplified implementation.
-        In a full system, you'd track individual credit transactions
-        and age each one separately based on its transaction date.
+        NOTE: This method is deprecated. AR aging now uses AccountsReceivable
+        table which automatically calculates aging_category for each AR record.
+        
+        Kept for backward compatibility only.
         """
         
-        # For now, put all balance in "current" bucket
-        # This should be enhanced to track actual transaction dates
-        buckets = {
-            'current': balance,
+        # Return empty buckets - this method should not be used anymore
+        return {
+            'current': Decimal('0'),
             '1_30_days': Decimal('0'),
             '31_60_days': Decimal('0'),
             '61_90_days': Decimal('0'),
             'over_90_days': Decimal('0'),
         }
-        
-        # TODO: Enhance with actual transaction-level aging
-        # Query credit transactions, calculate days old for each
-        # Distribute balance across buckets based on transaction dates
-        
-        return buckets
     
     def _calculate_risk_level(
         self, aging_buckets: Dict[str, Decimal], balance: Decimal, credit_limit: Decimal
@@ -583,6 +754,48 @@ class CollectionRatesReportView(BaseReportView):
         # For sales with payments, calculate days between sale and last payment
         avg_days = self._calculate_average_collection_period(queryset)
         
+        # Calculate retail metrics
+        retail_queryset = queryset.filter(type='RETAIL')
+        retail_stats = retail_queryset.aggregate(
+            total_amount=Sum('total_amount'),
+            total_count=Count('id')
+        )
+        retail_sale_ids = retail_queryset.values_list('id', flat=True)
+        retail_collected = Payment.objects.filter(
+            sale_id__in=retail_sale_ids,
+            status='COMPLETED'
+        ).aggregate(collected_amount=Sum('amount_paid'))
+        
+        retail_amount = retail_stats['total_amount'] or Decimal('0.00')
+        retail_count = retail_stats['total_count'] or 0
+        retail_collected_amount = retail_collected['collected_amount'] or Decimal('0.00')
+        retail_collection_rate = (
+            float(retail_collected_amount / retail_amount * 100)
+            if retail_amount > 0 else 0.0
+        )
+        retail_avg_days = self._calculate_average_collection_period(retail_queryset)
+        
+        # Calculate wholesale metrics
+        wholesale_queryset = queryset.filter(type='WHOLESALE')
+        wholesale_stats = wholesale_queryset.aggregate(
+            total_amount=Sum('total_amount'),
+            total_count=Count('id')
+        )
+        wholesale_sale_ids = wholesale_queryset.values_list('id', flat=True)
+        wholesale_collected = Payment.objects.filter(
+            sale_id__in=wholesale_sale_ids,
+            status='COMPLETED'
+        ).aggregate(collected_amount=Sum('amount_paid'))
+        
+        wholesale_amount = wholesale_stats['total_amount'] or Decimal('0.00')
+        wholesale_count = wholesale_stats['total_count'] or 0
+        wholesale_collected_amount = wholesale_collected['collected_amount'] or Decimal('0.00')
+        wholesale_collection_rate = (
+            float(wholesale_collected_amount / wholesale_amount * 100)
+            if wholesale_amount > 0 else 0.0
+        )
+        wholesale_avg_days = self._calculate_average_collection_period(wholesale_queryset)
+        
         return {
             'total_credit_sales_amount': str(total_amount),
             'total_collected_amount': str(collected_amount),
@@ -591,7 +804,23 @@ class CollectionRatesReportView(BaseReportView):
             'average_collection_period_days': round(avg_days, 1),
             'total_credit_sales_count': total_count,
             'collected_sales_count': collected_count,
-            'outstanding_sales_count': outstanding_count
+            'outstanding_sales_count': outstanding_count,
+            # Retail breakdown
+            'retail': {
+                'credit_sales_amount': float(retail_amount),
+                'collected_amount': float(retail_collected_amount),
+                'collection_rate': round(retail_collection_rate, 2),
+                'average_collection_period_days': round(retail_avg_days, 1),
+                'credit_sales_count': retail_count,
+            },
+            # Wholesale breakdown
+            'wholesale': {
+                'credit_sales_amount': float(wholesale_amount),
+                'collected_amount': float(wholesale_collected_amount),
+                'collection_rate': round(wholesale_collection_rate, 2),
+                'average_collection_period_days': round(wholesale_avg_days, 1),
+                'credit_sales_count': wholesale_count,
+            },
         }
     
     def _calculate_average_collection_period(self, queryset) -> float:
@@ -665,6 +894,44 @@ class CollectionRatesReportView(BaseReportView):
             # Calculate average days for this period
             avg_days = self._calculate_average_collection_period(period_sales)
             
+            # Calculate retail metrics for period
+            retail_period = period_sales.filter(type='RETAIL')
+            retail_stats = retail_period.aggregate(
+                credit_sales_amount=Sum('total_amount'),
+                count=Count('id')
+            )
+            retail_sale_ids = retail_period.values_list('id', flat=True)
+            retail_collected_stats = Payment.objects.filter(
+                sale_id__in=retail_sale_ids,
+                status='COMPLETED'
+            ).aggregate(collected_amount=Sum('amount_paid'))
+            
+            retail_sales_amt = retail_stats['credit_sales_amount'] or Decimal('0.00')
+            retail_collected_amt = retail_collected_stats['collected_amount'] or Decimal('0.00')
+            retail_rate = (
+                float(retail_collected_amt / retail_sales_amt * 100)
+                if retail_sales_amt > 0 else 0.0
+            )
+            
+            # Calculate wholesale metrics for period
+            wholesale_period = period_sales.filter(type='WHOLESALE')
+            wholesale_stats = wholesale_period.aggregate(
+                credit_sales_amount=Sum('total_amount'),
+                count=Count('id')
+            )
+            wholesale_sale_ids = wholesale_period.values_list('id', flat=True)
+            wholesale_collected_stats = Payment.objects.filter(
+                sale_id__in=wholesale_sale_ids,
+                status='COMPLETED'
+            ).aggregate(collected_amount=Sum('amount_paid'))
+            
+            wholesale_sales_amt = wholesale_stats['credit_sales_amount'] or Decimal('0.00')
+            wholesale_collected_amt = wholesale_collected_stats['collected_amount'] or Decimal('0.00')
+            wholesale_rate = (
+                float(wholesale_collected_amt / wholesale_sales_amt * 100)
+                if wholesale_sales_amt > 0 else 0.0
+            )
+            
             time_series.append({
                 'period': period_date.strftime('%Y-%m-%d' if grouping == 'daily' else '%Y-%m-%d'),
                 'period_start': period_date.strftime('%Y-%m-%d'),
@@ -672,7 +939,19 @@ class CollectionRatesReportView(BaseReportView):
                 'credit_sales_amount': str(credit_sales_amount),
                 'collected_amount': str(collected_amount),
                 'collection_rate': round(collection_rate, 2),
-                'average_days_to_collect': round(avg_days, 1)
+                'average_days_to_collect': round(avg_days, 1),
+                # Retail breakdown
+                'retail': {
+                    'credit_sales_amount': float(retail_sales_amt),
+                    'collected_amount': float(retail_collected_amt),
+                    'collection_rate': round(retail_rate, 2),
+                },
+                # Wholesale breakdown
+                'wholesale': {
+                    'credit_sales_amount': float(wholesale_sales_amt),
+                    'collected_amount': float(wholesale_collected_amt),
+                    'collection_rate': round(wholesale_rate, 2),
+                },
             })
         
         return time_series
@@ -832,6 +1111,20 @@ class CashFlowReportView(BaseReportView):
             sale__type='CREDIT'
         ).aggregate(total=Sum('amount_paid'))['total'] or Decimal('0.00')
         
+        # Retail inflows
+        retail_payments = queryset.filter(sale__type='RETAIL')
+        retail_inflows = retail_payments.aggregate(
+            total=Sum('amount_paid')
+        )['total'] or Decimal('0.00')
+        retail_count = retail_payments.count()
+        
+        # Wholesale inflows
+        wholesale_payments = queryset.filter(sale__type='WHOLESALE')
+        wholesale_inflows = wholesale_payments.aggregate(
+            total=Sum('amount_paid')
+        )['total'] or Decimal('0.00')
+        wholesale_count = wholesale_payments.count()
+        
         # Note: No outflows in Tier 1
         total_outflows = Decimal('0.00')
         net_cash_flow = total_inflows - total_outflows
@@ -851,7 +1144,18 @@ class CashFlowReportView(BaseReportView):
             'inflow_by_type': {
                 'cash_sales': str(cash_sales_amount),
                 'credit_payments': str(credit_payments_amount)
-            }
+            },
+            # Retail/Wholesale breakdown
+            'retail': {
+                'inflows': float(retail_inflows),
+                'transaction_count': retail_count,
+                'average_transaction': float(retail_inflows / retail_count if retail_count > 0 else 0),
+            },
+            'wholesale': {
+                'inflows': float(wholesale_inflows),
+                'transaction_count': wholesale_count,
+                'average_transaction': float(wholesale_inflows / wholesale_count if wholesale_count > 0 else 0),
+            },
         }
     
     def _build_time_series(self, queryset, grouping: str, start_date: date, end_date: date) -> List[Dict]:
@@ -883,6 +1187,28 @@ class CashFlowReportView(BaseReportView):
             net_flow = inflows - outflows
             running_balance += net_flow
             
+            # Get retail inflows for this period
+            if grouping == 'daily':
+                period_queryset = queryset.filter(created_at__date=period_date)
+            elif grouping == 'weekly':
+                period_queryset = queryset.annotate(week=TruncWeek('created_at')).filter(week=period_date)
+            else:  # monthly
+                period_queryset = queryset.annotate(month=TruncMonth('created_at')).filter(month=period_date)
+            
+            retail_stats = period_queryset.filter(sale__type='RETAIL').aggregate(
+                inflows=Sum('amount_paid'),
+                count=Count('id')
+            )
+            retail_inflows = retail_stats['inflows'] or Decimal('0.00')
+            retail_count = retail_stats['count'] or 0
+            
+            wholesale_stats = period_queryset.filter(sale__type='WHOLESALE').aggregate(
+                inflows=Sum('amount_paid'),
+                count=Count('id')
+            )
+            wholesale_inflows = wholesale_stats['inflows'] or Decimal('0.00')
+            wholesale_count = wholesale_stats['count'] or 0
+            
             time_series.append({
                 'period': period_date.strftime('%Y-%m-%d'),
                 'period_start': period_date.strftime('%Y-%m-%d'),
@@ -891,7 +1217,16 @@ class CashFlowReportView(BaseReportView):
                 'outflows': str(outflows),
                 'net_flow': str(net_flow),
                 'running_balance': str(running_balance),
-                'transaction_count': period_item['transaction_count']
+                'transaction_count': period_item['transaction_count'],
+                # Retail/Wholesale breakdown
+                'retail': {
+                    'inflows': float(retail_inflows),
+                    'count': retail_count,
+                },
+                'wholesale': {
+                    'inflows': float(wholesale_inflows),
+                    'count': wholesale_count,
+                },
             })
         
         return time_series

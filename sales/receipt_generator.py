@@ -137,6 +137,9 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
     
     # Amount due (for credit sales)
     amount_due = receipt_data.get('amount_due', 0)
+    payment_type = receipt_data.get('payment_type', 'CASH')
+    is_credit_sale = payment_type == 'CREDIT'
+    
     amount_due_row = ''
     if float(amount_due) > 0:
         amount_due_row = f'''
@@ -144,6 +147,19 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
             <td colspan="3" class="text-right"><strong>AMOUNT DUE:</strong></td>
             <td class="amount text-danger"><strong>{format_currency(amount_due)}</strong></td>
         </tr>
+        '''
+    
+    # CREDIT SALE banner (displayed prominently if credit sale)
+    credit_banner = ''
+    if is_credit_sale and float(amount_due) > 0:
+        credit_banner = '''
+        <div class="credit-sale-banner">
+            <div class="credit-alert">
+                <h2>⚠️ CREDIT SALE ⚠️</h2>
+                <p class="credit-message">Payment on credit - Customer to pay later</p>
+                <p class="credit-due">Amount Due: ''' + format_currency(amount_due) + '''</p>
+            </div>
+        </div>
         '''
     
     # Build complete HTML
@@ -158,6 +174,24 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
         @media print {{
             body {{ margin: 0; padding: 0; }}
             .no-print {{ display: none !important; }}
+            
+            /* Ensure credit banner is visible when printed */
+            .credit-sale-banner {{
+                background: #f8d7da !important;
+                border: 3px solid #dc3545 !important;
+                padding: 15px !important;
+                page-break-inside: avoid;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
+            
+            .credit-alert h2,
+            .credit-message,
+            .credit-due {{
+                color: #721c24 !important;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }}
         }}
         
         * {{
@@ -227,6 +261,40 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
             background: #d1ecf1;
             border-color: #0c5460;
             color: #0c5460;
+        }}
+        
+        /* Credit Sale Banner */
+        .credit-sale-banner {{
+            background: #f8d7da;
+            border: 3px solid #dc3545;
+            padding: 15px;
+            margin: 15px 0;
+            text-align: center;
+        }}
+        
+        .credit-alert {{
+            color: #721c24;
+        }}
+        
+        .credit-alert h2 {{
+            font-size: 20px;
+            font-weight: bold;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+        }}
+        
+        .credit-message {{
+            font-size: 13px;
+            margin-bottom: 8px;
+            font-weight: bold;
+        }}
+        
+        .credit-due {{
+            font-size: 16px;
+            font-weight: bold;
+            margin-top: 8px;
+            color: #dc3545;
         }}
         
         /* Receipt Info */
@@ -422,6 +490,9 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
         
         <!-- Sale Type Badge -->
         {sale_type_badge}
+        
+        <!-- CREDIT SALE Banner (if applicable) -->
+        {credit_banner}
         
         <!-- Receipt Information -->
         <div class="receipt-info">

@@ -130,6 +130,9 @@ class Customer(models.Model):
         """
         Update customer outstanding balance and create audit trail
         
+        DEPRECATED: This method can create orphaned AR data.
+        Use recalculate_balance() instead to ensure balance matches actual sales.
+        
         Args:
             amount: Amount to add (positive) or subtract (negative)
             transaction_type: Type of transaction
@@ -148,6 +151,71 @@ class Customer(models.Model):
             balance_before=balance_before,
             balance_after=self.outstanding_balance
         )
+    
+    def recalculate_balance(self, save=True):
+        """
+        Recalculate outstanding balance from actual PENDING/PARTIAL sales
+        This ensures balance is always tied to real sales (no orphaned AR)
+        
+        Args:
+            save: Whether to save the customer after recalculation
+            
+        Returns:
+            tuple: (old_balance, new_balance, difference)
+        """
+        from django.db.models import Sum
+        
+        old_balance = self.outstanding_balance
+        
+        # Calculate from actual sales with AR
+        new_balance = Sale.objects.filter(
+            customer=self,
+            status__in=['PENDING', 'PARTIAL']
+        ).aggregate(
+            total=Sum('amount_due')
+        )['total'] or Decimal('0')
+        
+        difference = new_balance - old_balance
+        
+        if save and old_balance != new_balance:
+            self.outstanding_balance = new_balance
+            self.save(update_fields=['outstanding_balance'])
+            
+            # Log the recalculation
+            CreditTransaction.objects.create(
+                customer=self,
+                transaction_type='BALANCE_SYNC',
+                amount=difference,
+                balance_before=old_balance,
+                balance_after=new_balance
+            )
+        
+        return (old_balance, new_balance, difference)
+    
+    def validate_balance_integrity(self):
+        """
+        Validate that outstanding_balance matches actual sales
+        
+        Raises:
+            ValidationError if balance doesn't match
+        """
+        from django.core.exceptions import ValidationError
+        from django.db.models import Sum
+        
+        actual_balance = Sale.objects.filter(
+            customer=self,
+            status__in=['PENDING', 'PARTIAL']
+        ).aggregate(
+            total=Sum('amount_due')
+        )['total'] or Decimal('0')
+        
+        if self.outstanding_balance != actual_balance:
+            raise ValidationError(
+                f"Customer {self.name} balance mismatch: "
+                f"outstanding_balance=₱{self.outstanding_balance}, "
+                f"actual sales AR=₱{actual_balance}. "
+                f"Call recalculate_balance() to fix."
+            )
 
 
 class StockReservation(models.Model):
@@ -428,6 +496,13 @@ class Sale(models.Model):
     
     # Payment
     payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES, default=PAYMENT_TYPE_CASH)
+    
+    # Credit sale flag - NEW for AR system
+    is_credit_sale = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text='True if this sale is on credit (AR), False for cash/card/mobile payments'
+    )
     
     # Manager override for credit limit
     manager_override = models.BooleanField(
@@ -814,7 +889,73 @@ class Sale(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save - receipt number only generated on completion"""
+        # Validate balance integrity before saving
+        self._validate_balance_integrity()
         super().save(*args, **kwargs)
+    
+    def _validate_balance_integrity(self):
+        """
+        Validate that status and balance fields are consistent
+        Prevents orphaned AR data and invalid states
+        """
+        from django.core.exceptions import ValidationError
+        
+        # Skip validation for DRAFT sales (cart in progress)
+        if self.status == 'DRAFT':
+            return
+        
+        # Check: COMPLETED sales must have amount_due = 0
+        if self.status == 'COMPLETED' and self.amount_due != Decimal('0'):
+            raise ValidationError(
+                f"COMPLETED sale cannot have amount_due > 0. "
+                f"Current amount_due: ₱{self.amount_due}"
+            )
+        
+        # Check: CANCELLED sales must have amount_due = 0
+        if self.status == 'CANCELLED' and self.amount_due != Decimal('0'):
+            raise ValidationError(
+                f"CANCELLED sale cannot have amount_due != 0. "
+                f"Current amount_due: ₱{self.amount_due}. "
+                f"Set amount_due to 0 before cancelling."
+            )
+        
+        # Check: REFUNDED sales must have amount_due = 0
+        if self.status == 'REFUNDED' and self.amount_due != Decimal('0'):
+            raise ValidationError(
+                f"REFUNDED sale cannot have amount_due != 0. "
+                f"Current amount_due: ₱{self.amount_due}"
+            )
+        
+        # Check: PENDING sales must have amount_paid = 0
+        if self.status == 'PENDING' and self.amount_paid != Decimal('0'):
+            raise ValidationError(
+                f"PENDING sale must have amount_paid = 0. "
+                f"Current amount_paid: ₱{self.amount_paid}. "
+                f"Use PARTIAL status for partially paid sales."
+            )
+        
+        # Check: PARTIAL sales must have both amount_paid > 0 and amount_due > 0
+        if self.status == 'PARTIAL':
+            if self.amount_paid <= Decimal('0'):
+                raise ValidationError(
+                    f"PARTIAL sale must have amount_paid > 0. "
+                    f"Current amount_paid: ₱{self.amount_paid}"
+                )
+            if self.amount_due <= Decimal('0'):
+                raise ValidationError(
+                    f"PARTIAL sale must have amount_due > 0. "
+                    f"Current amount_due: ₱{self.amount_due}. "
+                    f"Use COMPLETED status if fully paid."
+                )
+        
+        # Check: total_amount should equal amount_paid + amount_due (allow 1 cent rounding)
+        expected_total = self.amount_paid + self.amount_due
+        if abs(self.total_amount - expected_total) > Decimal('0.01'):
+            raise ValidationError(
+                f"Sale total inconsistent: "
+                f"total_amount (₱{self.total_amount}) must equal "
+                f"amount_paid (₱{self.amount_paid}) + amount_due (₱{self.amount_due}) = ₱{expected_total}"
+            )
 
 
 class SaleItem(models.Model):
@@ -1114,6 +1255,289 @@ class CreditTransaction(models.Model):
     
     def __str__(self):
         return f"{self.customer.name} - {self.transaction_type} - {self.amount}"
+
+
+class AccountsReceivable(models.Model):
+    """
+    Dedicated model for managing credit sales (AR).
+    Completely separate from Payment flow.
+    Each credit sale gets one AR record.
+    """
+    
+    AR_STATUS_CHOICES = [
+        ('PENDING', 'Pending'),           # Not paid at all
+        ('PARTIAL', 'Partially Paid'),    # Some payments received
+        ('PAID', 'Fully Paid'),           # All paid
+        ('WRITTEN_OFF', 'Written Off'),   # Bad debt
+        ('IN_COLLECTION', 'In Collection'), # Handed to collections
+    ]
+    
+    AGING_CATEGORY_CHOICES = [
+        ('CURRENT', '0-30 days'),
+        ('30_DAYS', '31-60 days'),
+        ('60_DAYS', '61-90 days'),
+        ('90_PLUS', '90+ days'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Link to credit sale (one-to-one)
+    sale = models.OneToOneField(
+        Sale,
+        on_delete=models.PROTECT,  # Cannot delete sale with AR
+        related_name='accounts_receivable'
+    )
+    
+    # Customer info
+    customer = models.ForeignKey(
+        Customer,
+        on_delete=models.PROTECT,
+        related_name='accounts_receivable'
+    )
+    
+    # AR amounts
+    original_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text='Original credit amount'
+    )
+    
+    amount_paid = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text='Total amount paid so far'
+    )
+    
+    amount_outstanding = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text='Remaining balance'
+    )
+    
+    # Status tracking
+    status = models.CharField(
+        max_length=20,
+        choices=AR_STATUS_CHOICES,
+        default='PENDING',
+        db_index=True
+    )
+    
+    # Payment tracking
+    due_date = models.DateField(
+        null=True,
+        blank=True,
+        help_text='Expected payment date',
+        db_index=True
+    )
+    
+    days_outstanding = models.IntegerField(
+        default=0,
+        help_text='Days since sale created',
+        db_index=True
+    )
+    
+    aging_category = models.CharField(
+        max_length=20,
+        choices=AGING_CATEGORY_CHOICES,
+        default='CURRENT',
+        db_index=True
+    )
+    
+    # Collection management
+    last_reminder_sent = models.DateTimeField(null=True, blank=True)
+    reminder_count = models.IntegerField(default=0)
+    
+    assigned_to = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='assigned_ar',
+        help_text='Collection agent assigned'
+    )
+    
+    # Notes
+    notes = models.TextField(blank=True)
+    
+    # Audit
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_ar'
+    )
+    
+    class Meta:
+        db_table = 'accounts_receivable'
+        ordering = ['-created_at']
+        verbose_name = 'Accounts Receivable'
+        verbose_name_plural = 'Accounts Receivable'
+        indexes = [
+            models.Index(fields=['customer', 'status']),
+            models.Index(fields=['status', 'aging_category']),
+            models.Index(fields=['due_date']),
+            models.Index(fields=['days_outstanding']),
+            models.Index(fields=['assigned_to', 'status']),
+        ]
+    
+    def __str__(self):
+        return f"AR {self.sale.receipt_number} - {self.customer.name} - {self.amount_outstanding}"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate outstanding
+        self.amount_outstanding = self.original_amount - self.amount_paid
+        
+        # Auto-update status based on amounts
+        if self.amount_outstanding <= 0:
+            self.status = 'PAID'
+        elif self.amount_paid > 0 and self.status not in ['WRITTEN_OFF', 'IN_COLLECTION']:
+            self.status = 'PARTIAL'
+        elif self.status not in ['WRITTEN_OFF', 'IN_COLLECTION', 'PARTIAL']:
+            self.status = 'PENDING'
+        
+        # Auto-calculate days outstanding
+        from django.utils import timezone
+        self.days_outstanding = (timezone.now().date() - self.sale.created_at.date()).days
+        
+        # Auto-calculate aging category
+        if self.days_outstanding <= 30:
+            self.aging_category = 'CURRENT'
+        elif self.days_outstanding <= 60:
+            self.aging_category = '30_DAYS'
+        elif self.days_outstanding <= 90:
+            self.aging_category = '60_DAYS'
+        else:
+            self.aging_category = '90_PLUS'
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_overdue(self):
+        """Check if payment is overdue"""
+        if not self.due_date:
+            return False
+        from django.utils import timezone
+        return timezone.now().date() > self.due_date and self.amount_outstanding > 0
+    
+    @property
+    def payment_percentage(self):
+        """Percentage of AR paid"""
+        if self.original_amount == 0:
+            return Decimal('0.00')
+        return (self.amount_paid / self.original_amount) * 100
+    
+    @property
+    def days_overdue(self):
+        """Days past due date"""
+        if not self.is_overdue:
+            return 0
+        from django.utils import timezone
+        return (timezone.now().date() - self.due_date).days
+
+
+class ARPayment(models.Model):
+    """
+    Payments against AR - completely separate from Payment model.
+    Records actual money received to settle credit sales.
+    """
+    
+    PAYMENT_METHOD_CHOICES = [
+        ('CASH', 'Cash'),
+        ('MOMO', 'Mobile Money'),
+        ('CARD', 'Card'),
+        ('BANK_TRANSFER', 'Bank Transfer'),
+        ('CHECK', 'Check'),
+        # NOTE: NO 'CREDIT' - these are actual payments, not AR
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Link to AR
+    accounts_receivable = models.ForeignKey(
+        AccountsReceivable,
+        on_delete=models.PROTECT,
+        related_name='ar_payments'
+    )
+    
+    # Payment details
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))]
+    )
+    
+    payment_method = models.CharField(
+        max_length=20,
+        choices=PAYMENT_METHOD_CHOICES,
+        db_index=True
+    )
+    
+    payment_date = models.DateTimeField(default=timezone.now, db_index=True)
+    
+    # Transaction tracking
+    transaction_id = models.CharField(max_length=255, blank=True)
+    reference_number = models.CharField(max_length=100, blank=True)
+    
+    # Audit
+    received_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='received_ar_payments'
+    )
+    
+    notes = models.TextField(blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'ar_payments'
+        ordering = ['-payment_date']
+        verbose_name = 'AR Payment'
+        verbose_name_plural = 'AR Payments'
+        indexes = [
+            models.Index(fields=['accounts_receivable', 'payment_date']),
+            models.Index(fields=['payment_method', 'payment_date']),
+            models.Index(fields=['received_by', 'payment_date']),
+        ]
+    
+    def __str__(self):
+        return f"AR Payment {self.amount} - {self.payment_method} - {self.accounts_receivable.sale.receipt_number}"
+    
+    def save(self, *args, **kwargs):
+        is_new = self._state.adding
+        super().save(*args, **kwargs)
+        
+        if is_new:
+            # Auto-update AR amounts
+            ar = self.accounts_receivable
+            ar.amount_paid = ar.ar_payments.aggregate(
+                total=Sum('amount')
+            )['total'] or Decimal('0.00')
+            ar.save()
+            
+            # Update customer balance
+            customer = ar.customer
+            customer.outstanding_balance = customer.accounts_receivable.filter(
+                status__in=['PENDING', 'PARTIAL']
+            ).aggregate(
+                total=Sum('amount_outstanding')
+            )['total'] or Decimal('0.00')
+            customer.save()
+            
+            # Update sale amounts
+            sale = ar.sale
+            sale.amount_paid = ar.amount_paid
+            sale.amount_due = ar.amount_outstanding
+            
+            if ar.status == 'PAID':
+                sale.status = 'COMPLETED'
+            elif ar.status == 'PARTIAL':
+                sale.status = 'PARTIAL'
+            
+            sale.save()
 
 
 class AuditLog(models.Model):

@@ -17,7 +17,8 @@ from django.core.exceptions import ValidationError
 
 from .models import (
     Customer, Sale, SaleItem, Payment, Refund, RefundItem,
-    CreditTransaction, StockReservation, AuditLog
+    CreditTransaction, StockReservation, AuditLog,
+    AccountsReceivable, ARPayment  # NEW: AR system models
 )
 from .serializers import (
     CustomerSerializer, SaleSerializer, SaleItemSerializer,
@@ -452,7 +453,19 @@ class SaleViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
-        """Complete sale (checkout)"""
+        """
+        Complete sale - routes to either payment flow or credit flow.
+        
+        Payment Flow (is_credit_sale=False):
+            - Creates Payment records
+            - Processes actual payments
+            - Completes sale immediately if fully paid
+        
+        Credit Flow (is_credit_sale=True):
+            - Creates AccountsReceivable record
+            - Updates customer credit balance
+            - Sale remains PENDING until payments received
+        """
         sale = self.get_object()
         
         serializer = CompleteSaleSerializer(data=request.data)
@@ -460,16 +473,39 @@ class SaleViewSet(viewsets.ModelViewSet):
         
         data = serializer.validated_data
         
+        # Determine if this is a credit sale
+        is_credit = data.get('payment_type') == 'CREDIT'
+        
+        # Route to appropriate flow
+        if is_credit:
+            return self._complete_credit_sale(sale, request, data)
+        else:
+            return self._complete_payment_sale(sale, request, data)
+    
+    def _complete_payment_sale(self, sale, request, data):
+        """
+        PAYMENT FLOW - for cash/card/mobile sales.
+        Creates Payment records and completes sale.
+        """
         with transaction.atomic():
             # Update sale fields
             sale.payment_type = data['payment_type']
             sale.discount_amount = data.get('discount_amount', Decimal('0'))
             sale.tax_amount = data.get('tax_amount', Decimal('0'))
+            sale.is_credit_sale = False  # Mark as payment sale
             if data.get('notes'):
                 sale.notes = data['notes']
-
-            # Process payments if provided
+            
+            # Validate payments exist for non-credit sales
             payments_data = data.get('payments', [])
+            if not payments_data:
+                return Response(
+                    {'error': 'Payment sales must have payment records'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create Payment records
+            total_paid = Decimal('0.00')
             for payment_data in payments_data:
                 Payment.objects.create(
                     sale=sale,
@@ -479,12 +515,14 @@ class SaleViewSet(viewsets.ModelViewSet):
                     status='SUCCESSFUL',
                     processed_by=request.user
                 )
-                sale.amount_paid += payment_data['amount_paid']
-
-            # Recalculate totals after payments have been applied
+                total_paid += payment_data['amount_paid']
+            
+            sale.amount_paid = total_paid
+            
+            # Recalculate totals
             sale.calculate_totals()
             sale.save()
-
+            
             # Complete the sale
             try:
                 sale.complete_sale()
@@ -498,9 +536,10 @@ class SaleViewSet(viewsets.ModelViewSet):
                         'receipt_number': sale.receipt_number,
                         'total_amount': str(sale.total_amount),
                         'payment_type': sale.payment_type,
-                        'status': sale.status
+                        'status': sale.status,
+                        'flow': 'payment'
                     },
-                    description=f'Sale {sale.receipt_number} completed',
+                    description=f'Sale {sale.receipt_number} completed via payment flow',
                     ip_address=request.META.get('REMOTE_ADDR'),
                     user_agent=request.META.get('HTTP_USER_AGENT')
                 )
@@ -514,6 +553,309 @@ class SaleViewSet(viewsets.ModelViewSet):
                     {'error': str(e)},
                     status=status.HTTP_400_BAD_REQUEST
                 )
+    
+    def _complete_credit_sale(self, sale, request, data):
+        """
+        CREDIT FLOW - for AR sales.
+        Creates AccountsReceivable record instead of Payment records.
+        """
+        with transaction.atomic():
+            # Update sale fields
+            sale.payment_type = 'CREDIT'
+            sale.discount_amount = data.get('discount_amount', Decimal('0'))
+            sale.tax_amount = data.get('tax_amount', Decimal('0'))
+            sale.is_credit_sale = True  # Mark as credit sale
+            sale.amount_paid = Decimal('0.00')  # No payment yet
+            if data.get('notes'):
+                sale.notes = data['notes']
+            
+            # Recalculate totals
+            sale.calculate_totals()
+            
+            # Set amount_due to total (nothing paid yet)
+            sale.amount_due = sale.total_amount
+            sale.save()
+            
+            # Complete the sale (commits stock, generates receipt number)
+            try:
+                # Validate sale can be completed
+                if sale.status != 'DRAFT':
+                    raise ValidationError(f"Cannot complete sale with status {sale.status}")
+                
+                if not sale.sale_items.exists():
+                    raise ValidationError("Cannot complete sale without items")
+                
+                # Generate receipt number if not set
+                if not sale.receipt_number:
+                    sale.receipt_number = sale.generate_receipt_number()
+                
+                # Commit stock
+                sale.commit_stock()
+                
+                # Release reservations
+                sale.release_reservations(delete=True)
+                sale.cart_session_id = None
+                
+                # Set status to PENDING (awaiting payment)
+                sale.status = 'PENDING'
+                sale.completed_at = timezone.now()
+                sale.save()
+                
+                # Get customer's old balance for audit trail
+                old_balance = sale.customer.outstanding_balance if sale.customer else Decimal('0.00')
+                
+                # Create AR record
+                due_date = data.get('due_date')  # Optional expected payment date
+                
+                ar = AccountsReceivable.objects.create(
+                    sale=sale,
+                    customer=sale.customer,
+                    original_amount=sale.total_amount,
+                    amount_paid=Decimal('0.00'),
+                    amount_outstanding=sale.total_amount,
+                    due_date=due_date,
+                    created_by=request.user,
+                    notes=data.get('ar_notes', '')
+                )
+                
+                # Update customer balance
+                if sale.customer:
+                    sale.customer.outstanding_balance += sale.total_amount
+                    sale.customer.save()
+                    
+                    # Create audit trail
+                    CreditTransaction.objects.create(
+                        customer=sale.customer,
+                        transaction_type='CREDIT_SALE',
+                        amount=sale.total_amount,
+                        balance_before=old_balance,
+                        balance_after=sale.customer.outstanding_balance,
+                        reference_id=ar.id,  # Link to AR record
+                        description=f'Credit sale {sale.receipt_number}',
+                        created_by=request.user
+                    )
+                
+                # Log completion
+                AuditLog.log_event(
+                    event_type='sale.completed',
+                    user=request.user,
+                    sale=sale,
+                    event_data={
+                        'receipt_number': sale.receipt_number,
+                        'total_amount': str(sale.total_amount),
+                        'payment_type': 'CREDIT',
+                        'status': sale.status,
+                        'flow': 'credit',
+                        'ar_id': str(ar.id),
+                        'amount_due': str(ar.amount_outstanding)
+                    },
+                    description=f'Credit sale {sale.receipt_number} completed via AR flow',
+                    ip_address=request.META.get('REMOTE_ADDR'),
+                    user_agent=request.META.get('HTTP_USER_AGENT')
+                )
+                
+                # Return sale data with AR info
+                response_data = SaleSerializer(sale).data
+                response_data['ar'] = {
+                    'id': str(ar.id),
+                    'amount_outstanding': str(ar.amount_outstanding),
+                    'due_date': ar.due_date.isoformat() if ar.due_date else None,
+                    'status': ar.status,
+                    'aging_category': ar.aging_category
+                }
+                
+                return Response(
+                    response_data,
+                    status=status.HTTP_200_OK
+                )
+                
+            except Exception as e:
+                return Response(
+                    {'error': str(e)},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+    
+    @action(detail=True, methods=['post'], url_path='ar-payment')
+    def record_ar_payment(self, request, pk=None):
+        """
+        Record payment against credit sale AR.
+        
+        This endpoint is for recording payments when a customer pays back
+        their credit. It creates an ARPayment record (not a Payment record)
+        and automatically updates:
+        - AR amounts and status
+        - Customer outstanding balance
+        - Sale amount_paid/amount_due/status
+        - CreditTransaction audit trail
+        
+        Request body:
+            {
+                "amount": "500.00",
+                "payment_method": "CASH" | "MOMO" | "CARD" | "BANK_TRANSFER" | "CHECK",
+                "transaction_id": "optional_external_id",
+                "reference_number": "optional_reference",
+                "notes": "optional_notes"
+            }
+        """
+        sale = self.get_object()
+        
+        # Validate it's a credit sale
+        if not sale.is_credit_sale:
+            return Response(
+                {'error': 'This is not a credit sale. Use regular payment recording.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get AR record
+        try:
+            ar = sale.accounts_receivable
+        except AccountsReceivable.DoesNotExist:
+            return Response(
+                {'error': 'AR record not found for this credit sale'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Validate AR not already fully paid
+        if ar.status == 'PAID':
+            return Response(
+                {'error': 'AR is already fully paid'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get and validate payment data
+        try:
+            amount = Decimal(str(request.data.get('amount', '0')))
+        except (InvalidOperation, ValueError):
+            return Response(
+                {'error': 'Invalid amount format'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        payment_method = request.data.get('payment_method')
+        
+        # Validate amount
+        if amount <= 0:
+            return Response(
+                {'error': 'Payment amount must be greater than zero'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        if amount > ar.amount_outstanding:
+            return Response(
+                {
+                    'error': f'Payment amount ({amount}) exceeds outstanding balance ({ar.amount_outstanding})',
+                    'amount': str(amount),
+                    'outstanding': str(ar.amount_outstanding)
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Validate payment method
+        valid_methods = ['CASH', 'MOMO', 'CARD', 'BANK_TRANSFER', 'CHECK']
+        if payment_method not in valid_methods:
+            return Response(
+                {
+                    'error': f'Invalid payment method. Must be one of: {", ".join(valid_methods)}',
+                    'valid_methods': valid_methods
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Process the payment
+        with transaction.atomic():
+            # Get customer's old balance for audit
+            old_balance = sale.customer.outstanding_balance if sale.customer else Decimal('0.00')
+            
+            # Create AR Payment (NOT regular Payment model!)
+            ar_payment = ARPayment.objects.create(
+                accounts_receivable=ar,
+                amount=amount,
+                payment_method=payment_method,
+                transaction_id=request.data.get('transaction_id', ''),
+                reference_number=request.data.get('reference_number', ''),
+                received_by=request.user,
+                notes=request.data.get('notes', '')
+            )
+            
+            # ARPayment.save() automatically updates:
+            # - AR.amount_paid (sum of all ar_payments)
+            # - AR.amount_outstanding
+            # - AR.status (PENDING → PARTIAL → PAID)
+            # - Customer.outstanding_balance
+            # - Sale.amount_paid/amount_due/status
+            
+            # Refresh to get updated values
+            ar.refresh_from_db()
+            sale.refresh_from_db()
+            if sale.customer:
+                sale.customer.refresh_from_db()
+            
+            # Create audit trail
+            if sale.customer:
+                CreditTransaction.objects.create(
+                    customer=sale.customer,
+                    transaction_type='PAYMENT',
+                    amount=-amount,  # Negative because reducing balance
+                    balance_before=old_balance,
+                    balance_after=sale.customer.outstanding_balance,
+                    reference_id=ar_payment.id,
+                    description=f'AR payment for {sale.receipt_number} via {payment_method}',
+                    created_by=request.user
+                )
+            
+            # Log the payment
+            AuditLog.log_event(
+                event_type='payment.recorded',
+                user=request.user,
+                sale=sale,
+                customer=sale.customer,
+                event_data={
+                    'ar_payment_id': str(ar_payment.id),
+                    'amount': str(amount),
+                    'payment_method': payment_method,
+                    'ar_status': ar.status,
+                    'remaining_balance': str(ar.amount_outstanding),
+                    'sale_status': sale.status
+                },
+                description=f'AR payment of {amount} recorded for {sale.receipt_number}',
+                ip_address=request.META.get('REMOTE_ADDR'),
+                user_agent=request.META.get('HTTP_USER_AGENT')
+            )
+        
+        # Return success response with updated info
+        return Response({
+            'success': True,
+            'ar_payment_id': str(ar_payment.id),
+            'payment': {
+                'amount': str(amount),
+                'method': payment_method,
+                'date': ar_payment.payment_date.isoformat(),
+                'received_by': request.user.username
+            },
+            'ar': {
+                'id': str(ar.id),
+                'status': ar.status,
+                'original_amount': str(ar.original_amount),
+                'amount_paid': str(ar.amount_paid),
+                'amount_outstanding': str(ar.amount_outstanding),
+                'payment_percentage': str(ar.payment_percentage),
+                'aging_category': ar.aging_category,
+                'days_outstanding': ar.days_outstanding
+            },
+            'sale': {
+                'id': str(sale.id),
+                'receipt_number': sale.receipt_number,
+                'status': sale.status,
+                'amount_paid': str(sale.amount_paid),
+                'amount_due': str(sale.amount_due)
+            },
+            'customer': {
+                'id': str(sale.customer.id) if sale.customer else None,
+                'name': sale.customer.name if sale.customer else None,
+                'outstanding_balance': str(sale.customer.outstanding_balance) if sale.customer else '0.00'
+            }
+        }, status=status.HTTP_200_OK)
+
     
     @action(detail=False, methods=['get'])
     def summary(self, request):
@@ -555,41 +897,43 @@ class SaleViewSet(viewsets.ModelViewSet):
             refund_payouts=Sum('amount_refunded', filter=Q(status__in=['COMPLETED', 'PARTIAL', 'PENDING', 'REFUNDED'])),
             
             # Accounts receivable - money owed (credit sales not yet paid)
+            # Updated to use new is_credit_sale flag instead of payment_type
             accounts_receivable=Sum('amount_due', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status__in=['PENDING', 'PARTIAL']
             )),
             
             # Total credit sales amount (what customers owe)
             total_credit_sales_amount=Sum('amount_due', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status__in=['PENDING', 'PARTIAL']
             )),
             
             # Count of unpaid credit sales
             unpaid_credit_count=Count('id', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status__in=['PENDING', 'PARTIAL']
             )),
             
             # Payment method breakdown (by total sale amount)
-            cash_sales=Sum('total_amount', filter=Q(payment_type='CASH', status='COMPLETED')),
-            card_sales=Sum('total_amount', filter=Q(payment_type='CARD', status='COMPLETED')),
-            credit_sales_total=Sum('total_amount', filter=Q(payment_type='CREDIT', status='COMPLETED')),
-            mobile_sales=Sum('total_amount', filter=Q(payment_type='MOBILE', status='COMPLETED')),
+            # Note: Credit is now tracked separately via is_credit_sale flag
+            cash_sales=Sum('total_amount', filter=Q(payment_type='CASH', status='COMPLETED', is_credit_sale=False)),
+            card_sales=Sum('total_amount', filter=Q(payment_type='CARD', status='COMPLETED', is_credit_sale=False)),
+            mobile_sales=Sum('total_amount', filter=Q(payment_type='MOBILE', status='COMPLETED', is_credit_sale=False)),
+            credit_sales_total=Sum('total_amount', filter=Q(is_credit_sale=True, status='COMPLETED')),
             
-            # Credit sales breakdown
+            # Credit sales breakdown using new is_credit_sale flag
             credit_sales_unpaid=Sum('amount_due', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status='PENDING',
                 amount_paid=Decimal('0.00')
             )),
             credit_sales_partial=Sum('amount_due', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status='PARTIAL'
             )),
             credit_sales_paid=Sum('amount_paid', filter=Q(
-                payment_type='CREDIT',
+                is_credit_sale=True,
                 status='COMPLETED'
             )),
         )
@@ -705,7 +1049,8 @@ class SaleViewSet(viewsets.ModelViewSet):
             realized_profit_total += realized_profit
             outstanding_profit_total += outstanding_profit
 
-            if sale.payment_type == 'CREDIT':
+            # Track credit sales using new is_credit_sale flag
+            if sale.is_credit_sale:
                 outstanding_revenue_total += due
                 credit_total_amount += total_amount
                 credit_amount_paid_total += net_paid
@@ -791,6 +1136,108 @@ class SaleViewSet(viewsets.ModelViewSet):
         summary['realized_credit_profit'] = to_money(credit_realized_profit)
         summary['outstanding_credit'] = to_money(credit_outstanding_profit)
         summary['cash_on_hand'] = to_money(realized_profit_total)
+
+        # Detailed AR analytics from AccountsReceivable table
+        # Get date-filtered AR records
+        ar_queryset = AccountsReceivable.objects.filter(
+            sale__in=queryset.values_list('id', flat=True)
+        )
+        
+        # AR aging breakdown
+        ar_aging = ar_queryset.aggregate(
+            current_ar=Sum('amount_outstanding', filter=Q(aging_category='CURRENT')),
+            days_1_30=Sum('amount_outstanding', filter=Q(aging_category='1-30_DAYS')),
+            days_31_60=Sum('amount_outstanding', filter=Q(aging_category='31-60_DAYS')),
+            days_61_90=Sum('amount_outstanding', filter=Q(aging_category='61-90_DAYS')),
+            days_over_90=Sum('amount_outstanding', filter=Q(aging_category='OVER_90_DAYS')),
+            
+            count_current=Count('id', filter=Q(aging_category='CURRENT')),
+            count_1_30=Count('id', filter=Q(aging_category='1-30_DAYS')),
+            count_31_60=Count('id', filter=Q(aging_category='31-60_DAYS')),
+            count_61_90=Count('id', filter=Q(aging_category='61-90_DAYS')),
+            count_over_90=Count('id', filter=Q(aging_category='OVER_90_DAYS')),
+        )
+        
+        # AR status breakdown
+        ar_status = ar_queryset.aggregate(
+            pending_amount=Sum('amount_outstanding', filter=Q(status='PENDING')),
+            partial_amount=Sum('amount_outstanding', filter=Q(status='PARTIAL')),
+            overdue_amount=Sum('amount_outstanding', filter=Q(status='OVERDUE')),
+            
+            pending_count=Count('id', filter=Q(status='PENDING')),
+            partial_count=Count('id', filter=Q(status='PARTIAL')),
+            overdue_count=Count('id', filter=Q(status='OVERDUE')),
+            paid_count=Count('id', filter=Q(status='PAID')),
+        )
+        
+        # Calculate total AR from queryset
+        total_ar_outstanding = ar_queryset.aggregate(
+            total=Sum('amount_outstanding')
+        )['total'] or Decimal('0.00')
+        
+        # AR collection metrics
+        ar_payments_total = ARPayment.objects.filter(
+            accounts_receivable__in=ar_queryset
+        ).aggregate(
+            total_collected=Sum('amount'),
+            payment_count=Count('id')
+        )
+        
+        summary['ar_analytics'] = {
+            # Aging breakdown
+            'aging': {
+                'current': {
+                    'amount': to_money(ar_aging.get('current_ar') or Decimal('0.00')),
+                    'count': ar_aging.get('count_current') or 0,
+                },
+                'days_1_30': {
+                    'amount': to_money(ar_aging.get('days_1_30') or Decimal('0.00')),
+                    'count': ar_aging.get('count_1_30') or 0,
+                },
+                'days_31_60': {
+                    'amount': to_money(ar_aging.get('days_31_60') or Decimal('0.00')),
+                    'count': ar_aging.get('count_31_60') or 0,
+                },
+                'days_61_90': {
+                    'amount': to_money(ar_aging.get('days_61_90') or Decimal('0.00')),
+                    'count': ar_aging.get('count_61_90') or 0,
+                },
+                'over_90_days': {
+                    'amount': to_money(ar_aging.get('days_over_90') or Decimal('0.00')),
+                    'count': ar_aging.get('count_over_90') or 0,
+                },
+            },
+            
+            # Status breakdown
+            'status': {
+                'pending': {
+                    'amount': to_money(ar_status.get('pending_amount') or Decimal('0.00')),
+                    'count': ar_status.get('pending_count') or 0,
+                },
+                'partial': {
+                    'amount': to_money(ar_status.get('partial_amount') or Decimal('0.00')),
+                    'count': ar_status.get('partial_count') or 0,
+                },
+                'overdue': {
+                    'amount': to_money(ar_status.get('overdue_amount') or Decimal('0.00')),
+                    'count': ar_status.get('overdue_count') or 0,
+                },
+                'paid': {
+                    'count': ar_status.get('paid_count') or 0,
+                },
+            },
+            
+            # Summary metrics
+            'total_outstanding': to_money(total_ar_outstanding),
+            'total_collected': to_money(ar_payments_total.get('total_collected') or Decimal('0.00')),
+            'payment_transactions': ar_payments_total.get('payment_count') or 0,
+            
+            # Health indicators
+            'overdue_percentage': round(float(
+                ((ar_status.get('overdue_amount') or Decimal('0.00')) / total_ar_outstanding * Decimal('100.00'))
+                if total_ar_outstanding > Decimal('0.00') else Decimal('0.00')
+            ), 2),
+        }
 
         # Status breakdown
         status_breakdown = queryset.values('status').annotate(
