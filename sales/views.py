@@ -312,7 +312,11 @@ class SaleViewSet(viewsets.ModelViewSet):
             if not already_finalized and sale.status != 'CANCELLED':
                 sale.status = 'CANCELLED'
                 sale.completed_at = None
-                sale.save(update_fields=['status', 'completed_at', 'updated_at'])
+                # Balance the equation: total_amount = amount_paid + amount_due
+                # For cancelled sales: set amount_paid = total_amount and amount_due = 0
+                sale.amount_paid = sale.total_amount
+                sale.amount_due = Decimal('0')
+                sale.save(update_fields=['status', 'completed_at', 'amount_paid', 'amount_due', 'updated_at'])
                 status_changed = True
 
                 AuditLog.log_event(
