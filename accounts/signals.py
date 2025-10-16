@@ -3,7 +3,7 @@ from typing import Sequence, Tuple
 
 from django.apps import apps
 from django.conf import settings
-from django.db.models.signals import post_migrate
+from django.db.models.signals import post_migrate, post_save
 from django.dispatch import receiver
 
 logger = logging.getLogger(__name__)
@@ -80,3 +80,31 @@ def bootstrap_accounts(sender, **kwargs):
 
     ensure_default_roles()
     promote_platform_owner()
+
+
+@receiver(post_save, sender='accounts.Business')
+def create_walk_in_customer(sender, instance, created, **kwargs):
+    """Create default walk-in customer when a new business is registered."""
+    if not created:
+        return
+    
+    # Import here to avoid circular imports
+    from sales.models import Customer
+    
+    WALK_IN_PHONE = '+233000000000'
+    WALK_IN_NAME = 'Walk-In-Customer'
+    
+    try:
+        Customer.objects.get_or_create(
+            business=instance,
+            phone=WALK_IN_PHONE,
+            defaults={
+                'name': WALK_IN_NAME,
+                'customer_type': 'RETAIL',
+                
+                'created_by': None,  # System-created, no specific user
+            }
+        )
+        logger.info(f'Created walk-in customer for business: {instance.name}')
+    except Exception as e:
+        logger.error(f'Failed to create walk-in customer for business {instance.name}: {e}')

@@ -56,33 +56,44 @@ class CustomerViewSet(viewsets.ModelViewSet):
         Create customer, or return existing one if unique constraint violated.
         This handles the walk-in customer case where we try to create it on every page load.
         """
+        from django.db import IntegrityError
+        
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         
+        business = serializer.validated_data.get('business')
+        phone = serializer.validated_data.get('phone')
+        
+        # If both business and phone are provided, check if customer already exists
+        if business and phone:
+            existing_customer = Customer.objects.filter(
+                business=business,
+                phone=phone
+            ).first()
+            
+            if existing_customer:
+                # Return existing customer with 200 OK
+                response_serializer = self.get_serializer(existing_customer)
+                return Response(response_serializer.data, status=status.HTTP_200_OK)
+        
+        # Try to create new customer
         try:
             self.perform_create(serializer)
             headers = self.get_success_headers(serializer.data)
             return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
-        except Exception as e:
-            # Check if it's a unique constraint error on business+phone
-            error_message = str(e)
-            if 'unique' in error_message.lower() and 'phone' in error_message.lower():
-                # Try to find existing customer with same business and phone
-                business = serializer.validated_data.get('business')
-                phone = serializer.validated_data.get('phone')
+        except IntegrityError as e:
+            # If unique constraint violated, try to find and return existing customer
+            if business and phone:
+                existing_customer = Customer.objects.filter(
+                    business=business,
+                    phone=phone
+                ).first()
                 
-                if business and phone:
-                    existing_customer = Customer.objects.filter(
-                        business=business,
-                        phone=phone
-                    ).first()
-                    
-                    if existing_customer:
-                        # Return the existing customer instead of error
-                        response_serializer = self.get_serializer(existing_customer)
-                        return Response(response_serializer.data, status=status.HTTP_200_OK)
+                if existing_customer:
+                    response_serializer = self.get_serializer(existing_customer)
+                    return Response(response_serializer.data, status=status.HTTP_200_OK)
             
-            # If not a unique constraint error, or customer not found, raise original error
+            # If still not found, raise the original error
             raise
     
     def perform_create(self, serializer):
