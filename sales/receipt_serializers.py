@@ -55,6 +55,9 @@ class ReceiptSerializer(serializers.ModelSerializer):
     business_phone_numbers = serializers.JSONField(source='business.phone_numbers', read_only=True)
     business_address = serializers.CharField(source='business.address', read_only=True)
     
+    # Business settings (for currency and other preferences)
+    business_settings = serializers.SerializerMethodField()
+    
     # Storefront information
     storefront_name = serializers.CharField(source='storefront.name', read_only=True)
     storefront_location = serializers.CharField(source='storefront.location', read_only=True, allow_null=True)
@@ -126,7 +129,7 @@ class ReceiptSerializer(serializers.ModelSerializer):
             
             # Business info
             'business_name', 'business_tin', 'business_email',
-            'business_phone_numbers', 'business_address',
+            'business_phone_numbers', 'business_address', 'business_settings',
             
             # Storefront info
             'storefront_name', 'storefront_location', 'storefront_phone',
@@ -154,6 +157,19 @@ class ReceiptSerializer(serializers.ModelSerializer):
             # Additional
             'notes'
         ]
+    
+    def get_business_settings(self, obj):
+        """Get business settings including currency"""
+        try:
+            if hasattr(obj.business, 'settings'):
+                return {
+                    'regional': obj.business.settings.regional,
+                    'receipt': obj.business.settings.receipt,
+                }
+        except Exception:
+            pass
+        # Return None if settings not available
+        return None
     
     def get_served_by(self, obj):
         """Get the name of the staff member who processed the sale"""

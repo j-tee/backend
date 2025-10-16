@@ -16,11 +16,23 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
         HTML string ready for printing or PDF conversion
     """
     
+    # Get currency settings from business settings
+    currency_symbol = '₵'  # Default to Ghanaian Cedi
+    try:
+        business_settings = receipt_data.get('business_settings', {})
+        if business_settings:
+            regional_settings = business_settings.get('regional', {})
+            currency_info = regional_settings.get('currency', {})
+            currency_symbol = currency_info.get('symbol', '₵')
+    except (KeyError, TypeError, AttributeError):
+        # Fall back to default if settings not available
+        pass
+    
     # Helper to format currency
     def format_currency(amount):
         if isinstance(amount, (int, float, Decimal)):
-            return f"GH₵ {float(amount):.2f}"
-        return f"GH₵ {amount}"
+            return f"{currency_symbol} {float(amount):.2f}"
+        return f"{currency_symbol} {amount}"
     
     # Determine if this is a wholesale sale
     is_wholesale = receipt_data.get('type') == 'WHOLESALE'
