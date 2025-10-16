@@ -51,6 +51,40 @@ class CustomerViewSet(viewsets.ModelViewSet):
             return Customer.objects.filter(business=membership.business)
         return Customer.objects.none()
     
+    def create(self, request, *args, **kwargs):
+        """
+        Create customer, or return existing one if unique constraint violated.
+        This handles the walk-in customer case where we try to create it on every page load.
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        
+        try:
+            self.perform_create(serializer)
+            headers = self.get_success_headers(serializer.data)
+            return Response(serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+        except Exception as e:
+            # Check if it's a unique constraint error on business+phone
+            error_message = str(e)
+            if 'unique' in error_message.lower() and 'phone' in error_message.lower():
+                # Try to find existing customer with same business and phone
+                business = serializer.validated_data.get('business')
+                phone = serializer.validated_data.get('phone')
+                
+                if business and phone:
+                    existing_customer = Customer.objects.filter(
+                        business=business,
+                        phone=phone
+                    ).first()
+                    
+                    if existing_customer:
+                        # Return the existing customer instead of error
+                        response_serializer = self.get_serializer(existing_customer)
+                        return Response(response_serializer.data, status=status.HTTP_200_OK)
+            
+            # If not a unique constraint error, or customer not found, raise original error
+            raise
+    
     def perform_create(self, serializer):
         """Set created_by to current user"""
         serializer.save(created_by=self.request.user)
