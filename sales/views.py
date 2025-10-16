@@ -127,6 +127,36 @@ class SaleViewSet(viewsets.ModelViewSet):
     filterset_class = SaleFilter
     filter_backends = [DjangoFilterBackend]
     
+    def perform_create(self, serializer):
+        """
+        Auto-assign walk-in customer if no customer is provided.
+        Walk-in customers are guaranteed to exist (created when business is created).
+        """
+        from accounts.models import BusinessMembership
+        
+        customer = serializer.validated_data.get('customer')
+        
+        # If no customer provided, use walk-in customer
+        if not customer:
+            user = self.request.user
+            membership = BusinessMembership.objects.filter(
+                user=user,
+                is_active=True
+            ).first()
+            
+            if membership:
+                # Get walk-in customer for this business
+                WALK_IN_PHONE = '+233000000000'
+                walk_in_customer = Customer.objects.filter(
+                    business=membership.business,
+                    phone=WALK_IN_PHONE
+                ).first()
+                
+                if walk_in_customer:
+                    serializer.validated_data['customer'] = walk_in_customer
+        
+        serializer.save(user=self.request.user)
+    
     def get_queryset(self):
         """Filter sales by user's accessible storefronts and business."""
         from accounts.models import BusinessMembership
