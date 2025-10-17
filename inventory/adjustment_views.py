@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
+from decimal import Decimal
 
 from .stock_adjustments import (
     StockAdjustment,
@@ -27,8 +28,9 @@ from .adjustment_serializers import (
     StockAdjustmentSummarySerializer,
     ShrinkageSummarySerializer
 )
+from .transfer_services import create_paired_transfer_adjustments
 from accounts.models import BusinessMembership
-from .models import StockProduct
+from .models import StockProduct, Stock, Product, Warehouse
 
 
 class StockAdjustmentViewSet(viewsets.ModelViewSet):
@@ -324,6 +326,179 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
             'total_approved': len(approved),
             'total_failed': len(failed)
         })
+
+    @action(detail=False, methods=['post'], url_path='transfer')
+    def transfer(self, request):
+        """
+        Create a paired inter-warehouse transfer (creates TRANSFER_OUT and TRANSFER_IN adjustments).
+
+        Expected payload:
+        {
+            "from_stock_product_id": "<uuid>",
+            "to_stock_product_id": "<uuid>",
+            "quantity": 5,
+            "unit_cost": 12.34,            # optional, will be taken from from_stock_product if omitted
+            "reference_number": "REF123", # optional
+            "reason": "Moving stock",
+            "requires_approval": true,     # optional (default: true)
+            "auto_complete": false         # optional: if true, attempt to approve and complete immediately
+        }
+        """
+        data = request.data or {}
+
+        from_id = data.get('from_stock_product_id')
+        to_id = data.get('to_stock_product_id')
+        # Support frontend payload form: product + warehouse ids
+        product_id = data.get('product_id')
+        from_warehouse_id = data.get('from_warehouse_id')
+        to_warehouse_id = data.get('to_warehouse_id')
+        quantity = data.get('quantity')
+        unit_cost = data.get('unit_cost')
+        reference_number = data.get('reference_number')
+        reason = data.get('reason')
+        requires_approval = data.get('requires_approval', True)
+        auto_complete = data.get('auto_complete', False)
+
+        if not ((from_id and to_id) or (product_id and from_warehouse_id and to_warehouse_id)) or quantity is None:
+            return Response({'error': 'from_stock_product_id/to_stock_product_id or product_id+from_warehouse_id+to_warehouse_id and quantity are required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            quantity = int(quantity)
+            if quantity <= 0:
+                raise ValueError()
+        except Exception:
+            return Response({'error': 'quantity must be a positive integer'}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Resolve StockProduct either by direct stock_product ids or by product+warehouse ids
+        from_sp = None
+        to_sp = None
+        ambiguity_warnings = []
+        try:
+            if from_id and to_id:
+                from_sp = StockProduct.objects.select_related('warehouse', 'product').get(id=from_id)
+                to_sp = StockProduct.objects.select_related('warehouse', 'product').get(id=to_id)
+            else:
+                # Lookup by product and warehouse — use filter then pick best candidate
+                from_qs = StockProduct.objects.select_related('warehouse', 'product').filter(product__id=product_id, warehouse__id=from_warehouse_id)
+                to_qs = StockProduct.objects.select_related('warehouse', 'product').filter(product__id=product_id, warehouse__id=to_warehouse_id)
+
+                if not from_qs.exists():
+                    return Response({'error': 'source stock product for given product/warehouse not found'}, status=status.HTTP_404_NOT_FOUND)
+                # If destination stock product doesn't exist, we'll create one (zero quantity)
+                create_destination_if_missing = False
+                if not to_qs.exists():
+                    create_destination_if_missing = True
+
+                # Prefer a candidate with enough quantity for the source
+                sufficient_qs = from_qs.filter(quantity__gte=quantity)
+                if sufficient_qs.exists():
+                    from_sp = sufficient_qs.order_by('-quantity').first()
+                    if from_qs.count() > 1:
+                        ambiguity_warnings.append('multiple source stock entries found; selected one with sufficient quantity')
+                else:
+                    # No candidate has enough quantity; pick the one with highest quantity (best-effort)
+                    from_sp = from_qs.order_by('-quantity').first()
+                    if from_qs.count() > 1:
+                        ambiguity_warnings.append('multiple source stock entries found; selected one with highest quantity')
+
+                # For destination, prefer the one with highest existing quantity (or first)
+                if to_qs.count() == 1:
+                    to_sp = to_qs.first()
+                else:
+                    to_sp = to_qs.order_by('-quantity').first()
+                    ambiguity_warnings.append('multiple destination stock entries found; selected one with highest quantity')
+        except StockProduct.DoesNotExist:
+            return Response({'error': 'stock product for given product/warehouse not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Determine unit_cost if not provided, and coerce to Decimal
+        if unit_cost is None:
+            # Prefer landed_unit_cost then unit_cost
+            unit_cost = getattr(from_sp, 'landed_unit_cost', None) or getattr(from_sp, 'unit_cost', 0) or 0
+
+        try:
+            # Convert to Decimal safely (handles Decimal, float or string)
+            unit_cost = Decimal(str(unit_cost)) if unit_cost is not None else Decimal('0.00')
+        except Exception:
+            unit_cost = Decimal('0.00')
+
+        # If destination StockProduct was missing, create a new Stock + StockProduct with zero quantity
+        if create_destination_if_missing and to_sp is None:
+            try:
+                from django.db import transaction
+                with transaction.atomic():
+                    # Resolve product and warehouse instances
+                    prod = Product.objects.get(id=product_id)
+                    dest_wh = Warehouse.objects.get(id=to_warehouse_id)
+
+                    # Create a new stock batch for this destination entry
+                    new_stock = Stock.objects.create(description='Auto-created stock batch for transfer')
+
+                    to_sp = StockProduct.objects.create(
+                        stock=new_stock,
+                        warehouse=dest_wh,
+                        product=prod,
+                        supplier=None,
+                        expiry_date=None,
+                        quantity=0,
+                        unit_cost=unit_cost or 0
+                    )
+
+                    ambiguity_warnings.append('destination stock entry was missing; created a new stock product record (quantity=0)')
+            except Exception as e:
+                return Response({'error': f'failed to create destination stock product: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Generate a transfer reference if none provided
+        if not reference_number:
+            import uuid
+            reference_number = f"IWT-{uuid.uuid4().hex[:10].upper()}"
+
+        # Create paired adjustments
+        try:
+            out_adj, in_adj = create_paired_transfer_adjustments(
+                from_stock_product=from_sp,
+                to_stock_product=to_sp,
+                quantity=quantity,
+                unit_cost=unit_cost,
+                reference_number=reference_number,
+                reason=reason,
+                created_by=request.user,
+                requires_approval=bool(requires_approval),
+            )
+        except AssertionError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'Failed to create transfer adjustments: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Optionally approve and complete immediately
+        auto_errors = []
+        if auto_complete:
+            for adj in (out_adj, in_adj):
+                try:
+                    # Approve
+                    adj.approve(request.user)
+                    # Complete to apply stock changes
+                    adj.complete()
+                except Exception as e:
+                    auto_errors.append({'id': str(adj.id), 'error': str(e)})
+
+        # Build frontend-friendly response
+        response_payload = {
+            'success': True,
+            'transfer_reference': reference_number,
+            'out_adjustment_id': str(out_adj.id),
+            'in_adjustment_id': str(in_adj.id),
+            'source_stock_id': str(from_sp.id),
+            'dest_stock_id': str(to_sp.id),
+            'message': f"Transferred {quantity} units of {from_sp.product.name} from {from_sp.warehouse.name} to {to_sp.warehouse.name}."
+        }
+
+        if auto_errors:
+            response_payload['auto_complete_errors'] = auto_errors
+
+        if ambiguity_warnings:
+            response_payload['warnings'] = ambiguity_warnings
+
+        return Response(response_payload, status=status.HTTP_201_CREATED)
 
 
 class StockAdjustmentPhotoViewSet(viewsets.ModelViewSet):
