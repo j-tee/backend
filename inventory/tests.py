@@ -303,6 +303,7 @@ class StorefrontTransferWorkflowTest(BusinessTestMixin, APITestCase):
 			name='Other User'
 		)
 		other_token = Token.objects.create(user=other_user)
+		self.client.force_authenticate(user=None)
 		self.client.credentials(HTTP_AUTHORIZATION='Token ' + other_token.key)
 		
 		url = '/inventory/api/profit-projections/stock-product/'

@@ -227,7 +227,10 @@ class StorefrontSaleProductSerializer(serializers.Serializer):
     product_id = serializers.UUIDField()
     product_name = serializers.CharField()
     sku = serializers.CharField()
+    barcode = serializers.CharField(allow_blank=True)
     category_name = serializers.CharField(allow_null=True)
+    unit = serializers.CharField(allow_null=True)
+    product_image = serializers.CharField(allow_null=True)
     available_quantity = serializers.IntegerField()
     retail_price = serializers.DecimalField(max_digits=12, decimal_places=2)
     wholesale_price = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
@@ -252,6 +255,12 @@ class TransferRequestLineItemSerializer(serializers.ModelSerializer):
             'id': {'required': False, 'read_only': False},
         }
 
+    def to_representation(self, instance):
+        data = super().to_representation(instance)
+        if data.get('product') is not None:
+            data['product'] = str(data['product'])
+        return data
+
 
 class TransferRequestSerializer(serializers.ModelSerializer):
     business_name = serializers.CharField(source='business.name', read_only=True)
@@ -266,15 +275,18 @@ class TransferRequestSerializer(serializers.ModelSerializer):
         model = TransferRequest
         fields = [
             'id', 'business', 'business_name', 'storefront', 'storefront_name', 'storefront_location',
-            'priority', 'status', 'notes', 'requested_by', 'requested_by_name',
+            'priority', 'status', 'assigned_at', 'notes', 'requested_by', 'requested_by_name',
             'fulfilled_at', 'fulfilled_by', 'fulfilled_by_name',
             'cancelled_at', 'cancelled_by', 'cancelled_by_name',
+            'linked_transfer_id', 'linked_transfer_reference',
             'line_items', 'created_at', 'updated_at'
         ]
         read_only_fields = [
             'id', 'business', 'business_name', 'requested_by', 'requested_by_name',
+            'assigned_at',
             'fulfilled_at', 'fulfilled_by', 'fulfilled_by_name',
             'cancelled_at', 'cancelled_by', 'cancelled_by_name',
+            'linked_transfer_id', 'linked_transfer_reference',
             'created_at', 'updated_at'
         ]
 

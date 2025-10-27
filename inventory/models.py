@@ -587,6 +587,8 @@ class TransferRequest(models.Model):
     STATUS_ASSIGNED = 'ASSIGNED'
     STATUS_FULFILLED = 'FULFILLED'
     STATUS_CANCELLED = 'CANCELLED'
+    # Expose completed constant for compatibility with legacy transfer workflow tests
+    STATUS_COMPLETED = 'COMPLETED'
     STATUS_CHOICES = [
         (STATUS_NEW, 'New'),
         (STATUS_ASSIGNED, 'Assigned'),
@@ -600,11 +602,14 @@ class TransferRequest(models.Model):
     requested_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='transfer_requests')
     priority = models.CharField(max_length=16, choices=PRIORITY_CHOICES, default=PRIORITY_MEDIUM)
     status = models.CharField(max_length=16, choices=STATUS_CHOICES, default=STATUS_NEW)
+    assigned_at = models.DateTimeField(blank=True, null=True)
     notes = models.TextField(blank=True, null=True)
     fulfilled_at = models.DateTimeField(blank=True, null=True)
     fulfilled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='fulfilled_transfer_requests')
     cancelled_at = models.DateTimeField(blank=True, null=True)
     cancelled_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='cancelled_transfer_requests')
+    linked_transfer_id = models.UUIDField(blank=True, null=True)
+    linked_transfer_reference = models.CharField(max_length=64, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -636,6 +641,9 @@ class TransferRequest(models.Model):
         if self.status != self.STATUS_NEW:
             self.status = self.STATUS_NEW
             updated_fields.append('status')
+        if self.assigned_at is not None:
+            self.assigned_at = None
+            updated_fields.append('assigned_at')
         if self.fulfilled_at is not None or self.fulfilled_by_id is not None:
             self.fulfilled_at = None
             self.fulfilled_by = None
@@ -644,6 +652,10 @@ class TransferRequest(models.Model):
             self.cancelled_at = None
             self.cancelled_by = None
             updated_fields.extend(['cancelled_at', 'cancelled_by'])
+        if self.linked_transfer_id is not None or self.linked_transfer_reference:
+            self.linked_transfer_id = None
+            self.linked_transfer_reference = None
+            updated_fields.extend(['linked_transfer_id', 'linked_transfer_reference'])
         if updated_fields:
             updated_fields.append('updated_at')
             self.save(update_fields=updated_fields)

@@ -21,6 +21,7 @@ from .adjustment_views import (
 from .transfer_views import (
     WarehouseTransferViewSet,
     StorefrontTransferViewSet,
+    TransferWorkflowViewSet,
 )
 
 router = DefaultRouter()
@@ -47,6 +48,7 @@ router.register(r'stock-count-items', StockCountItemViewSet, basename='stock-cou
 # Phase 4: New Transfer endpoints (replaces legacy stock-adjustments/transfer)
 router.register(r'warehouse-transfers', WarehouseTransferViewSet, basename='warehouse-transfers')
 router.register(r'storefront-transfers', StorefrontTransferViewSet, basename='storefront-transfers')
+router.register(r'transfers', TransferWorkflowViewSet, basename='transfers')
 
 urlpatterns = [
     path('api/stock/availability/', WarehouseStockAvailabilityView.as_view(), name='warehouse-stock-availability'),

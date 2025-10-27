@@ -308,42 +308,26 @@ class Transfer(models.Model):
                         )
                 
                 elif self.transfer_type == self.TYPE_WAREHOUSE_TO_STOREFRONT:
-                    # For storefront transfers, create/update storefront stock
-                    # Get the Stock record first
-                    stock = source_stock.stock
-                    
-                    # Get or create StockProduct for storefront
-                    storefront_stock, created = StockProduct.objects.select_for_update().get_or_create(
-                        warehouse=self.destination_storefront.warehouse,
+                    # For storefront transfers, update storefront inventory records
+                    from inventory.models import StoreFrontInventory
+
+                    if not self.destination_storefront_id:
+                        errors.append(
+                            f"Transfer destination storefront missing for product '{item.product.name}'"
+                        )
+                        continue
+
+                    storefront_entry, created = StoreFrontInventory.objects.select_for_update().get_or_create(
+                        storefront=self.destination_storefront,
                         product=item.product,
-                        stock=stock,
-                        defaults={
-                            'quantity': 0,
-                            'calculated_quantity': 0,
-                            'unit_cost': item.unit_cost,
-                            'supplier': item.supplier or source_stock.supplier,
-                            'expiry_date': item.expiry_date or source_stock.expiry_date,
-                            'unit_tax_rate': item.unit_tax_rate or source_stock.unit_tax_rate,
-                            'unit_tax_amount': item.unit_tax_amount or source_stock.unit_tax_amount,
-                            'unit_additional_cost': item.unit_additional_cost or source_stock.unit_additional_cost,
-                            'retail_price': item.retail_price or source_stock.retail_price,
-                            'wholesale_price': item.wholesale_price or source_stock.wholesale_price,
-                        }
+                        defaults={'quantity': 0},
                     )
-                    
-                    # Update quantities (use update to bypass signals)
-                    if created:
-                        # New record, set initial quantities
-                        StockProduct.objects.filter(pk=storefront_stock.pk).update(
-                            quantity=item.quantity,
-                            calculated_quantity=item.quantity
-                        )
-                    else:
-                        # Existing record, increment quantities
-                        StockProduct.objects.filter(pk=storefront_stock.pk).update(
-                            quantity=storefront_stock.quantity + item.quantity,
-                            calculated_quantity=storefront_stock.calculated_quantity + item.quantity
-                        )
+
+                    new_quantity = storefront_entry.quantity + item.quantity
+                    StoreFrontInventory.objects.filter(pk=storefront_entry.pk).update(
+                        quantity=new_quantity,
+                        updated_at=timezone.now()
+                    )
             
             except Exception as e:
                 errors.append(f"Product '{item.product.name}': {str(e)}")

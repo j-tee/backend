@@ -55,6 +55,7 @@ except ImportError:
 
 from .stock_adjustments import StockAdjustment
 from .stock_adjustment_serializers import StockAdjustmentSerializer
+from inventory.transfer_models import Transfer
 
 
 User = get_user_model()
@@ -75,11 +76,14 @@ class CatalogPagination(PageNumberPagination):
     
     def get_paginated_response(self, data):
         """Return paginated response with additional metadata."""
+        paginator = getattr(self.page, 'paginator', None)
+        page_size = paginator.per_page if paginator is not None else len(self.page)
+
         return Response({
             'count': self.page.paginator.count,
             'next': self.get_next_link(),
             'previous': self.get_previous_link(),
-            'page_size': self.page_size,
+            'page_size': page_size,
             'total_pages': self.page.paginator.num_pages,
             'current_page': self.page.number,
             **data
@@ -705,7 +709,7 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
                     'product_id': str(product.id),
                     'product_name': product.name,
                     'sku': product.sku or '',
-                    'barcode': product.barcode,
+                    'barcode': product.barcode or '',
                     'category_name': product.category.name if product.category else None,
                     'unit': product.unit if hasattr(product, 'unit') else None,
                     'product_image': product.image.url if hasattr(product, 'image') and product.image else None,
@@ -1667,6 +1671,7 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         
         valid_statuses = {
             TransferRequest.STATUS_NEW,
+            TransferRequest.STATUS_ASSIGNED,
             TransferRequest.STATUS_FULFILLED,
             TransferRequest.STATUS_CANCELLED,
         }
@@ -1689,6 +1694,11 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         # Handle status-specific logic
         if new_status == TransferRequest.STATUS_CANCELLED:
             transfer_request.mark_cancelled(request.user)
+        elif new_status == TransferRequest.STATUS_ASSIGNED:
+            if transfer_request.status != TransferRequest.STATUS_ASSIGNED:
+                transfer_request.status = TransferRequest.STATUS_ASSIGNED
+                transfer_request.assigned_at = timezone.now()
+                transfer_request.save(update_fields=['status', 'assigned_at', 'updated_at'])
         elif new_status == TransferRequest.STATUS_FULFILLED:
             # Allow manual fulfillment override
             if transfer_request.status != TransferRequest.STATUS_FULFILLED:
@@ -1916,6 +1926,8 @@ class EmployeeWorkspaceView(APIView):
                 'warehouses': [],
                 'storefronts': [],
                 'my_transfer_requests': [],
+                'pending_approvals': [],
+                'incoming_transfers': [],
             },
             status=status.HTTP_200_OK,
         )
@@ -2036,6 +2048,12 @@ class EmployeeWorkspaceView(APIView):
                 counts[row['business_id']][row['status']] = int(row['total'] or 0)
             return counts
 
+        def _build_transfer_counts(queryset):
+            counts = defaultdict(dict)
+            for row in queryset.values('business_id', 'status').annotate(total=Count('id')):
+                counts[row['business_id']][row['status'].upper()] = int(row['total'] or 0)
+            return counts
+
         manager_request_counts = {}
         if manager_business_ids:
             manager_request_counts = _build_status_counts(
@@ -2050,6 +2068,48 @@ class EmployeeWorkspaceView(APIView):
             non_manager_request_counts = _build_status_counts(
                 TransferRequest.objects.filter(business_id__in=non_manager_business_ids).filter(request_filter)
             )
+
+        transfer_counts_manager = {}
+        if manager_business_ids:
+            transfer_counts_manager = _build_transfer_counts(
+                Transfer.objects.filter(business_id__in=manager_business_ids)
+            )
+
+        transfer_counts_staff = {}
+        if non_manager_business_ids:
+            staff_transfer_qs = Transfer.objects.filter(business_id__in=non_manager_business_ids)
+            if non_manager_storefront_ids:
+                staff_transfer_qs = staff_transfer_qs.filter(destination_storefront_id__in=non_manager_storefront_ids)
+            transfer_counts_staff = _build_transfer_counts(staff_transfer_qs)
+
+        pending_approvals = []
+        if manager_business_ids:
+            pending_approvals = [
+                {
+                    'id': str(t.id),
+                    'reference': t.reference_number,
+                    'status': t.status.upper(),
+                }
+                for t in Transfer.objects.filter(
+                    business_id__in=manager_business_ids,
+                    status=Transfer.STATUS_PENDING
+                ).order_by('created_at')[:10]
+            ]
+
+        incoming_transfers = []
+        if non_manager_storefront_ids:
+            incoming_transfers = [
+                {
+                    'id': str(t.id),
+                    'reference': t.reference_number,
+                    'status': t.status.upper(),
+                    'storefront': str(t.destination_storefront_id) if t.destination_storefront_id else None,
+                    'completed_at': t.completed_at.isoformat() if t.completed_at else None,
+                }
+                for t in Transfer.objects.filter(
+                    destination_storefront_id__in=non_manager_storefront_ids
+                ).order_by('-created_at')[:10]
+            ]
 
         my_transfer_requests = [
             {
@@ -2072,6 +2132,7 @@ class EmployeeWorkspaceView(APIView):
         seen_storefront_ids = set()
 
         request_status_template = {status: 0 for status, _ in TransferRequest.STATUS_CHOICES}
+        transfer_status_template = {status.upper(): 0 for status, _ in Transfer.STATUS_CHOICES}
 
         for business_id, context in contexts.items():
             membership = context['membership']
@@ -2082,6 +2143,11 @@ class EmployeeWorkspaceView(APIView):
             source_counts = manager_request_counts if is_manager else non_manager_request_counts
             for status_key, total in source_counts.get(business_id, {}).items():
                 request_counts[status_key] = total
+
+            transfer_counts_source = transfer_counts_manager if is_manager else transfer_counts_staff
+            transfer_counts = transfer_status_template.copy()
+            for status_key, total in transfer_counts_source.get(business_id, {}).items():
+                transfer_counts[status_key] = total
 
             warehouse_stock_total = sum(warehouse_stock_map.get(warehouse_id, 0) for warehouse_id in context['warehouse_ids'])
             storefront_stock_total = sum(storefront_stock_map.get(storefront_id, 0) for storefront_id in context['storefront_ids'])
@@ -2095,6 +2161,9 @@ class EmployeeWorkspaceView(APIView):
                     'warehouse_count': len(context['warehouses']),
                     'transfer_requests': {
                         'by_status': request_counts,
+                    },
+                    'transfers': {
+                        'by_status': transfer_counts,
                     },
                     'stock': {
                         'warehouse_on_hand': warehouse_stock_total,
@@ -2146,6 +2215,8 @@ class EmployeeWorkspaceView(APIView):
                 'warehouses': warehouses_payload,
                 'storefronts': storefronts_payload,
                 'my_transfer_requests': my_transfer_requests,
+                'pending_approvals': pending_approvals,
+                'incoming_transfers': incoming_transfers,
             },
             status=status.HTTP_200_OK,
         )
