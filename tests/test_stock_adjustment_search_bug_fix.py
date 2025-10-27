@@ -200,6 +200,36 @@ class StockAdjustmentSearchBugFixTest(TestCase):
         self.assertEqual(data['count'], 0,
             "Should not see other business's products")
     
+    def test_cannot_create_adjustment_with_other_business_product(self):
+        """
+        Test that user cannot create adjustment for another business's product.
+        
+        Security test - validates business isolation at creation level.
+        """
+        # Authenticate as user1 (DataLogique)
+        self.client.force_authenticate(user=self.user1)
+        
+        # Try to create adjustment using user2's product
+        adjustment_data = {
+            'stock_product': str(self.stock_product2.id),  # Competitor's product
+            'adjustment_type': 'DAMAGE',
+            'quantity': -5,
+            'reason': 'Attempted cross-business adjustment'
+        }
+        
+        response = self.client.post(
+            '/inventory/api/stock-adjustments/',
+            adjustment_data,
+            format='json'
+        )
+        
+        # Should fail with validation error
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('stock_product', response.json() or {})
+
+
+if __name__ == '__main__':
+    
     def test_create_adjustment_with_searched_product(self):
         """
         Test the complete user flow: search → find product → create adjustment.
