@@ -82,9 +82,7 @@ class TransferSerializerTest(BusinessTestMixin, TestCase):
             name='Test Product',
             sku='TEST-001',
             business=self.business,
-            category=self.category,
-            cost=Decimal('10.00'),
-            retail_price=Decimal('15.00')
+            category=self.category
         )
     
     def test_warehouse_transfer_serializer_validation(self):
@@ -221,9 +219,7 @@ class WarehouseTransferViewSetTest(BusinessTestMixin, APITestCase):
             name='Test Product',
             sku='TEST-001',
             business=self.business,
-            category=self.category,
-            cost=Decimal('10.00'),
-            retail_price=Decimal('15.00')
+            category=self.category
         )
         
         # Create stock in warehouse1
@@ -447,9 +443,7 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
             name='Test Product',
             sku='TEST-001',
             business=self.business,
-            category=self.category,
-            cost=Decimal('10.00'),
-            retail_price=Decimal('15.00')
+            category=self.category
         )
         
         # Create stock in warehouse
