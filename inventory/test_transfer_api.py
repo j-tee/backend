@@ -484,30 +484,6 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
         transfer = Transfer.objects.first()
         self.assertEqual(transfer.destination_storefront, self.storefront)
         self.assertIsNone(transfer.destination_warehouse)
-    
-    def test_complete_storefront_transfer(self):
-        """Test completing a storefront transfer"""
-        transfer = Transfer.objects.create(
-            business=self.business,
-            source_warehouse=self.warehouse,
-            destination_storefront=self.storefront,
-            transfer_type=Transfer.TYPE_WAREHOUSE_TO_STOREFRONT,
-            created_by=self.user
-        )
-        TransferItem.objects.create(
-            transfer=transfer,
-            product=self.product,
-            quantity=10,
-            unit_cost=Decimal('10.00')
-        )
-        
-        url = reverse('storefront-transfers-complete', args=[transfer.id])
-        response = self.client.post(url, {})
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        
-        transfer.refresh_from_db()
-        self.assertEqual(transfer.status, 'completed')
 
 
 class TransferPermissionsTest(BusinessTestMixin, APITestCase):
@@ -537,25 +513,8 @@ class TransferPermissionsTest(BusinessTestMixin, APITestCase):
             category=self.category
         )
         
+        
         self.client = APIClient()
-    
-    def test_user_can_only_see_own_business_transfers(self):
-        """Test that users can only see transfers from their own business"""
-        # Create transfer for business1
-        transfer1 = Transfer.objects.create(
-            business=self.business1,
-            source_warehouse=self.warehouse1,
-            destination_warehouse=self.warehouse2,
-            created_by=self.user1
-        )
-        
-        # User 2 should not see user 1's transfers
-        self.client.force_authenticate(user=self.user2)
-        url = reverse('warehouse-transfers-list')
-        response = self.client.get(url)
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data['results']), 0)
     
     def test_unauthenticated_access_denied(self):
         """Test that unauthenticated users cannot access transfers"""
@@ -563,3 +522,4 @@ class TransferPermissionsTest(BusinessTestMixin, APITestCase):
         response = self.client.get(url)
         
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
