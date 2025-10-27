@@ -209,12 +209,10 @@ class WarehouseTransferViewSetTest(BusinessTestMixin, APITestCase):
         
         self.warehouse1 = Warehouse.objects.create(
             name='Warehouse 1',
-            business=self.business,
             location='Location 1'
         )
         self.warehouse2 = Warehouse.objects.create(
             name='Warehouse 2',
-            business=self.business,
             location='Location 2'
         )
         
@@ -437,13 +435,13 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
         
         self.warehouse = Warehouse.objects.create(
             name='Warehouse 1',
-            business=self.business,
             location='Location 1'
         )
         self.storefront = StoreFront.objects.create(
             name='Storefront 1',
             business=self.business,
-            location='Location 2'
+            location='Location 2',
+            user=self.user
         )
         
         self.category = Category.objects.create(
@@ -524,12 +522,10 @@ class TransferPermissionsTest(BusinessTestMixin, APITestCase):
         
         self.warehouse1 = Warehouse.objects.create(
             name='Warehouse 1',
-            business=self.business1,
             location='Location 1'
         )
         self.warehouse2 = Warehouse.objects.create(
             name='Warehouse 2',
-            business=self.business1,
             location='Location 2'
         )
         
