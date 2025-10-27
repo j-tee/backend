@@ -554,16 +554,16 @@ def generate_receipt_html(receipt_data: Dict[str, Any]) -> str:
                     <td colspan="3" class="text-right">Subtotal:</td>
                     <td class="amount">{format_currency(receipt_data.get('subtotal', 0))}</td>
                 </tr>
-                {f'''
+                {'''
                 <tr>
                     <td colspan="3" class="text-right">Discount:</td>
-                    <td class="amount">-{format_currency(receipt_data.get('discount_amount', 0))}</td>
+                    <td class="amount">-''' + format_currency(receipt_data.get('discount_amount', 0)) + '''</td>
                 </tr>
                 ''' if float(receipt_data.get('discount_amount', 0)) > 0 else ''}
-                {f'''
+                {'''
                 <tr>
                     <td colspan="3" class="text-right">Tax:</td>
-                    <td class="amount">{format_currency(receipt_data.get('tax_amount', 0))}</td>
+                    <td class="amount">''' + format_currency(receipt_data.get('tax_amount', 0)) + '''</td>
                 </tr>
                 ''' if float(receipt_data.get('tax_amount', 0)) > 0 else ''}
                 <tr class="grand-total-row">
