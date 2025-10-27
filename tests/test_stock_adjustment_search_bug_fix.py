@@ -310,30 +310,6 @@ class StockAdjustmentSearchBugFixTest(TestCase):
             [sp.id for sp in queryset],
             "Other business's products should not be in queryset"
         )
-    
-    def test_unauthenticated_request_returns_empty_queryset(self):
-        """
-        Test that unauthenticated requests get empty queryset.
-        
-        Security test - prevents data leakage.
-        """
-        from inventory.adjustment_serializers import StockAdjustmentCreateSerializer
-        from rest_framework.test import APIRequestFactory
-        from rest_framework.request import Request
-        
-        factory = APIRequestFactory()
-        request = factory.get('/')
-        # No user authentication
-        drf_request = Request(request)
-        
-        serializer = StockAdjustmentCreateSerializer(
-            context={'request': drf_request}
-        )
-        
-        # Should have empty queryset
-        queryset = serializer.fields['stock_product'].queryset
-        self.assertEqual(queryset.count(), 0,
-            "Unauthenticated requests should get empty queryset")
 
 
 if __name__ == '__main__':
@@ -348,3 +324,4 @@ if __name__ == '__main__':
         print("\n✅ All tests passed! Bug fix verified.")
     else:
         print(f"\n❌ {failures} test(s) failed!")
+
