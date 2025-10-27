@@ -763,7 +763,10 @@ class Sale(models.Model):
             # Update sale status
             old_status = self.status
             self.status = 'CANCELLED'
+            # Skip validation when cancelling - amounts may not be zeroed yet
+            self._skip_validation = True
             self.save(update_fields=['status', 'updated_at'])
+            self._skip_validation = False
             
             # Release any active reservations
             self.release_reservations(delete=True)
