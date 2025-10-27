@@ -63,18 +63,17 @@ class TransferSerializerTest(BusinessTestMixin, TestCase):
         
         self.warehouse1 = Warehouse.objects.create(
             name='Warehouse 1',
-            business=self.business,
             location='Location 1'
         )
         self.warehouse2 = Warehouse.objects.create(
             name='Warehouse 2',
-            business=self.business,
             location='Location 2'
         )
         self.storefront = StoreFront.objects.create(
             name='Storefront 1',
             business=self.business,
-            location='Location 3'
+            location='Location 3',
+            user=self.user
         )
         
         self.category = Category.objects.create(
