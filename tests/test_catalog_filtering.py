@@ -60,8 +60,7 @@ class CatalogFilteringTestCase(TestCase):
         
         # Create warehouse
         self.warehouse = Warehouse.objects.create(
-            name='Main Warehouse',
-            business=self.business
+            name='Main Warehouse'
         )
         BusinessWarehouse.objects.create(
             business=self.business,

@@ -79,11 +79,12 @@ class SaleItemTaxCalculationTest(TestCase):
 			manager=self.user
 		)
 		stock = Stock.objects.create(
-			warehouse=warehouse,
+			business=self.business,
 			arrival_date='2025-10-01'
 		)
 		stock_product = StockProduct.objects.create(
 			stock=stock,
+			warehouse=warehouse,
 			product=self.product,
 			quantity=100,
 			unit_cost=Decimal('10.00'),  # Cost per unit
@@ -115,11 +116,12 @@ class SaleItemTaxCalculationTest(TestCase):
 			manager=self.user
 		)
 		stock = Stock.objects.create(
-			warehouse=warehouse,
+			business=self.business,
 			arrival_date='2025-10-01'
 		)
 		StockProduct.objects.create(
 			stock=stock,
+			warehouse=warehouse,
 			product=self.product,
 			quantity=100,
 			unit_cost=Decimal('8.00'),  # This will be the latest cost
