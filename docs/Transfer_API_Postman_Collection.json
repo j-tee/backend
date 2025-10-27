@@ -1,0 +1,421 @@
+{
+  "info": {
+    "name": "Transfer API - Phase 4",
+    "description": "Complete API collection for new Transfer endpoints",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000",
+      "type": "string"
+    },
+    {
+      "key": "auth_token",
+      "value": "your-auth-token-here",
+      "type": "string"
+    },
+    {
+      "key": "transfer_id",
+      "value": "",
+      "type": "string"
+    }
+  ],
+  "item": [
+    {
+      "name": "Warehouse Transfers",
+      "item": [
+        {
+          "name": "List Warehouse Transfers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""]
+            }
+          }
+        },
+        {
+          "name": "List Pending Transfers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/?status=pending",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "pending"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Create Warehouse Transfer",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "    var jsonData = pm.response.json();",
+                  "    pm.collectionVariables.set('transfer_id', jsonData.id);",
+                  "    console.log('Transfer ID saved:', jsonData.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_warehouse\": \"{{source_warehouse_id}}\",\n  \"destination_warehouse\": \"{{dest_warehouse_id}}\",\n  \"notes\": \"Test transfer from Postman\",\n  \"items\": [\n    {\n      \"product\": \"{{product_id}}\",\n      \"quantity\": 10,\n      \"unit_cost\": \"15.50\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""]
+            }
+          }
+        },
+        {
+          "name": "Get Transfer Details",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/{{transfer_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", "{{transfer_id}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Update Transfer (Pending)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Updated notes\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/{{transfer_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", "{{transfer_id}}", ""]
+            }
+          }
+        },
+        {
+          "name": "Complete Transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Transfer completed successfully\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/{{transfer_id}}/complete/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", "{{transfer_id}}", "complete", ""]
+            }
+          }
+        },
+        {
+          "name": "Cancel Transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reason\": \"Order cancelled by management\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/{{transfer_id}}/cancel/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", "{{transfer_id}}", "cancel", ""]
+            }
+          }
+        },
+        {
+          "name": "Delete Transfer (Pending Only)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/{{transfer_id}}/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", "{{transfer_id}}", ""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Storefront Transfers",
+      "item": [
+        {
+          "name": "List Storefront Transfers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/storefront-transfers/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "storefront-transfers", ""]
+            }
+          }
+        },
+        {
+          "name": "Create Storefront Transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"source_warehouse\": \"{{source_warehouse_id}}\",\n  \"destination_storefront\": \"{{storefront_id}}\",\n  \"notes\": \"Daily stock replenishment\",\n  \"items\": [\n    {\n      \"product\": \"{{product_id}}\",\n      \"quantity\": 50,\n      \"unit_cost\": \"12.00\"\n    }\n  ]\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/storefront-transfers/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "storefront-transfers", ""]
+            }
+          }
+        },
+        {
+          "name": "Complete Storefront Transfer",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json",
+                "type": "text"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"notes\": \"Stock received at storefront\"\n}"
+            },
+            "url": {
+              "raw": "{{base_url}}/inventory/api/storefront-transfers/{{transfer_id}}/complete/",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "storefront-transfers", "{{transfer_id}}", "complete", ""]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Advanced Filtering",
+      "item": [
+        {
+          "name": "Filter by Date Range",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/?start_date=2024-10-01&end_date=2024-10-31",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""],
+              "query": [
+                {
+                  "key": "start_date",
+                  "value": "2024-10-01"
+                },
+                {
+                  "key": "end_date",
+                  "value": "2024-10-31"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Search Transfers",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/?search=TRF-202410",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""],
+              "query": [
+                {
+                  "key": "search",
+                  "value": "TRF-202410"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Filter by Source Warehouse",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/?source_warehouse={{source_warehouse_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""],
+              "query": [
+                {
+                  "key": "source_warehouse",
+                  "value": "{{source_warehouse_id}}"
+                }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Combined Filters",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "Token {{auth_token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/inventory/api/warehouse-transfers/?status=completed&start_date=2024-10-01&source_warehouse={{source_warehouse_id}}",
+              "host": ["{{base_url}}"],
+              "path": ["inventory", "api", "warehouse-transfers", ""],
+              "query": [
+                {
+                  "key": "status",
+                  "value": "completed"
+                },
+                {
+                  "key": "start_date",
+                  "value": "2024-10-01"
+                },
+                {
+                  "key": "source_warehouse",
+                  "value": "{{source_warehouse_id}}"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

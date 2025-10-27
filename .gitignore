@@ -137,3 +137,19 @@ staticfiles/
 .vscode/
 .idea/
 .env.*
+
+# Debug outputs
+debug/*.log
+debug/receipts/
+debug/__pycache__/
+
+# Keep debug scripts
+!debug/*.py
+!debug/*.sh
+!debug/README.md
+
+# Keep deployment docs
+!deployment/*.md
+
+# Keep docs in docs folder
+!docs/

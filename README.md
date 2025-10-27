@@ -1,326 +1,336 @@
-# SaaS POS Backend System
+# POS Backend - Django REST API
 
-A comprehensive Django-based Point of Sale (POS) backend system designed for SaaS deployment with multi-user support, inventory management, sales processing, bookkeeping, and subscription management.
+A comprehensive Point of Sale (POS) backend system built with Django REST Framework, featuring multi-tenant architecture, role-based access control (RBAC), inventory management, sales tracking, and subscription management.
 
-## Features
-
-### Core Features
-- **Multi-user support** with role-based access control (Admin, Manager, Cashier, Warehouse Staff)
-- **Secure authentication** with token-based authentication
-- **Multi-warehouse inventory management** with batch tracking
-- **Retail and wholesale sales processing**
-- **Customer management** with credit line tracking
-- **Double-entry bookkeeping** and accounting
-- **Subscription management** with multiple payment gateways
-- **Comprehensive reporting** and analytics
-- **Audit trail** for all critical operations
-
-### Technical Features
-- **REST API** built with Django REST Framework
-- **PostgreSQL** database with UUID primary keys
-- **Redis** for caching and background task queuing
-- **Celery** for background task processing
-- **Docker** containerization support
-- **Comprehensive logging** and error handling
-
-## System Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │   Django API    │    │   Database      │
-│   (React/Vue)   │◄──►│   (REST API)    │◄──►│   (PostgreSQL)  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                              │
-                              ▼
-                       ┌─────────────────┐    ┌─────────────────┐
-                       │   Celery        │◄──►│   Redis         │
-                       │   (Background)  │    │   (Cache/Queue) │
-                       └─────────────────┘    └─────────────────┘
-```
-
-## Database Schema
-
-The system includes the following main models:
-
-### User Management
-- **Roles**: User roles (Admin, Manager, Cashier, Warehouse Staff)
-- **Users**: Custom user model with role-based permissions
-- **UserProfiles**: Extended user information
-- **AuditLogs**: Complete audit trail
-
-### Inventory Management
-- **Categories**: Product categorization
-- **Warehouses**: Storage locations
-- **StoreFronts**: Retail locations
-- **Batches**: Imported goods tracking
-- **Products**: Product catalog
-- **BatchProducts**: Products within batches
-- **Inventory**: Current stock levels
-- **Transfers**: Warehouse to storefront transfers
-- **StockAlerts**: Low stock notifications
-
-### Sales Management
-- **Customers**: Customer information and credit management
-- **Sales**: Sales transactions
-- **SalesItems**: Individual sale items
-- **Payments**: Payment tracking
-- **Refunds**: Return processing
-- **CreditTransactions**: Customer credit history
-
-### Bookkeeping
-- **AccountTypes**: Chart of accounts structure
-- **Accounts**: Financial accounts
-- **JournalEntries**: Double-entry journal entries
-- **LedgerEntries**: Individual ledger lines
-- **TrialBalance**: Financial period summaries
-- **Budgets**: Budget planning and tracking
-
-### Subscriptions
-- **SubscriptionPlans**: Available plans
-- **Subscriptions**: User subscriptions
-- **SubscriptionPayments**: Payment processing
-- **PaymentGatewayConfig**: Gateway configurations
-- **WebhookEvents**: Payment webhook handling
-- **UsageTracking**: Usage limits monitoring
-- **Invoices**: Billing and invoicing
-
-## Quick Start
+## 🚀 Quick Start
 
 ### Prerequisites
-- Docker and Docker Compose
-- Python 3.11+ (for local development)
+- Python 3.11+
 - PostgreSQL 15+
 - Redis 7+
+- Git
 
-### Using Docker (Recommended)
+### Local Development Setup
 
-1. **Clone the repository**
-   ```bash
-   git clone <repository-url>
-   cd pos-backend
-   ```
+```bash
+# Clone the repository
+git clone git@github.com:YOUR_USERNAME/YOUR_REPO.git
+cd backend
 
-2. **Start the services**
-   ```bash
-   docker-compose up -d
-   ```
+# Create virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
 
-3. **Run migrations**
-   ```bash
-   docker-compose exec web python manage.py migrate
-   ```
+# Install dependencies
+pip install -r requirements.txt
 
-4. **Initialize the system**
-   ```bash
-   docker-compose exec web python manage.py init_system
-   ```
+# Set up environment variables
+cp .env.production.example .env.development
+# Edit .env.development with your local settings
 
-5. **Create a superuser (optional)**
-   ```bash
-   docker-compose exec web python manage.py createsuperuser
-   ```
+# Run migrations
+python manage.py migrate
 
-The API will be available at `http://localhost:8000`
+# Create superuser
+python manage.py createsuperuser
 
-### Local Development
+# Run development server
+python manage.py runserver
+```
 
-1. **Install dependencies**
-   ```bash
-   pip install -r requirements.txt
-   ```
+### Running with Docker
 
-2. **Set up PostgreSQL and Redis**
-   ```bash
-   # Install and start PostgreSQL
-   createdb pos_db
-   createuser pos_user
-   
-   # Install and start Redis
-   redis-server
-   ```
+```bash
+# Start all services
+docker-compose up -d
 
-3. **Run migrations**
-   ```bash
-   python manage.py migrate
-   ```
+# Run migrations
+docker-compose exec web python manage.py migrate
 
-4. **Initialize the system**
-   ```bash
-   python manage.py init_system --admin-email=admin@example.com --admin-password=admin123
-   ```
+# Create superuser
+docker-compose exec web python manage.py createsuperuser
 
-5. **Start the development server**
-   ```bash
-   python manage.py runserver
-   ```
+# View logs
+docker-compose logs -f
+```
 
-6. **Start Celery worker (in another terminal)**
-   ```bash
-   celery -A app worker -l info
-   ```
+## 📋 Features
 
-7. **Start Celery beat (in another terminal)**
-   ```bash
-   celery -A app beat -l info
-   ```
+### Core Functionality
+- **Multi-Tenant Architecture** - Complete business isolation with user-business relationships
+- **RBAC (Role-Based Access Control)** - Fine-grained permissions system
+- **Inventory Management** - Stock tracking, transfers, adjustments, and reconciliation
+- **Sales Management** - Retail and wholesale sales with payment tracking
+- **Subscription System** - Plan management and feature access control
+- **Reporting & Analytics** - Comprehensive business reports and exports
+- **Settings Management** - Business-specific configurations
 
-## API Endpoints
+### Key Modules
 
-### Authentication
-- `POST /accounts/api/auth/login/` - User login
-- `POST /accounts/api/auth/logout/` - User logout
-- `POST /accounts/api/auth/change-password/` - Change password
+#### Accounts (`accounts/`)
+- User authentication and authorization
+- Business and employment management
+- Role and permission management
+- Multi-tenant user isolation
 
-### User Management
-- `GET /accounts/api/roles/` - List roles
-- `GET /accounts/api/users/` - List users
-- `GET /accounts/api/users/me/` - Current user profile
-- `POST /accounts/api/users/` - Create user
+#### Inventory (`inventory/`)
+- Product catalog management
+- Stock level tracking with batch support
+- Stock transfers between warehouses/storefronts
+- Stock adjustments and reconciliation
+- Movement history tracking
 
-### Inventory Management
-- `GET /inventory/api/warehouses/` - List warehouses
-- `GET /inventory/api/products/` - List products
-- `GET /inventory/api/batches/` - List batches
-- `GET /inventory/api/inventory/` - Current inventory levels
-- `POST /inventory/api/transfers/` - Create transfer
+#### Sales (`sales/`)
+- Sale creation and management (retail/wholesale)
+- Payment tracking (cash, credit, mixed)
+- Credit management and receivables
+- Sale history and filtering
+- Receipt generation (HTML, PDF)
 
-### Sales Management
-- `GET /sales/api/customers/` - List customers
-- `POST /sales/api/sales/` - Create sale
-- `GET /sales/api/payments/` - List payments
-- `GET /sales/api/reports/sales/` - Sales reports
+#### Reports (`reports/`)
+- Financial summaries
+- Product performance analytics
+- Sales reports with filtering
+- Stock movement reports
+- Export functionality (CSV, PDF, Excel)
 
-### Bookkeeping
-- `GET /bookkeeping/api/accounts/` - Chart of accounts
-- `POST /bookkeeping/api/journal-entries/` - Create journal entry
-- `GET /bookkeeping/api/trial-balances/` - Trial balance
+#### Subscriptions (`subscriptions/`)
+- Subscription plan management
+- Feature access control
+- Usage tracking and limits
 
-### Subscriptions
-- `GET /subscriptions/api/plans/` - Available plans
-- `POST /subscriptions/api/subscriptions/` - Create subscription
-- `POST /subscriptions/api/webhooks/payment/` - Payment webhooks
+#### Settings (`settings/`)
+- Business-specific settings
+- Tax and currency configuration
+- Receipt customization
+- System preferences
 
-## Configuration
+## 🏗️ Architecture
+
+### Technology Stack
+- **Framework**: Django 5.2.6 + Django REST Framework 3.14.0
+- **Database**: PostgreSQL 15
+- **Cache**: Redis 7
+- **Task Queue**: Celery 5.3.4
+- **Web Server**: Gunicorn 21.2.0 + Nginx
+- **Authentication**: Token-based + Session
+
+### Project Structure
+
+```
+backend/
+├── accounts/           # User, business, RBAC
+├── inventory/          # Products, stock, transfers
+├── sales/              # Sales, payments, receipts
+├── reports/            # Analytics and exports
+├── subscriptions/      # Plans and billing
+├── settings/           # Business settings
+├── app/                # Django project settings
+├── deployment/         # Deployment scripts and configs
+├── docs/               # Documentation
+├── logs/               # Application logs
+├── media/              # User uploads
+└── staticfiles/        # Static assets
+```
+
+## 🔒 Security Features
+
+- ✅ Token-based authentication
+- ✅ Row-level permissions with Django Guardian
+- ✅ Business data isolation
+- ✅ HTTPS/SSL ready
+- ✅ CORS configuration
+- ✅ Rate limiting
+- ✅ Secure password hashing (Argon2)
+- ✅ Environment-based configuration
+
+## 🧪 Testing
+
+```bash
+# Run all tests
+python manage.py test
+
+# Run specific app tests
+python manage.py test accounts
+python manage.py test inventory
+
+# Run with coverage
+coverage run --source='.' manage.py test
+coverage report
+```
+
+## 📊 API Documentation
+
+The API is built with Django REST Framework and includes:
+
+- **Authentication**: `/api/auth/login/`, `/api/auth/logout/`
+- **Accounts**: `/api/accounts/`, `/api/rbac/`
+- **Inventory**: `/api/inventory/products/`, `/api/inventory/stock/`
+- **Sales**: `/api/sales/`, `/api/sales/payments/`
+- **Reports**: `/api/reports/sales/`, `/api/reports/financial/`
+- **Settings**: `/api/settings/`
+
+For detailed API documentation, see [`docs/API_ENDPOINTS_REFERENCE.md`](docs/API_ENDPOINTS_REFERENCE.md)
+
+## 🚀 Deployment
+
+### Production Deployment with CI/CD
+
+We use GitHub Actions for automated deployment to a VPS.
+
+**Quick deployment:**
+
+1. Configure GitHub secrets (VPS details, SSH key)
+2. Push to `main` branch
+3. GitHub Actions automatically:
+   - Runs tests
+   - Deploys to VPS
+   - Restarts services
+
+**Detailed guides:**
+- 📖 [Deployment Index](docs/DEPLOYMENT_INDEX.md) - **All deployment docs in one place!**
+- 📖 [Complete Deployment Guide](docs/DEPLOYMENT_SETUP_COMPLETE.md) - Start here!
+- 📖 [Deployment Guide](docs/DEPLOYMENT_GUIDE.md) - Step-by-step instructions
+- 📖 [Quick Reference](docs/QUICK_REFERENCE.md) - Common commands
+- 📖 [Architecture](docs/ARCHITECTURE.md) - System architecture
+- 📖 [Nginx Setup](docs/NGINX_SOURCE_SETUP.md) - Nginx configuration
+
+### Manual Deployment
+
+```bash
+# SSH into server
+ssh -p 7822 deploy@YOUR_SERVER_IP
+
+# Navigate to project
+cd /var/www/pos/backend
+
+# Run deployment script
+./deployment/deploy.sh
+```
+
+### Deployment Scripts
+
+Located in `deployment/` folder:
+- `initial_setup.sh` - First-time server setup
+- `deploy.sh` - Manual deployment
+- `ssl_setup.sh` - SSL certificate setup
+- `health_check.sh` - System health verification
+- `nginx_control.sh` - Nginx management (works with any installation)
+
+## 🛠️ Configuration
 
 ### Environment Variables
 
-Create a `.env` file with the following variables:
+Create `.env.development` or `.env.production` based on `.env.production.example`:
 
+**Key settings:**
 ```env
-DEBUG=True
-SECRET_KEY=your-secret-key-here
-DATABASE_URL=postgres://pos_user:pos_password@localhost:5432/pos_db
-REDIS_URL=redis://localhost:6379/0
+SECRET_KEY=your-secret-key
+DEBUG=False
+ALLOWED_HOSTS=yourdomain.com,www.yourdomain.com
 
-# Payment Gateway Settings
-STRIPE_PUBLIC_KEY=pk_test_...
-STRIPE_SECRET_KEY=sk_test_...
-PAYSTACK_PUBLIC_KEY=pk_test_...
-PAYSTACK_SECRET_KEY=sk_test_...
+DB_NAME=pos_production
+DB_USER=pos_user
+DB_PASSWORD=your-password
+DB_HOST=localhost
 
-# Email Settings
-EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
-EMAIL_HOST=smtp.gmail.com
-EMAIL_PORT=587
-EMAIL_USE_TLS=True
-EMAIL_HOST_USER=your-email@gmail.com
-EMAIL_HOST_PASSWORD=your-password
+REDIS_URL=redis://localhost:6379
+USE_REDIS_CACHE=True
+
+FRONTEND_URL=https://your-frontend.com
+CORS_ALLOWED_ORIGINS=https://your-frontend.com
 ```
 
-### Role-Based Access Control
+See [`.env.production.example`](.env.production.example) for all available options.
 
-The system implements four main roles:
+## 📁 Key Files
 
-1. **Admin**: Full system access, user management, system configuration
-2. **Manager**: Store management, reporting, inventory oversight
-3. **Cashier**: Sales processing, customer management, basic reporting
-4. **Warehouse Staff**: Inventory management, transfers, batch processing
+### Configuration
+- `app/settings.py` - Django settings
+- `app/urls.py` - Main URL routing
+- `requirements.txt` - Python dependencies
+- `.env.production.example` - Environment template
 
-## API Documentation
+### Deployment
+- `Dockerfile` - Docker container configuration
+- `docker-compose.yml` - Multi-container setup
+- `nginx.conf` - Nginx web server config
+- `.github/workflows/deploy.yml` - CI/CD pipeline
+- `deployment/` - Deployment scripts and service files
 
-The API documentation is available at:
-- Swagger UI: `http://localhost:8000/api/schema/swagger-ui/`
-- ReDoc: `http://localhost:8000/api/schema/redoc/`
-- OpenAPI Schema: `http://localhost:8000/api/schema/`
+### Utilities
+- `scripts/` - Utility and data management scripts
+- `debug/` - Debug and test scripts
+- `tests/` - Django unit tests
 
-## Testing
+### Documentation
+All documentation is in the [`docs/`](docs/) folder
 
-Run the test suite:
+## 🤝 Contributing
 
-```bash
-# Using Docker
-docker-compose exec web python manage.py test
+### Development Workflow
 
-# Local development
-python manage.py test
-```
+1. Create a feature branch from `development`
+2. Make your changes
+3. Write/update tests
+4. Run tests: `python manage.py test`
+5. Create pull request to `development`
+6. After review, merge to `main` for deployment
 
-## Background Tasks
+### Code Style
 
-The system uses Celery for background processing:
+- Follow PEP 8
+- Use meaningful variable names
+- Add docstrings to functions and classes
+- Keep functions small and focused
+- Write tests for new features
 
-- **User management**: Welcome emails, account cleanup
-- **Inventory**: Stock level monitoring, low stock alerts
-- **Sales**: Receipt generation, inventory updates
-- **Subscriptions**: Renewal notifications, payment processing
-- **Reporting**: Periodic report generation
+## 📝 License
 
-## Monitoring and Logging
+This project is proprietary software. All rights reserved.
 
-Logs are stored in the `logs/` directory and include:
-- Application logs (`django.log`)
-- Individual app logs
-- Celery task logs
-- Error tracking
+## 📞 Support
 
-## Security Features
-
-- **Token-based authentication**
-- **Role-based access control**
-- **Input validation and sanitization**
-- **SQL injection protection**
-- **XSS protection**
-- **CSRF protection**
-- **Rate limiting**
-- **Complete audit trail**
-
-## Deployment
-
-### Production Deployment
-
-1. **Set production environment variables**
-2. **Use PostgreSQL and Redis**
-3. **Configure SSL/TLS**
-4. **Set up monitoring**
-5. **Configure backups**
-
-### Scaling
-
-The system is designed to scale horizontally:
-- **Database**: PostgreSQL with read replicas
-- **Cache**: Redis Cluster
-- **Application**: Multiple Django instances behind load balancer
-- **Background tasks**: Multiple Celery workers
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
-
-## License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Support
-
-For support and questions:
-- Create an issue in the repository
+For issues or questions:
+- Check the [documentation](docs/)
+- Review [troubleshooting guide](docs/DEPLOYMENT_GUIDE.md#troubleshooting)
 - Contact the development team
-- Check the documentation
+
+## 🔗 Related Projects
+
+- Frontend: [Link to frontend repo]
+- Mobile App: [Link to mobile repo]
+
+## 📚 Documentation Index
+
+### Deployment Documentation
+- [Deployment Index](docs/DEPLOYMENT_INDEX.md) 📑 **All deployment docs organized!**
+- [Deployment Setup Complete](docs/DEPLOYMENT_SETUP_COMPLETE.md) ⭐ **Start here for deployment!**
+- [Deployment Guide](docs/DEPLOYMENT_GUIDE.md)
+- [Quick Reference](docs/QUICK_REFERENCE.md)
+
+### Architecture & Setup
+- [System Architecture](docs/ARCHITECTURE.md)
+- [Nginx Source Setup](docs/NGINX_SOURCE_SETUP.md)
+- [Deployment Scripts](docs/DEPLOYMENT_README.md)
+
+### API Documentation
+- [API Endpoints Reference](docs/API_ENDPOINTS_REFERENCE.md)
+- [RBAC Documentation](docs/RBAC_API_DOCUMENTATION.md)
+
+### Feature Documentation
+- [Stock Integrity System](docs/COMPLETE_STOCK_INTEGRITY_SYSTEM.md)
+- [Subscription System](docs/SUBSCRIPTION_BACKEND_COMPLETE.md)
+- [Credit Sales Tracking](docs/CREDIT_SALES_TRACKING_IMPLEMENTATION_COMPLETE.md)
+- [Receipt System](docs/RECEIPT_SYSTEM_IMPLEMENTATION.md)
+- [Reports System](docs/REPORTS_README.md)
+
+### Frontend Integration
+- [Frontend Integration Guide](docs/FRONTEND_INTEGRATION_GUIDE.md)
+- [Frontend Quick Start](docs/FRONTEND_QUICK_START.md)
 
 ---
 
-**Note**: This is a comprehensive backend system. Make sure to properly configure security settings, payment gateways, and monitoring before deploying to production.
+**Version**: 1.0.0  
+**Last Updated**: October 27, 2025  
+**Maintained by**: POS Development Team

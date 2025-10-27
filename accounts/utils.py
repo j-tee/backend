@@ -1,6 +1,20 @@
+import logging
+from smtplib import SMTPException
+
+from django.conf import settings
 from django.contrib.auth import get_user_model
-from .models import AuditLog
-import json
+from django.core.mail import send_mail
+from django.urls import reverse
+
+from .models import AuditLog, BusinessInvitation
+
+logger = logging.getLogger(__name__)
+
+
+class EmailDeliveryError(Exception):
+    """Raised when sending transactional email fails."""
+
+
 
 User = get_user_model()
 
@@ -140,3 +154,87 @@ def mask_sensitive_data(data, sensitive_fields=None):
             masked_data[field] = '***MASKED***'
     
     return masked_data
+
+
+def send_verification_email(user, token):
+    """Send an email verification link to the given user."""
+
+    frontend_base = getattr(settings, 'FRONTEND_URL', '').rstrip('/') or 'http://localhost:3000'
+    backend_base = getattr(settings, 'BACKEND_URL', '').rstrip('/') or 'http://localhost:8000'
+
+    verify_url = f"{frontend_base}/verify-email?token={token}"
+
+    subject = 'Verify your POS account email'
+    message = (
+        f"Hello {user.name},\n\n"
+        "Thanks for signing up. Please confirm your email address to activate your account.\n\n"
+    f"Verification link: {verify_url}\n\n"
+    "If the link above doesn't work, copy the token below and paste it into the verification form:\n"
+    f"Token: {token}\n\n"
+        "If you did not initiate this request, please ignore this email.\n\n"
+        "Best regards,\n"
+        "POS Platform Team"
+    )
+
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+    except SMTPException as exc:
+        logger.exception("Failed to send verification email to %s", user.email)
+        raise EmailDeliveryError("Unable to send verification email at this time.") from exc
+
+
+def send_password_reset_email(user, token):
+    """Send password reset instructions with both frontend and backend links."""
+
+    frontend_base = getattr(settings, 'FRONTEND_URL', '').rstrip('/') or 'http://localhost:3000'
+    backend_base = getattr(settings, 'BACKEND_URL', '').rstrip('/') or 'http://localhost:8000'
+
+    reset_url = f"{frontend_base}/reset-password?token={token}"
+    direct_reset_url = f"{backend_base}/accounts/api/auth/password-reset/confirm/"  # Expect POST
+
+    subject = 'Reset your POS account password'
+    message = (
+        f"Hello {user.name},\n\n"
+        "A password reset request was received for your account.\n\n"
+        f"Reset link: {reset_url}\n\n"
+        "If the button above doesn't work, share this token with the password reset form:"
+        f"\nToken: {token}\n\n"
+        "Alternatively, you can send a POST request directly to:"
+        f"\n{direct_reset_url}\n\n"
+        "If you did not request this change, please ignore this email.\n\n"
+        "Best regards,\n"
+        "POS Platform Team"
+    )
+
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [user.email], fail_silently=False)
+    except SMTPException as exc:
+        logger.exception("Failed to send password reset email to %s", user.email)
+        raise EmailDeliveryError("Unable to send password reset email at this time.") from exc
+
+
+def send_business_invitation_email(invitation: BusinessInvitation):
+    """Send an invitation email to join a business."""
+
+    if not invitation.token:
+        invitation.initialize_token()
+        invitation.save(update_fields=["token", "expires_at", "updated_at"])
+
+    frontend_base = getattr(settings, "FRONTEND_URL", "").rstrip('/') or 'http://localhost:3000'
+    accept_url = f"{frontend_base}/accept-invite?token={invitation.token}"
+
+    subject = f"You're invited to join {invitation.business.name}"
+    message = (
+        f"Hello,\n\n"
+        f"You've been invited to join {invitation.business.name} on the POS platform as {invitation.role}.\n\n"
+        f"Accept invitation: {accept_url}\n\n"
+        f"If the link above doesn't work, copy this token: {invitation.token}\n\n"
+        "If you weren't expecting this invitation, you can ignore this email.\n\n"
+        "Best regards,\nPOS Platform Team"
+    )
+
+    try:
+        send_mail(subject, message, settings.DEFAULT_FROM_EMAIL, [invitation.email], fail_silently=False)
+    except SMTPException as exc:
+        logger.exception("Failed to send business invitation email to %s", invitation.email)
+        raise EmailDeliveryError("Unable to send the invitation email at this time.") from exc

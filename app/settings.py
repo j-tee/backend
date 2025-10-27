@@ -12,21 +12,39 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 
 from pathlib import Path
 import os
+import sys
+
+from decouple import AutoConfig, Config, Csv, RepositoryEnv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+ENV_FILE = BASE_DIR / os.getenv('DJANGO_ENV_FILE', '.env.development')
+if ENV_FILE.exists():
+    config = Config(RepositoryEnv(str(ENV_FILE)))
+else:
+    config = AutoConfig(search_path=str(BASE_DIR))
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-qypa%1&zw5yph-(3sogpdy7x((f8!r)npt6s@6%@fw1(10&e9l'
+SECRET_KEY = config('SECRET_KEY', default='django-insecure-qypa%1&zw5yph-(3sogpdy7x((f8!r)npt6s@6%@fw1(10&e9l')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = config('DEBUG', cast=bool, default=False)
 
-ALLOWED_HOSTS = []
+_raw_allowed_hosts = config('ALLOWED_HOSTS', default='')
+ALLOWED_HOSTS = Csv()(_raw_allowed_hosts) if _raw_allowed_hosts else []
+
+# Ensure test clients (and local dev) have sensible defaults
+if isinstance(ALLOWED_HOSTS, tuple):
+    ALLOWED_HOSTS = list(ALLOWED_HOSTS)
+
+for host in ['localhost', '127.0.0.1', 'testserver']:
+    if host not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(host)
 
 
 # Application definition
@@ -39,12 +57,17 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework.authtoken',
     'corsheaders',
-    'accounts',
+    'rules',
+    'guardian',  # Django Guardian for object-level permissions
+    'accounts.apps.AccountsConfig',
     'inventory',
     'sales',
     'bookkeeping',
     'subscriptions',
+    'reports',
+    'settings.apps.SettingsConfig',
 ]
 
 MIDDLEWARE = [
@@ -84,11 +107,11 @@ WSGI_APPLICATION = 'app.wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'pos_db',
-        'USER': 'pos_user',
-        'PASSWORD': 'pos_password',
-        'HOST': 'localhost',
-        'PORT': '5432',
+        'NAME': config('DB_NAME', default='pos_db'),
+        'USER': config('DB_USER', default='postgres'),
+        'PASSWORD': config('DB_PASSWORD', default=''),
+        'HOST': config('DB_HOST', default='localhost'),
+        'PORT': config('DB_PORT', default='5432'),
     }
 }
 
@@ -109,6 +132,13 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator',
     },
+]
+
+AUTHENTICATION_BACKENDS = [
+    'accounts.auth_backends.EmailBackend',
+    'django.contrib.auth.backends.ModelBackend',
+    'rules.permissions.ObjectPermissionBackend',
+    'guardian.backends.ObjectPermissionBackend',  # Guardian object permissions
 ]
 
 
@@ -132,7 +162,7 @@ STATIC_URL = 'static/'
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
-DEFAULT_AUTO_FIELD = 'django.db.models.UUIDField'
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Django REST Framework configuration
 REST_FRAMEWORK = {
@@ -148,10 +178,16 @@ REST_FRAMEWORK = {
 }
 
 # CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+_cors_origins = config(
+    'CORS_ALLOWED_ORIGINS',
+    cast=Csv(),
+    default='http://localhost:3000,http://127.0.0.1:3000,http://localhost:5173,http://127.0.0.1:5173'
+)
+
+if DEBUG and not _cors_origins:
+    CORS_ALLOW_ALL_ORIGINS = True
+else:
+    CORS_ALLOWED_ORIGINS = _cors_origins
 
 # Password hashers
 PASSWORD_HASHERS = [
@@ -161,9 +197,18 @@ PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.BCryptSHA256PasswordHasher',
 ]
 
+RUNNING_TESTS = 'test' in sys.argv
+
+# Celery and cache configuration
+USE_REDIS_CACHE = config('USE_REDIS_CACHE', cast=bool, default=False)
+REDIS_URL = config('REDIS_URL', default='redis://localhost:6379')
+
 # Celery Configuration (for background tasks)
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0'
+default_broker = f"{REDIS_URL}/0" if USE_REDIS_CACHE else 'memory://'
+default_result_backend = f"{REDIS_URL}/0" if USE_REDIS_CACHE else 'cache+memory://'
+
+CELERY_BROKER_URL = config('CELERY_BROKER_URL', default=default_broker)
+CELERY_RESULT_BACKEND = config('CELERY_RESULT_BACKEND', default=default_result_backend)
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
@@ -185,9 +230,33 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
-# Email settings (for development, use console backend)
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
-DEFAULT_FROM_EMAIL = 'noreply@posbackend.com'
+# Email settings
+configured_email_backend = config('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+
+if RUNNING_TESTS:
+    EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+else:
+    EMAIL_BACKEND = configured_email_backend
+
+smtp_backend = EMAIL_BACKEND.endswith('smtp.EmailBackend')
+
+EMAIL_HOST = config('EMAIL_HOST', default='smtp.gmail.com' if smtp_backend else '')
+EMAIL_PORT = config('EMAIL_PORT', cast=int, default=587 if smtp_backend else 25)
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+EMAIL_USE_TLS = config('EMAIL_USE_TLS', cast=bool, default=True if smtp_backend else False)
+EMAIL_USE_SSL = config('EMAIL_USE_SSL', cast=bool, default=False)
+EMAIL_TIMEOUT = config('EMAIL_TIMEOUT', cast=int, default=60)
+
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL', default=EMAIL_HOST_USER or 'noreply@posbackend.com')
+SERVER_EMAIL = config('SERVER_EMAIL', default=DEFAULT_FROM_EMAIL)
+_default_reply_to = config('DEFAULT_REPLY_TO', default='')
+if _default_reply_to:
+    DEFAULT_REPLY_TO = [_default_reply_to]
+
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:3000')
+BACKEND_URL = config('BACKEND_URL', default='http://localhost:8000')
+ENV_NAME = config('ENV_NAME', default='development')
 
 # Logging configuration
 LOGGING = {
@@ -266,22 +335,43 @@ SESSION_COOKIE_HTTPONLY = True
 CSRF_COOKIE_HTTPONLY = True
 
 # Cache configuration
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': 'redis://localhost:6379/1',
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+if USE_REDIS_CACHE:
+    cache_location = config('REDIS_CACHE_URL', default=f"{REDIS_URL}/1")
+    CACHES = {
+        'default': {
+            'BACKEND': 'django_redis.cache.RedisCache',
+            'LOCATION': cache_location,
+            'OPTIONS': {
+                'CLIENT_CLASS': 'django_redis.client.DefaultClient',
+            }
         }
     }
-}
+else:
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'LOCATION': 'pos-local-cache'
+        }
+    }
 
 # Rate limiting and throttling
-REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
-    'rest_framework.throttling.AnonRateThrottle',
-    'rest_framework.throttling.UserRateThrottle'
-]
-REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
-    'anon': '100/hour',
-    'user': '1000/hour'
-}
+ENABLE_API_THROTTLE = config('ENABLE_API_THROTTLE', default=not DEBUG, cast=bool)
+
+if ENABLE_API_THROTTLE:
+    REST_FRAMEWORK['DEFAULT_THROTTLE_CLASSES'] = [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle'
+    ]
+    REST_FRAMEWORK['DEFAULT_THROTTLE_RATES'] = {
+        'anon': '100/hour',
+        'user': '1000/hour'
+    }
+else:
+    REST_FRAMEWORK.pop('DEFAULT_THROTTLE_CLASSES', None)
+    REST_FRAMEWORK.pop('DEFAULT_THROTTLE_RATES', None)
+
+PLATFORM_OWNER_EMAIL = config('PLATFORM_OWNER_EMAIL', default='juliustetteh@gmail.com')
+
+# Subscription bypass for development
+# Set to True to bypass all subscription checks during development
+BYPASS_SUBSCRIPTION_CHECK = config('BYPASS_SUBSCRIPTION_CHECK', default=DEBUG, cast=bool)

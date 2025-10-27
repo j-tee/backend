@@ -1,0 +1,22 @@
+[Unit]
+Description=Celery Beat Scheduler for POS Backend
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=deploy
+Group=www-data
+WorkingDirectory=/var/www/pos/backend
+Environment="PATH=/var/www/pos/backend/venv/bin"
+Environment="DJANGO_ENV_FILE=/var/www/pos/backend/.env.production"
+ExecStart=/var/www/pos/backend/venv/bin/celery -A app beat \
+          --loglevel=info \
+          --logfile=/var/www/pos/backend/logs/celery_beat.log \
+          --pidfile=/var/www/pos/backend/celery_beat.pid
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

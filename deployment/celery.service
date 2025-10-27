@@ -1,0 +1,23 @@
+[Unit]
+Description=Celery Worker for POS Backend
+After=network.target redis.service
+
+[Service]
+Type=forking
+User=deploy
+Group=www-data
+WorkingDirectory=/var/www/pos/backend
+Environment="PATH=/var/www/pos/backend/venv/bin"
+Environment="DJANGO_ENV_FILE=/var/www/pos/backend/.env.production"
+ExecStart=/var/www/pos/backend/venv/bin/celery -A app worker \
+          --loglevel=info \
+          --logfile=/var/www/pos/backend/logs/celery_worker.log \
+          --pidfile=/var/www/pos/backend/celery_worker.pid \
+          --detach
+
+# Restart policy
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
