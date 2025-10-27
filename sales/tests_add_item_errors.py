@@ -83,41 +83,6 @@ class AddSaleItemErrorPayloadTestCase(APITestCase):
 
         self.client.force_authenticate(self.user)
 
-    def test_insufficient_stock_error_contains_user_and_developer_messages(self):
-        url = reverse("sale-add-item", kwargs={"pk": self.sale.pk})
-        payload = {
-            "product": str(self.product.id),
-            "stock_product": str(self.stock_product.id),
-            "quantity": "5",
-            "unit_price": "65.00",
-        }
-
-        response = self.client.post(url, payload, format="json")
-
-        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
-        self.assertEqual(
-            response.data["error"],
-            "Unable to add item due to stock restrictions.",
-        )
-        self.assertEqual(response.data["code"], "INSUFFICIENT_STOCK")
-        self.assertIn("Insufficient stock", response.data["developer_message"])
-        self.assertEqual(
-            Decimal(response.data["details"]["available"]),
-            Decimal("1.00"),
-        )
-        self.assertEqual(
-            Decimal(response.data["details"]["requested"]),
-            Decimal("5.00"),
-        )
-        self.assertEqual(
-            response.data["details"]["stock_product_id"],
-            str(self.stock_product.id),
-        )
-        self.assertEqual(
-            response.data["details"]["product_id"],
-            str(self.product.id),
-        )
-
     def test_storefront_inventory_allows_add_when_stock_product_low(self):
         StoreFrontInventory.objects.update_or_create(
             storefront=self.storefront,

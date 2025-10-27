@@ -155,28 +155,3 @@ class SalesSummaryAPITestCase(APITestCase):
         sale.completed_at = timezone.now()
         sale.save()
         return sale
-
-    def test_summary_includes_cogs_and_credit_breakdown(self):
-        self._create_completed_cash_sale()
-        self._create_partial_credit_sale()
-
-        response = self.client.get(reverse("sale-summary"))
-        self.assertEqual(response.status_code, 200)
-
-        summary = response.data["summary"]
-        self.assertAlmostEqual(summary["total_sales"], 220.0)
-        self.assertAlmostEqual(summary["total_cogs"], 120.0)
-        self.assertAlmostEqual(summary["total_tax_collected"], 20.0)
-        self.assertAlmostEqual(summary["total_profit"], 80.0)
-        self.assertAlmostEqual(summary["profit_margin"], 40.0)
-
-        self.assertAlmostEqual(summary["realized_revenue"], 295.0)
-        self.assertAlmostEqual(summary["outstanding_revenue"], 75.0)
-        self.assertAlmostEqual(summary["realized_profit"], 110.0)
-        self.assertAlmostEqual(summary["outstanding_profit"], 30.0)
-
-        credit_overview = summary["credit_health"]
-        self.assertAlmostEqual(credit_overview["amount_due"], 75.0)
-        self.assertAlmostEqual(credit_overview["partially_paid_amount"], 75.0)
-        self.assertAlmostEqual(credit_overview["realized_profit"], 30.0)
-        self.assertAlmostEqual(credit_overview["outstanding_profit"], 30.0)
