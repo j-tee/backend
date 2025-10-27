@@ -5,6 +5,8 @@ ViewSets for the new Transfer system endpoints.
 Replaces legacy StockAdjustment TRANSFER_IN/TRANSFER_OUT pairs.
 """
 
+from decimal import Decimal
+
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
@@ -21,7 +23,28 @@ from inventory.transfer_serializers import (
     TransferCompleteSerializer,
     TransferCancelSerializer,
 )
-from inventory.models import Warehouse, StoreFront, StockProduct
+from accounts.models import BusinessMembership
+from inventory.models import Warehouse, StoreFront, StockProduct, TransferRequest
+
+
+def _business_ids_for_user(user):
+    """Return list of business IDs the user belongs to."""
+    if not getattr(user, 'is_authenticated', False):
+        return []
+
+    ids = set()
+
+    owned_qs = getattr(user, 'owned_businesses', None)
+    if owned_qs is not None:
+        ids.update(owned_qs.values_list('id', flat=True))
+
+    memberships_qs = getattr(user, 'business_memberships', None)
+    if memberships_qs is not None:
+        ids.update(
+            memberships_qs.filter(is_active=True).values_list('business_id', flat=True)
+        )
+
+    return list(ids)
 
 
 class BaseTransferViewSet(viewsets.ModelViewSet):
@@ -281,3 +304,262 @@ class StorefrontTransferViewSet(BaseTransferViewSet):
             queryset = queryset.filter(destination_storefront_id=dest_storefront_id)
         
         return queryset
+
+
+class TransferWorkflowViewSet(viewsets.ViewSet):
+    """Legacy-compatible transfer workflow viewset bridging requests and transfers."""
+
+    permission_classes = [IsAuthenticated]
+    manager_roles = {BusinessMembership.OWNER, BusinessMembership.ADMIN, BusinessMembership.MANAGER}
+
+    def get_queryset(self):
+        user = self.request.user
+        base_qs = Transfer.objects.select_related(
+            'business', 'source_warehouse', 'destination_storefront'
+        ).prefetch_related('items__product')
+
+        if user.is_superuser:
+            return base_qs
+
+        business_ids = _business_ids_for_user(user)
+        if not business_ids:
+            return Transfer.objects.none()
+        return base_qs.filter(business_id__in=business_ids)
+
+    def _ensure_manager(self, business, user):
+        if user.is_superuser:
+            return
+
+        membership = BusinessMembership.objects.filter(
+            business=business,
+            user=user,
+            is_active=True,
+        ).first()
+
+        if not membership or membership.role not in self.manager_roles:
+            raise PermissionDenied('You do not have permission to manage transfers for this business.')
+
+    def _get_linked_request(self, transfer):
+        return TransferRequest.objects.select_related('storefront', 'business').prefetch_related('line_items__product').filter(
+            linked_transfer_id=transfer.id
+        ).first()
+
+    def _serialize_transfer(self, transfer, request_obj=None):
+        if request_obj is None:
+            request_obj = self._get_linked_request(transfer)
+
+        line_items = []
+        if request_obj is not None:
+            for line in request_obj.line_items.all():
+                line_items.append({
+                    'id': str(line.id),
+                    'product': str(line.product_id),
+                    'product_name': line.product.name,
+                    'requested_quantity': line.requested_quantity,
+                    'transferred_quantity': line.requested_quantity,
+                })
+        else:
+            for item in transfer.items.select_related('product').all():
+                line_items.append({
+                    'id': str(item.id),
+                    'product': str(item.product_id),
+                    'product_name': item.product.name,
+                    'requested_quantity': item.quantity,
+                    'transferred_quantity': item.quantity,
+                })
+
+        payload = {
+            'id': str(transfer.id),
+            'reference': transfer.reference_number,
+            'status': transfer.status.upper(),
+            'request_id': str(request_obj.id) if request_obj else None,
+            'source_warehouse': str(transfer.source_warehouse_id),
+            'destination_storefront': str(transfer.destination_storefront_id) if transfer.destination_storefront_id else None,
+            'created_at': transfer.created_at.isoformat(),
+            'updated_at': transfer.updated_at.isoformat(),
+            'line_items': line_items,
+        }
+
+        payload['received_at'] = transfer.received_at.isoformat() if transfer.received_at else None
+        payload['received_by'] = str(transfer.received_by_id) if transfer.received_by_id else None
+
+        return payload
+
+    def list(self, request):
+        transfers = self.get_queryset().order_by('-created_at')[:50]
+        data = [self._serialize_transfer(transfer) for transfer in transfers]
+        return Response(data)
+
+    def retrieve(self, request, pk=None):
+        transfer = self.get_queryset().filter(id=pk).first()
+        if not transfer:
+            raise ValidationError({'transfer': 'Transfer not found or access denied.'})
+        return Response(self._serialize_transfer(transfer))
+
+    def create(self, request):
+        payload = request.data
+
+        request_id = payload.get('request_id')
+        source_warehouse_id = payload.get('source_warehouse')
+        destination_storefront_id = payload.get('destination_storefront')
+
+        if not request_id:
+            raise ValidationError({'request_id': 'This field is required.'})
+        if not source_warehouse_id:
+            raise ValidationError({'source_warehouse': 'This field is required.'})
+        if not destination_storefront_id:
+            raise ValidationError({'destination_storefront': 'This field is required.'})
+
+        try:
+            transfer_request = TransferRequest.objects.select_related(
+                'storefront',
+                'storefront__business_link__business',
+                'business',
+            ).prefetch_related('line_items__product').get(id=request_id)
+        except TransferRequest.DoesNotExist:
+            raise ValidationError({'request_id': 'Transfer request not found.'})
+
+        if not transfer_request.line_items.exists():
+            raise ValidationError({'request_id': 'Transfer request does not have any line items to fulfill.'})
+
+        if str(transfer_request.storefront_id) != str(destination_storefront_id):
+            raise ValidationError({'destination_storefront': 'Destination storefront must match the request storefront.'})
+
+        if transfer_request.linked_transfer_id:
+            raise ValidationError({'request_id': 'Transfer request already has a linked transfer.'})
+
+        business = transfer_request.business
+        self._ensure_manager(business, request.user)
+
+        try:
+            source_warehouse = Warehouse.objects.select_related('business_link__business').get(id=source_warehouse_id)
+        except Warehouse.DoesNotExist:
+            raise ValidationError({'source_warehouse': 'Source warehouse not found.'})
+
+        warehouse_business = getattr(source_warehouse, 'business_link', None)
+        if not warehouse_business or warehouse_business.business_id != business.id:
+            raise ValidationError({'source_warehouse': 'Warehouse must belong to the same business as the request.'})
+
+        with transaction.atomic():
+            transfer = Transfer.objects.create(
+                business=business,
+                transfer_type=Transfer.TYPE_WAREHOUSE_TO_STOREFRONT,
+                source_warehouse=source_warehouse,
+                destination_storefront=transfer_request.storefront,
+                created_by=request.user,
+                notes=payload.get('notes')
+            )
+
+            for line_item in transfer_request.line_items.select_related('product'):
+                source_stock = StockProduct.objects.filter(
+                    warehouse=source_warehouse,
+                    product=line_item.product,
+                ).order_by('-created_at').first()
+
+                if not source_stock:
+                    raise ValidationError({
+                        'line_items': f"Product '{line_item.product.name}' is not available in the source warehouse."
+                    })
+
+                if source_stock.quantity < line_item.requested_quantity:
+                    raise ValidationError({
+                        'line_items': (
+                            f"Insufficient quantity for '{line_item.product.name}'. "
+                            f"Available: {source_stock.quantity}, Requested: {line_item.requested_quantity}"
+                        )
+                    })
+
+                if not source_stock.unit_cost or source_stock.unit_cost <= 0:
+                    raise ValidationError({
+                        'line_items': f"Source stock for '{line_item.product.name}' is missing a positive unit cost."
+                    })
+
+                item = TransferItem(
+                    transfer=transfer,
+                    product=line_item.product,
+                    quantity=line_item.requested_quantity,
+                    unit_cost=source_stock.unit_cost or Decimal('0.00'),
+                    supplier=source_stock.supplier,
+                    expiry_date=source_stock.expiry_date,
+                    unit_tax_rate=source_stock.unit_tax_rate,
+                    unit_tax_amount=source_stock.unit_tax_amount,
+                    unit_additional_cost=source_stock.unit_additional_cost,
+                    retail_price=source_stock.retail_price or Decimal('0.00'),
+                    wholesale_price=source_stock.wholesale_price or Decimal('0.00'),
+                )
+                item.save()
+
+            transfer_request.status = TransferRequest.STATUS_ASSIGNED
+            transfer_request.assigned_at = timezone.now()
+            transfer_request.linked_transfer_id = transfer.id
+            transfer_request.linked_transfer_reference = transfer.reference_number
+            transfer_request.save(update_fields=[
+                'status', 'assigned_at', 'linked_transfer_id', 'linked_transfer_reference', 'updated_at'
+            ])
+
+        return Response(self._serialize_transfer(transfer, transfer_request), status=status.HTTP_201_CREATED)
+
+    def _get_transfer_for_action(self, pk):
+        transfer = self.get_queryset().filter(id=pk).first()
+        if not transfer:
+            raise ValidationError({'transfer': 'Transfer not found or access denied.'})
+        return transfer
+
+    @action(detail=True, methods=['post'])
+    def submit(self, request, pk=None):
+        transfer = self._get_transfer_for_action(pk)
+        # No state transition required for submit; keep as pending but touch updated_at
+        transfer.updated_at = timezone.now()
+        transfer.save(update_fields=['updated_at'])
+        return Response(self._serialize_transfer(transfer))
+
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        transfer = self._get_transfer_for_action(pk)
+        transfer.updated_at = timezone.now()
+        transfer.save(update_fields=['updated_at'])
+        return Response(self._serialize_transfer(transfer))
+
+    @action(detail=True, methods=['post'], url_path='dispatch')
+    def mark_dispatched(self, request, pk=None):
+        transfer = self._get_transfer_for_action(pk)
+        if transfer.status == Transfer.STATUS_CANCELLED:
+            raise ValidationError({'status': 'Cannot dispatch a cancelled transfer.'})
+
+        if transfer.status != Transfer.STATUS_IN_TRANSIT:
+            transfer.status = Transfer.STATUS_IN_TRANSIT
+            transfer.save(update_fields=['status', 'updated_at'])
+
+        return Response(self._serialize_transfer(transfer))
+
+    @action(detail=True, methods=['post'])
+    def complete(self, request, pk=None):
+        transfer = self._get_transfer_for_action(pk)
+
+        try:
+            transfer.complete_transfer(completed_by=request.user)
+        except ValidationError as exc:
+            raise ValidationError({'items': exc.detail if hasattr(exc, 'detail') else exc.message})
+
+        return Response(self._serialize_transfer(transfer))
+
+    @action(detail=True, methods=['post'], url_path='confirm-receipt')
+    def confirm_receipt(self, request, pk=None):
+        transfer = self._get_transfer_for_action(pk)
+
+        if transfer.status != Transfer.STATUS_COMPLETED:
+            # Ensure inventory is updated if caller goes straight to confirmation
+            transfer.complete_transfer(completed_by=request.user)
+
+        transfer.received_at = timezone.now()
+        transfer.received_by = request.user
+        transfer.save(update_fields=['received_at', 'received_by', 'updated_at'])
+
+        transfer_request = self._get_linked_request(transfer)
+        if transfer_request is not None:
+            transfer_request.status = TransferRequest.STATUS_FULFILLED
+            transfer_request.fulfilled_at = timezone.now()
+            transfer_request.fulfilled_by = request.user
+            transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+
+        return Response(self._serialize_transfer(transfer, transfer_request))

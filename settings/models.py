@@ -61,9 +61,9 @@ class BusinessSettings(models.Model):
         """Default regional settings"""
         return {
             'currency': {
-                'code': 'GHS',
-                'symbol': '₵',
-                'name': 'Ghanaian Cedi',
+                'code': 'USD',
+                'symbol': '$',
+                'name': 'US Dollar',
                 'position': 'before',
                 'decimalPlaces': 2
             },
