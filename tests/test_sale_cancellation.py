@@ -105,7 +105,7 @@ class SaleCancellationTestCase(TestCase):
         
         # Create stock
         self.stock = Stock.objects.create(
-            warehouse=self.warehouse,
+            business=self.business,
             description='Initial stock'
         )
         
@@ -120,6 +120,7 @@ class SaleCancellationTestCase(TestCase):
         self.stock1 = StockProduct.objects.create(
             product=self.product1,
             stock=self.stock,
+            warehouse=self.warehouse,
             quantity=10,
             unit_cost=Decimal('500.00'),
             retail_price=Decimal('600.00')
@@ -128,6 +129,7 @@ class SaleCancellationTestCase(TestCase):
         self.stock2 = StockProduct.objects.create(
             product=self.product2,
             stock=self.stock,
+            warehouse=self.warehouse,
             quantity=50,
             unit_cost=Decimal('20.00'),
             retail_price=Decimal('25.00')
