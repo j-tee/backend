@@ -7,7 +7,7 @@ from django.test import TestCase
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from accounts.models import Business, BusinessMembership
-from inventory.models import Product, Warehouse, Stock, StockProduct, Supplier
+from inventory.models import Product, Warehouse, Stock, StockProduct, Supplier, Category
 from inventory.stock_adjustments import StockAdjustment
 from decimal import Decimal
 
@@ -81,18 +81,23 @@ class StockAdjustmentSearchBugFixTest(TestCase):
             warehouse=self.warehouse2
         )
         
+        # Create category
+        self.category = Category.objects.create(name="Test Category")
+        
         # Create products
         self.product1 = Product.objects.create(
             business=self.business1,
             name="10mm Armoured Cable 50m",
             sku="ELEC-0007",
-            description="Electrical cable"
+            description="Electrical cable",
+            category=self.category
         )
         self.product2 = Product.objects.create(
             business=self.business2,
             name="10mm Steel Rod",
             sku="STEEL-001",
-            description="Construction steel"
+            description="Construction steel",
+            category=self.category
         )
         
         # Create suppliers
