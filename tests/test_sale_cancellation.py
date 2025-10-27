@@ -172,7 +172,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock1,
             quantity=2,
             unit_price=Decimal('600.00'),
-            total=Decimal('1200.00')
+            total_price=Decimal('1200.00')
         )
         
         item2 = SaleItem.objects.create(
@@ -182,7 +182,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock2,
             quantity=5,
             unit_price=Decimal('25.00'),
-            total=Decimal('125.00')
+            total_price=Decimal('125.00')
         )
         
         # Complete the sale (this deducts from storefront inventory)
@@ -286,7 +286,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock1,
             quantity=1,
             unit_price=Decimal('600.00'),
-            total=Decimal('600.00')
+            total_price=Decimal('600.00')
         )
         
         # Complete the sale (increases customer debt)
@@ -348,7 +348,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock1,
             quantity=1,
             unit_price=Decimal('600.00'),
-            total=Decimal('600.00')
+            total_price=Decimal('600.00')
         )
         
         sale.complete_sale(user=self.user)
@@ -402,7 +402,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock1,
             quantity=2,
             unit_price=Decimal('600.00'),
-            total=Decimal('1200.00')
+            total_price=Decimal('1200.00')
         )
         
         item2 = SaleItem.objects.create(
@@ -412,7 +412,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock2,
             quantity=5,
             unit_price=Decimal('25.00'),
-            total=Decimal('125.00')
+            total_price=Decimal('125.00')
         )
         
         sale.complete_sale(user=self.user)
@@ -489,7 +489,7 @@ class SaleCancellationTestCase(TestCase):
             stock_product=self.stock1,
             quantity=1,
             unit_price=Decimal('600.00'),
-            total=Decimal('600.00')
+            total_price=Decimal('600.00')
         )
         
         print(f"\n✓ Draft sale created:")

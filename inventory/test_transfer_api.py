@@ -223,10 +223,14 @@ class WarehouseTransferViewSetTest(BusinessTestMixin, APITestCase):
         )
         
         # Create stock in warehouse1
+        stock_batch = Stock.objects.create(
+            business=self.business,
+            description='Test stock batch'
+        )
         self.stock = StockProduct.objects.create(
+            stock=stock_batch,
             warehouse=self.warehouse1,
             product=self.product,
-            business=self.business,
             quantity=100
         )
     
@@ -487,6 +491,7 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
             business=self.business,
             source_warehouse=self.warehouse,
             destination_storefront=self.storefront,
+            transfer_type=Transfer.TYPE_WAREHOUSE_TO_STOREFRONT,
             created_by=self.user
         )
         TransferItem.objects.create(
@@ -529,8 +534,7 @@ class TransferPermissionsTest(BusinessTestMixin, APITestCase):
             name='Product',
             sku='PROD-001',
             business=self.business1,
-            category=self.category,
-            cost=Decimal('10.00')
+            category=self.category
         )
         
         self.client = APIClient()
