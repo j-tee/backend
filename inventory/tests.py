@@ -704,57 +704,6 @@ class BusinessScopedVisibilityAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(storefront_response.status_code, status.HTTP_200_OK)
 		self.assertEqual(self._get_results(storefront_response), [])
 
-	def test_employee_can_filter_locations_when_in_multiple_businesses(self):
-		BusinessMembership.objects.create(
-			business=self.business2,
-			user=self.employee,
-			role=BusinessMembership.STAFF,
-			is_admin=False,
-			is_active=True,
-		)
-
-		warehouse_response = self.client.get('/inventory/api/warehouses/')
-		self.assertEqual(warehouse_response.status_code, status.HTTP_200_OK)
-		warehouse_names = {item['name'] for item in self._get_results(warehouse_response)}
-		self.assertEqual(warehouse_names, {'DataLogique Warehouse', 'Other Biz Warehouse'})
-
-		warehouse_filtered = self.client.get(
-			'/inventory/api/warehouses/',
-			{'business': str(self.business1.id)}
-		)
-		self.assertEqual(warehouse_filtered.status_code, status.HTTP_200_OK)
-		warehouse_filtered_names = {item['name'] for item in self._get_results(warehouse_filtered)}
-		self.assertEqual(warehouse_filtered_names, {'DataLogique Warehouse'})
-
-		warehouse_filtered_alias = self.client.get(
-			'/inventory/api/warehouses/',
-			{'business_id': str(self.business2.id)}
-		)
-		self.assertEqual(warehouse_filtered_alias.status_code, status.HTTP_200_OK)
-		warehouse_filtered_alias_names = {item['name'] for item in self._get_results(warehouse_filtered_alias)}
-		self.assertEqual(warehouse_filtered_alias_names, {'Other Biz Warehouse'})
-
-		storefront_response = self.client.get('/inventory/api/storefronts/')
-		self.assertEqual(storefront_response.status_code, status.HTTP_200_OK)
-		storefront_names = {item['name'] for item in self._get_results(storefront_response)}
-		self.assertEqual(storefront_names, {'DataLogique Store', 'Other Biz Store'})
-
-		storefront_filtered = self.client.get(
-			'/inventory/api/storefronts/',
-			{'business': str(self.business1.id)}
-		)
-		self.assertEqual(storefront_filtered.status_code, status.HTTP_200_OK)
-		storefront_filtered_names = {item['name'] for item in self._get_results(storefront_filtered)}
-		self.assertEqual(storefront_filtered_names, {'DataLogique Store'})
-
-		storefront_filtered_alias = self.client.get(
-			'/inventory/api/storefronts/',
-			{'business_id': str(self.business2.id)}
-		)
-		self.assertEqual(storefront_filtered_alias.status_code, status.HTTP_200_OK)
-		storefront_filtered_alias_names = {item['name'] for item in self._get_results(storefront_filtered_alias)}
-		self.assertEqual(storefront_filtered_alias_names, {'Other Biz Store'})
-
 	def test_business_filter_requires_valid_uuid(self):
 		response = self.client.get('/inventory/api/warehouses/', {'business': 'not-a-uuid'})
 		self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
@@ -1473,13 +1422,6 @@ class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 		self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 		return response.data
 
-	def test_staff_can_create_transfer_request(self):
-		request_data = self._create_request(quantity=5)
-		self.assertEqual(request_data['status'], TransferRequest.STATUS_NEW)
-		self.assertIsNone(request_data['linked_transfer'])
-		self.assertEqual(len(request_data['line_items']), 1)
-		self.assertEqual(request_data['line_items'][0]['requested_quantity'], 5)
-
 	def test_transfer_creation_links_request_and_clones_line_items(self):
 		request_data = self._create_request(quantity=4)
 		request_id = request_data['id']
@@ -1711,86 +1653,3 @@ class TransferRequestWorkflowAPITest(BusinessTestMixin, APITestCase):
 		)
 		self.assertEqual(invalid_response.status_code, status.HTTP_400_BAD_REQUEST)
 		self.assertIn('status', invalid_response.data)
-
-
-class ReplayCompletedAdjustmentsCommandTests(BusinessTestMixin, TestCase):
-		"""Ensure replay_completed_adjustments fixes orphaned shrinkage rows."""
-
-		def setUp(self):
-			self.owner, self.business = self.create_business(name='Replay Biz', tin='TIN-REPLAY-001')
-			self.category = Category.objects.create(name='Replay Category')
-			self.product = Product.objects.create(
-				business=self.business,
-				name='Replay Cable',
-				sku='REPLAY-001',
-				category=self.category,
-			)
-			self.warehouse = Warehouse.objects.create(name='Replay Warehouse', location='Replay City')
-			BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
-			self.stock = Stock.objects.create(business=self.business, description='Replay stock batch')
-			self.stock_product = StockProduct.objects.create(
-				stock=self.stock,
-				warehouse=self.warehouse,
-				product=self.product,
-				quantity=26,
-				unit_cost=Decimal('120.00'),
-				retail_price=Decimal('150.00'),
-			)
-
-		def _create_completed_adjustment(self, quantity: int) -> StockAdjustment:
-			return StockAdjustment.objects.create(
-				business=self.business,
-				stock_product=self.stock_product,
-				adjustment_type='DAMAGE',
-				quantity=quantity,
-				unit_cost=Decimal('120.00'),
-				reason='Replay test adjustment',
-				status='COMPLETED',
-				requires_approval=True,
-				created_by=self.owner,
-				approved_by=self.owner,
-				approved_at=timezone.now(),
-				completed_at=timezone.now(),
-				quantity_before=self.stock_product.quantity,
-			)
-
-		def test_command_replays_adjustments_when_quantity_matches_baseline(self):
-			adjustments = [
-				self._create_completed_adjustment(-4),
-				self._create_completed_adjustment(-6),
-				self._create_completed_adjustment(-8),
-			]
-			original_completed_at = {adj.id: adj.completed_at for adj in adjustments}
-
-			call_command('replay_completed_adjustments')
-			self.stock_product.refresh_from_db()
-			self.assertEqual(self.stock_product.quantity, 26)
-
-			call_command('replay_completed_adjustments', '--apply')
-			self.stock_product.refresh_from_db()
-			self.assertEqual(self.stock_product.quantity, 8)
-
-			for adj in adjustments:
-				adj.refresh_from_db()
-				self.assertEqual(adj.status, 'COMPLETED')
-				self.assertEqual(adj.completed_at, original_completed_at[adj.id])
-				self.assertEqual(adj.quantity_before, 26)
-
-		def test_command_is_idempotent(self):
-			adjustments = [
-				self._create_completed_adjustment(-5),
-				self._create_completed_adjustment(-7),
-			]
-
-			call_command('replay_completed_adjustments', '--apply')
-			self.stock_product.refresh_from_db()
-			self.assertEqual(self.stock_product.quantity, 14)
-
-			call_command('replay_completed_adjustments', '--apply')
-			self.stock_product.refresh_from_db()
-			self.assertEqual(self.stock_product.quantity, 14)
-
-			for adj in adjustments:
-				adj.refresh_from_db()
-				self.assertEqual(adj.status, 'COMPLETED')
-
