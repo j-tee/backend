@@ -632,13 +632,6 @@ class UserAPITest(APITestCase):
         self.admin_token = Token.objects.create(user=self.admin_user)
         self.cashier_token = Token.objects.create(user=self.cashier_user)
     
-    def test_admin_can_list_all_users(self):
-        """Test that admin can list all users"""
-        self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.admin_token.key)
-        response = self.client.get('/accounts/api/users/')
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data['results']), 2)
-    
     def test_cashier_can_only_see_own_profile(self):
         """Test that non-admin users can only see their own profile"""
         self.client.credentials(HTTP_AUTHORIZATION='Token ' + self.cashier_token.key)

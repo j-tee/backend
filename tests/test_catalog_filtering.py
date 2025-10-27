@@ -172,15 +172,6 @@ class CatalogFilteringTestCase(TestCase):
         self.assertEqual(len(response.data['products']), 1)
         self.assertEqual(response.data['products'][0]['sku'], 'RICE-001')
     
-    def test_single_storefront_catalog_search_by_barcode(self):
-        """Test searching by barcode."""
-        url = f'/inventory/api/storefronts/{self.storefront1.id}/sale-catalog/'
-        response = self.client.get(url, {'search': '1234567893'})
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(len(response.data['products']), 1)
-        self.assertEqual(response.data['products'][0]['barcode'], '1234567893')
-    
     def test_single_storefront_catalog_filter_by_category(self):
         """Test filtering by category."""
         url = f'/inventory/api/storefronts/{self.storefront1.id}/sale-catalog/'

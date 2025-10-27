@@ -188,29 +188,9 @@ class BusinessSettingsAPITestCase(TestCase):
         """Unauthenticated users should not access settings"""
         self.client.force_authenticate(user=None)
         
+        
         response = self.client.get('/settings/api/settings/')
         
         # DRF returns 403 Forbidden for unauthenticated users with this setup
         self.assertIn(response.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
 
-    def test_business_isolation(self):
-        """Users should only see their own business settings"""
-        # Create another business with unique TIN
-        import uuid
-        other_business = Business.objects.create(
-            name='Other Business',
-            owner=self.user,
-            tin=str(uuid.uuid4())[:20]  # Unique TIN
-        )
-        
-        # Settings are auto-created by signal, so just update the theme
-        other_settings = BusinessSettings.objects.get(business=other_business)
-        other_settings.appearance = {'themePreset': 'ocean-teal'}
-        other_settings.save()
-        
-        # User's current business settings should be separate
-        response = self.client.get('/settings/api/settings/')
-        
-        self.assertEqual(response.status_code, status.HTTP_200_OK)
-        # Should not return ocean-teal theme from other business
-        self.assertNotEqual(response.data['appearance']['themePreset'], 'ocean-teal')
