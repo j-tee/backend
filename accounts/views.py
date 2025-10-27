@@ -312,19 +312,45 @@ class LoginView(APIView):
             token, created = Token.objects.get_or_create(user=user)
 
             employment_data = None
-            if user.account_type == User.ACCOUNT_EMPLOYEE:
-                membership = (
-                    user.business_memberships.select_related('business')
-                    .filter(is_active=True)
-                    .order_by('-updated_at', '-created_at')
+            final_user_role = None
+            
+            # Get primary business membership (for both employees and owners)
+            membership = (
+                user.business_memberships.select_related('business')
+                .filter(is_active=True)
+                .order_by('-updated_at', '-created_at')
+                .first()
+            )
+            
+            if membership:
+                # Always set final_user_role from business membership
+                final_user_role = membership.role
+                
+                # Set employment data for all users with business membership
+                employment_data = BusinessMembershipSummarySerializer(membership).data
+            
+            # Fallback: Get primary role from UserRole if no business membership
+            if not final_user_role:
+                from accounts.models import UserRole
+                primary_user_role = (
+                    UserRole.objects.filter(user=user, is_active=True)
+                    .select_related('role')
+                    .order_by('-assigned_at')
                     .first()
                 )
-                if membership:
-                    employment_data = BusinessMembershipSummarySerializer(membership).data
+                if primary_user_role:
+                    final_user_role = primary_user_role.role.name
+
+            # Serialize user data
+            user_data = UserSerializer(user, context={'request': request}).data
+            
+            # Add computed fields for frontend compatibility
+            user_data['final_userRole'] = final_user_role
+            user_data['employment'] = employment_data
 
             response_payload = {
                 'token': token.key,
-                'user': UserSerializer(user, context={'request': request}).data,
+                'user': user_data,
                 'employment': employment_data,
             }
 

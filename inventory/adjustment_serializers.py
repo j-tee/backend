@@ -131,9 +131,9 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
             ).first()
             
             if membership:
-                # Filter stock products by user's business
+                # Filter stock products by the parent Stock business for authoritative scoping
                 fields['stock_product'].queryset = StockProduct.objects.filter(
-                    warehouse__business_link__business=membership.business
+                    stock__business=membership.business
                 ).select_related('product', 'supplier', 'warehouse', 'stock')
             else:
                 # No business membership - return empty queryset
@@ -259,7 +259,7 @@ class StockAdjustmentCreateSerializer(serializers.ModelSerializer):
             if membership:
                 # Filter stock products by user's business
                 fields['stock_product'].queryset = StockProduct.objects.filter(
-                    warehouse__business_link__business=membership.business
+                    stock__business=membership.business
                 ).select_related('product', 'supplier', 'warehouse', 'stock')
             else:
                 # No business membership - return empty queryset

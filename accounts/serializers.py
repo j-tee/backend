@@ -44,13 +44,14 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class UserSerializer(serializers.ModelSerializer):
     profile = UserProfileSerializer(read_only=True)
-    role_name = serializers.CharField(source='role.name', read_only=True)
+    role_name = serializers.CharField(source='role.name', read_only=True, allow_null=True)
+    user_roles = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, min_length=8, required=False)
     
     class Meta:
         model = User
         fields = [
-            'id', 'name', 'email', 'role', 'role_name', 'picture_url',
+            'id', 'name', 'email', 'role', 'role_name', 'user_roles', 'picture_url',
             'account_type', 'platform_role', 'email_verified', 'is_active',
             'profile', 'password', 'created_at', 'updated_at'
         ]
@@ -58,6 +59,35 @@ class UserSerializer(serializers.ModelSerializer):
         extra_kwargs = {
             'password': {'write_only': True},
         }
+    
+    def get_user_roles(self, obj):
+        """Get all active roles for the user with their scopes"""
+        from accounts.models import UserRole
+        roles = UserRole.objects.filter(
+            user=obj,
+            is_active=True
+        ).select_related('role', 'business', 'storefront')
+        
+        return [
+            {
+                'id': str(ur.id),
+                'role': {
+                    'id': str(ur.role.id),
+                    'name': ur.role.name,
+                    'description': ur.role.description,
+                },
+                'scope': ur.scope,
+                'business': {
+                    'id': str(ur.business.id),
+                    'name': ur.business.name,
+                } if ur.business else None,
+                'storefront': {
+                    'id': str(ur.storefront.id),
+                    'name': ur.storefront.name,
+                } if ur.storefront else None,
+            }
+            for ur in roles
+        ]
     
     def create(self, validated_data):
         password = validated_data.pop('password', None)

@@ -7,18 +7,16 @@ Tracks stock levels, movements, low stock alerts, and warehouse performance.
 
 from decimal import Decimal
 from typing import Dict, Any, List
-from datetime import timedelta, date, datetime
+from datetime import timedelta, date
 from django.db.models import Sum, Count, Avg, Q, F, Min, Max, DecimalField, Case, When, Value
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, Coalesce
 from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
 
 from inventory.models import Product, StockProduct, Warehouse, Category, Supplier
 from inventory.stock_adjustments import StockAdjustment
 from sales.models import Sale, SaleItem
 from reports.services.report_base import BaseReportView
-from reports.services import MovementTracker  # Phase 3: Use MovementTracker
 from reports.utils.response import ReportResponse, ReportError
 from reports.utils.aggregation import AggregationHelper
 
@@ -401,35 +399,29 @@ class LowStockAlertsReportView(BaseReportView):
     GET /reports/api/inventory/low-stock-alerts/
     
     Identifies products that need reordering based on current stock levels
-    and sales velocity. Provides reorder recommendations and urgency levels.
+    and sales velocity. Provides reorder recommendations and priority levels.
     
     Query Parameters:
-    - search: str (optional - search by product name or SKU)
     - warehouse_id: UUID (optional - filter by warehouse)
     - category_id: UUID (optional - filter by category)
-    - urgency: critical|warning|watch (optional - filter by urgency)
-    - sort_by: urgency|days_remaining|value (optional - default: urgency)
+    - priority: critical|high|medium (optional - filter by priority)
     - days_threshold: int (default: 30 - alert if < X days of stock)
     - page: int (pagination)
-    - page_size: int (pagination, default: 20)
+    - page_size: int (pagination, default: 50)
     
     Response Format:
     {
         "success": true,
         "data": {
             "summary": {
-                "critical": 3,
-                "warning": 7,
-                "watch": 5
+                "total_low_stock_products": 15,
+                "critical_alerts": 3,
+                "high_priority": 7,
+                "medium_priority": 5
             },
-            "alerts": [...],
-            "total_restock_cost": 12345.50,
-            "by_warehouse": {...},
-            "by_category": {...}
+            "alerts": [...]
         },
-        "meta": {
-            "pagination": {...}
-        }
+        "meta": {...}
     }
     """
     
@@ -443,11 +435,9 @@ class LowStockAlertsReportView(BaseReportView):
             return ReportResponse.error(error)
         
         # Parse filters
-        search_term = request.GET.get('search', '').strip()
         warehouse_id = request.GET.get('warehouse_id')
         category_id = request.GET.get('category_id')
-        urgency_filter = request.GET.get('urgency')  # critical|warning|watch
-        sort_by = request.GET.get('sort_by', 'urgency')  # urgency|days_remaining|value
+        priority = request.GET.get('priority')
         days_threshold = int(request.GET.get('days_threshold', 30))
         
         # Build queryset for stock products
@@ -456,14 +446,7 @@ class LowStockAlertsReportView(BaseReportView):
         ).filter(
             product__business_id=business_id,
             quantity__gt=0  # Only products with some stock
-        ).distinct()
-        
-        # Apply search filter
-        if search_term:
-            queryset = queryset.filter(
-                Q(product__name__icontains=search_term) |
-                Q(product__sku__icontains=search_term)
-            )
+        )
         
         if warehouse_id:
             queryset = queryset.filter(warehouse_id=warehouse_id)
@@ -471,60 +454,39 @@ class LowStockAlertsReportView(BaseReportView):
             queryset = queryset.filter(product__category_id=category_id)
         
         # Build alerts with sales velocity
-        all_alerts = self._build_alerts(queryset, days_threshold)
+        alerts = self._build_alerts(queryset, days_threshold)
         
-        # Filter by urgency if specified
-        if urgency_filter:
-            all_alerts = [a for a in all_alerts if a['urgency'] == urgency_filter]
-        
-        # Apply sorting
-        all_alerts = self._apply_sorting(all_alerts, sort_by)
+        # Filter by priority if specified
+        if priority:
+            alerts = [a for a in alerts if a['priority'] == priority]
         
         # Build summary
-        summary = self._build_summary(all_alerts)
-        
-        # Build warehouse and category groupings
-        by_warehouse = self._build_warehouse_grouping(all_alerts)
-        by_category = self._build_category_grouping(all_alerts)
+        summary = self._build_summary(alerts)
         
         # Apply pagination
         page, page_size = self.get_pagination_params(request)
-        total_count = len(all_alerts)
+        total_count = len(alerts)
         start_idx = (page - 1) * page_size
         end_idx = start_idx + page_size
-        paginated_alerts = all_alerts[start_idx:end_idx]
+        paginated_alerts = alerts[start_idx:end_idx]
         
-        # Calculate total restock cost
-        total_restock_cost = sum(
-            Decimal(alert['estimated_cost'])
-            for alert in all_alerts
-        )
-        
-        # Build response data
-        data = {
-            'summary': summary,
-            'alerts': paginated_alerts,
-            'total_restock_cost': str(total_restock_cost),
-            'by_warehouse': by_warehouse,
-            'by_category': by_category
+        pagination = {
+            'page': page,
+            'page_size': page_size,
+            'total_count': total_count,
+            'total_pages': (total_count + page_size - 1) // page_size
         }
         
-        # Build metadata with nested pagination
+        # Metadata
         metadata = {
-            'pagination': {
-                'page': page,
-                'page_size': page_size,
-                'total_count': total_count,
-                'total_pages': (total_count + page_size - 1) // page_size
-            }
+            'warehouse_id': warehouse_id,
+            'category_id': category_id,
+            'priority': priority,
+            'days_threshold': days_threshold,
+            **pagination
         }
         
-        # Return custom Response to match frontend expectations
-        return Response({
-            'success': True,
-            'data': data,
-            'meta': metadata
-        })
+        return ReportResponse.success(summary, paginated_alerts, metadata)
     
     def _build_alerts(self, queryset, days_threshold: int) -> List[Dict]:
         """Build low stock alerts with sales velocity"""
@@ -560,13 +522,13 @@ class LowStockAlertsReportView(BaseReportView):
             else:
                 days_until_stockout = Decimal('999')  # No recent sales, not urgent
             
-            # Determine urgency (matching frontend expectations)
+            # Determine priority
             if days_until_stockout < 5 or stock.quantity < 5:
-                urgency = 'critical'  # Red alert
+                priority = 'critical'
             elif days_until_stockout < 14:
-                urgency = 'warning'   # Orange/amber alert
+                priority = 'high'
             elif days_until_stockout < days_threshold:
-                urgency = 'watch'     # Yellow/blue alert
+                priority = 'medium'
             else:
                 continue  # Not a low stock alert
             
@@ -575,122 +537,56 @@ class LowStockAlertsReportView(BaseReportView):
             recommended_qty = int((avg_daily_sales * Decimal('40')) - Decimal(str(stock.quantity))) if avg_daily_sales > 0 else 50
             recommended_qty = max(recommended_qty, 10)  # Minimum order of 10
             
-            # Get latest restock date
+            # Get latest restock date (from stock_product created_at or adjustments)
             last_restock_date = stock.created_at.date()
-            
-            # Calculate lead time and suggested order date (simplified)
-            lead_time_days = 7  # Default lead time
-            if stock.supplier:
-                # Could pull from supplier.lead_time_days if that field exists
-                lead_time_days = getattr(stock.supplier, 'lead_time_days', 7)
-            
-            # Suggested order date = today if critical, or (stockout_date - lead_time) otherwise
-            if urgency == 'critical':
-                suggested_order_date = timezone.now().date()
-            else:
-                days_before_order = max(0, int(days_until_stockout) - lead_time_days)
-                suggested_order_date = timezone.now().date() + timedelta(days=days_before_order)
             
             alerts.append({
                 'product_id': product_id,
                 'product_name': stock.product.name,
                 'sku': stock.product.sku,
-                'category_id': str(stock.product.category.id) if stock.product.category else None,
-                'category_name': stock.product.category.name if stock.product.category else 'Uncategorized',
+                'category': stock.product.category.name if stock.product.category else None,
                 'warehouse_id': str(stock.warehouse.id),
                 'warehouse_name': stock.warehouse.name,
-                'current_stock': int(stock.quantity),
+                'current_quantity': stock.quantity,
                 'reorder_point': 20,  # Simplified, could be product-specific
-                'reorder_quantity': recommended_qty,
-                'urgency': urgency,
-                'average_daily_sales': round(float(avg_daily_sales), 2),
+                'recommended_order_quantity': recommended_qty,
+                'supplier_id': str(stock.supplier.id) if stock.supplier else None,
+                'supplier_name': stock.supplier.name if stock.supplier else None,
+                'unit_cost': str(stock.unit_cost),
+                'estimated_order_cost': str(stock.unit_cost * recommended_qty),
+                'priority': priority,
                 'days_until_stockout': round(float(days_until_stockout), 1),
-                'last_restock_date': last_restock_date.isoformat(),
-                'supplier': stock.supplier.name if stock.supplier else 'No Supplier',
-                'lead_time_days': lead_time_days,
-                'suggested_order_date': suggested_order_date.isoformat(),
-                'estimated_cost': str(stock.unit_cost * recommended_qty)
+                'average_daily_sales': round(float(avg_daily_sales), 2),
+                'last_restock_date': last_restock_date.isoformat()
             })
         
-        return alerts
-    
-    def _apply_sorting(self, alerts: List[Dict], sort_by: str) -> List[Dict]:
-        """Apply sorting to alerts"""
-        if sort_by == 'urgency':
-            # Sort by urgency (critical first) then by days until stockout
-            urgency_order = {'critical': 0, 'warning': 1, 'watch': 2}
-            alerts.sort(key=lambda x: (urgency_order[x['urgency']], x['days_until_stockout']))
-        elif sort_by == 'days_remaining':
-            # Sort by days until stockout (lowest first)
-            alerts.sort(key=lambda x: x['days_until_stockout'])
-        elif sort_by == 'value':
-            # Sort by estimated cost (highest first)
-            alerts.sort(key=lambda x: Decimal(x['estimated_cost']), reverse=True)
+        # Sort by priority (critical first) then by days until stockout
+        priority_order = {'critical': 0, 'high': 1, 'medium': 2}
+        alerts.sort(key=lambda x: (priority_order[x['priority']], x['days_until_stockout']))
         
         return alerts
     
     def _build_summary(self, alerts: List[Dict]) -> Dict[str, Any]:
-        """Build summary statistics (matching frontend expectations)"""
-        critical = [a for a in alerts if a['urgency'] == 'critical']
-        warning = [a for a in alerts if a['urgency'] == 'warning']
-        watch = [a for a in alerts if a['urgency'] == 'watch']
+        """Build summary statistics"""
+        critical = [a for a in alerts if a['priority'] == 'critical']
+        high = [a for a in alerts if a['priority'] == 'high']
+        medium = [a for a in alerts if a['priority'] == 'medium']
+        
+        # Calculate total estimated reorder cost
+        total_reorder_cost = sum(
+            Decimal(alert['estimated_order_cost'])
+            for alert in alerts
+        )
         
         return {
-            'critical': len(critical),
-            'warning': len(warning),
-            'watch': len(watch)
+            'total_low_stock_products': len(alerts),
+            'critical_alerts': len(critical),
+            'high_priority': len(high),
+            'medium_priority': len(medium),
+            'estimated_reorder_cost': str(total_reorder_cost)
         }
-    
-    def _build_warehouse_grouping(self, alerts: List[Dict]) -> Dict[str, Any]:
-        """Group alerts by warehouse for filter dropdown"""
-        warehouse_groups = {}
-        
-        for alert in alerts:
-            warehouse_id = alert['warehouse_id']
-            if warehouse_id not in warehouse_groups:
-                warehouse_groups[warehouse_id] = {
-                    'name': alert['warehouse_name'],
-                    'alerts': 0,
-                    'restock_cost': Decimal('0')
-                }
-            
-            warehouse_groups[warehouse_id]['alerts'] += 1
-            warehouse_groups[warehouse_id]['restock_cost'] += Decimal(alert['estimated_cost'])
-        
-        # Convert Decimal to string for JSON serialization
-        for warehouse_id in warehouse_groups:
-            warehouse_groups[warehouse_id]['restock_cost'] = str(
-                warehouse_groups[warehouse_id]['restock_cost']
-            )
-        
-        return warehouse_groups
-    
-    def _build_category_grouping(self, alerts: List[Dict]) -> Dict[str, Any]:
-        """Group alerts by category for filter dropdown"""
-        category_groups = {}
-        
-        for alert in alerts:
-            category_id = alert.get('category_id')
-            if not category_id:
-                continue
-            
-            if category_id not in category_groups:
-                category_groups[category_id] = {
-                    'name': alert['category_name'],
-                    'alerts': 0,
-                    'restock_cost': Decimal('0')
-                }
-            
-            category_groups[category_id]['alerts'] += 1
-            category_groups[category_id]['restock_cost'] += Decimal(alert['estimated_cost'])
-        
-        # Convert Decimal to string for JSON serialization
-        for category_id in category_groups:
-            category_groups[category_id]['restock_cost'] = str(
-                category_groups[category_id]['restock_cost']
-            )
-        
-        return category_groups
+
+
 class StockMovementHistoryReportView(BaseReportView):
     """
     Stock Movement History Report
@@ -743,14 +639,10 @@ class StockMovementHistoryReportView(BaseReportView):
         if error:
             return ReportResponse.error(error)
         
-        # Parse filters
-        search_term = request.GET.get('search', '').strip()
         warehouse_id = request.GET.get('warehouse_id')
-        category_id = request.GET.get('category_id')
         product_id = request.GET.get('product_id')
         movement_type = request.GET.get('movement_type', 'all')
         adjustment_type = request.GET.get('adjustment_type')
-        sort_by = request.GET.get('sort_by', 'date_desc')  # date_desc|date_asc|quantity|product
         grouping = request.GET.get('grouping', 'daily')
         
         # Build summary
@@ -777,203 +669,311 @@ class StockMovementHistoryReportView(BaseReportView):
             'time_series': time_series
         }
         
-        # Build warehouse and category groupings for filters
-        by_warehouse = self._build_warehouse_grouping(movements)
-        by_category = self._build_category_grouping(movements)
-        
-        # Build response data
-        data = {
-            'summary': summary,
-            'movements': movements,
-            'time_series': time_series,
-            'by_warehouse': by_warehouse,
-            'by_category': by_category
-        }
-        
-        # Build metadata with nested pagination
+        # Metadata
         metadata = {
             'date_range': {
                 'start': start_date.isoformat(),
                 'end': end_date.isoformat()
             },
-            'pagination': pagination
+            'warehouse_id': warehouse_id,
+            'product_id': product_id,
+            'movement_type': movement_type,
+            'adjustment_type': adjustment_type,
+            'grouping': grouping,
+            **pagination
         }
         
-        # Return custom Response to match frontend expectations
-        return Response({
-            'success': True,
-            'data': data,
-            'meta': metadata
-        })
+        return ReportResponse.success(summary_data, movements, metadata)
     
     def _build_summary(self, start_date, end_date, warehouse_id, product_id,
                       movement_type, adjustment_type) -> Dict[str, Any]:
-        """Build summary of all movements using MovementTracker (Phase 3)"""
-        # Use MovementTracker to get unified summary
-        summary = MovementTracker.get_summary(
-            business_id=str(self.request.user.primary_business.id),
-            warehouse_id=warehouse_id,
-            product_id=product_id,
-            start_date=start_date,
-            end_date=end_date
+        """Build summary of all movements"""
+        # Get adjustments (positive and negative)
+        adjustments_qs = StockAdjustment.objects.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            status='COMPLETED'
         )
         
-        # Calculate shrinkage percentage
-        shrinkage_pct = 0
-        if summary['total_quantity_out'] > 0:
-            shrinkage_pct = (summary.get('shrinkage_count', 0) / summary['total_quantity_out'] * 100)
+        if warehouse_id:
+            adjustments_qs = adjustments_qs.filter(stock_product__warehouse_id=warehouse_id)
+        if product_id:
+            adjustments_qs = adjustments_qs.filter(stock_product__product_id=product_id)
+        if adjustment_type:
+            adjustments_qs = adjustments_qs.filter(adjustment_type=adjustment_type)
+        
+        # Get sales (always negative movement)
+        sales_qs = SaleItem.objects.filter(
+            sale__created_at__date__gte=start_date,
+            sale__created_at__date__lte=end_date,
+            sale__status__in=['COMPLETED', 'PARTIAL']
+        )
+        
+        if warehouse_id:
+            # Sales don't directly link to warehouse, skip this filter for now
+            pass
+        if product_id:
+            sales_qs = sales_qs.filter(product_id=product_id)
+        
+        # Calculate movements based on type
+        total_movements = 0
+        units_in = 0
+        units_out = 0
+        value_in = Decimal('0.00')
+        value_out = Decimal('0.00')
+        movement_breakdown = {}
+        
+        if movement_type in ['all', 'adjustments']:
+            # Process adjustments
+            adj_stats = adjustments_qs.aggregate(
+                count=Count('id'),
+                total_qty=Sum('quantity'),
+                total_cost=Sum('total_cost')
+            )
+            
+            adj_by_type = adjustments_qs.values('adjustment_type').annotate(
+                count=Count('id'),
+                total_quantity=Sum('quantity')
+            )
+            
+            total_movements += adj_stats['count'] or 0
+            
+            for item in adj_by_type:
+                adj_type = item['adjustment_type']
+                qty = item['total_quantity'] or 0
+                movement_breakdown[adj_type.lower()] = qty
+                
+                if qty > 0:
+                    units_in += qty
+                else:
+                    units_out += abs(qty)
+        
+        if movement_type in ['all', 'sales']:
+            # Process sales (always outbound)
+            sales_stats = sales_qs.aggregate(
+                count=Count('id'),
+                total_qty=Sum('quantity'),
+                total_value=Sum(F('quantity') * F('unit_price'), output_field=DecimalField())
+            )
+            
+            sales_qty = sales_stats['total_qty'] or 0
+            total_movements += sales_stats['count'] or 0
+            units_out += sales_qty
+            value_out += sales_stats['total_value'] or Decimal('0.00')
+            movement_breakdown['sales'] = -sales_qty  # Negative for outbound
+        
+        net_change = units_in - units_out
+        net_value = value_in - value_out
+        
+        # Calculate shrinkage (negative adjustments)
+        shrinkage_types = ['THEFT', 'LOSS', 'DAMAGE', 'EXPIRED', 'SPOILAGE', 'WRITE_OFF']
+        shrinkage_qs = adjustments_qs.filter(adjustment_type__in=shrinkage_types)
+        
+        shrinkage_stats = shrinkage_qs.aggregate(
+            total_units=Sum('quantity'),
+            total_cost=Sum('total_cost')
+        )
+        
+        shrinkage_units = abs(shrinkage_stats['total_units'] or 0)
+        shrinkage_cost = shrinkage_stats['total_cost'] or Decimal('0.00')
+        
+        # Calculate shrinkage percentage (of total outbound)
+        shrinkage_pct = (shrinkage_units / units_out * 100) if units_out > 0 else 0
         
         return {
-            'total_movements': summary['total_movements'],
-            'total_units_in': summary['total_quantity_in'],
-            'total_units_out': summary['total_quantity_out'],
-            'net_change': summary['net_quantity'],
-            'value_in': str(summary['total_value_in']),
-            'value_out': str(summary['total_value_out']),
-            'net_value_change': str(summary['net_value']),
-            'movement_breakdown': {
-                'transfers': summary.get('transfers_count', 0),
-                'sales': summary.get('sales_count', 0),
-                'shrinkage': summary.get('shrinkage_count', 0),
-            },
+            'total_movements': total_movements,
+            'total_units_in': units_in,
+            'total_units_out': units_out,
+            'net_change': net_change,
+            'value_in': str(value_in),
+            'value_out': str(value_out),
+            'net_value_change': str(net_value),
+            'movement_breakdown': movement_breakdown,
             'shrinkage': {
-                'total_units': summary.get('shrinkage_count', 0),
-                'total_value': str(abs(summary.get('shrinkage_value', 0))),
+                'total_units': shrinkage_units,
+                'total_value': str(abs(shrinkage_cost)),
                 'percentage_of_outbound': round(shrinkage_pct, 2)
             }
         }
     
     def _build_time_series(self, start_date, end_date, warehouse_id, product_id,
                           movement_type, grouping) -> List[Dict]:
-        """Build time-series breakdown of movements using MovementTracker (Phase 3)"""
-        from datetime import timedelta
-        from collections import defaultdict
+        """Build time-series breakdown of movements"""
+        # Determine truncation function
+        if grouping == 'daily':
+            trunc_func = TruncDate
+        elif grouping == 'weekly':
+            trunc_func = TruncWeek
+        else:  # monthly
+            trunc_func = TruncMonth
         
-        # Get all movements using MovementTracker
-        movements_data = MovementTracker.get_movements(
-            business_id=str(self.request.user.primary_business.id),
-            warehouse_id=warehouse_id,
-            product_id=product_id,
-            start_date=start_date,
-            end_date=end_date,
-            movement_types=None  # Get all types, filter later
+        # Get adjustments grouped by period
+        adjustments_qs = StockAdjustment.objects.filter(
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date,
+            status='COMPLETED'
         )
         
-        # Group movements by period
-        period_map = defaultdict(lambda: {
-            'units_in': 0,
-            'units_out': 0,
-            'movements_count': 0
-        })
+        if warehouse_id:
+            adjustments_qs = adjustments_qs.filter(stock_product__warehouse_id=warehouse_id)
+        if product_id:
+            adjustments_qs = adjustments_qs.filter(stock_product__product_id=product_id)
         
-        for movement in movements_data:
-            # Apply movement_type filter
-            if movement_type == 'sales' and movement['type'] != 'SALE':
-                continue
-            if movement_type == 'adjustments' and movement['type'] not in ['TRANSFER', 'ADJUSTMENT', 'SHRINKAGE']:
-                continue
-            
-            # Parse movement date
-            movement_date = datetime.fromisoformat(movement['date'].replace('Z', '+00:00')).date()
-            
-            # Determine period based on grouping
-            if grouping == 'daily':
-                period_start = movement_date
-            elif grouping == 'weekly':
-                # Week starts on Monday
-                period_start = movement_date - timedelta(days=movement_date.weekday())
-            else:  # monthly
-                period_start = movement_date.replace(day=1)
-            
-            period_key = period_start.strftime('%Y-%m-%d')
-            
-            # Aggregate quantities
-            quantity = movement['quantity']
-            if movement['direction'] == 'in':
-                period_map[period_key]['units_in'] += quantity
-            else:
-                period_map[period_key]['units_out'] += abs(quantity)
-            
-            period_map[period_key]['movements_count'] += 1
+        if movement_type in ['all', 'adjustments']:
+            adj_periods = adjustments_qs.annotate(
+                period=trunc_func('created_at')
+            ).values('period').annotate(
+                count=Count('id'),
+                units_in=Sum('quantity', filter=Q(quantity__gt=0)),
+                units_out=Sum('quantity', filter=Q(quantity__lt=0))
+            ).order_by('period')
+        else:
+            adj_periods = []
         
-        # Build time series with period boundaries
-        time_series = []
-        for period_key, data in sorted(period_map.items()):
-            period_date = datetime.strptime(period_key, '%Y-%m-%d').date()
-            time_series.append({
-                'period': period_key,
-                'period_start': period_key,
-                'period_end': self._get_period_end(period_date, grouping).strftime('%Y-%m-%d'),
-                'units_in': data['units_in'],
-                'units_out': data['units_out'],
-                'net_change': data['units_in'] - data['units_out'],
-                'movements_count': data['movements_count']
-            })
+        # Get sales grouped by period
+        if movement_type in ['all', 'sales']:
+            sales_qs = SaleItem.objects.filter(
+                sale__created_at__date__gte=start_date,
+                sale__created_at__date__lte=end_date,
+                sale__status__in=['COMPLETED', 'PARTIAL']
+            )
+            
+            if product_id:
+                sales_qs = sales_qs.filter(product_id=product_id)
+            
+            sales_periods = sales_qs.annotate(
+                period=trunc_func('sale__created_at')
+            ).values('period').annotate(
+                count=Count('id'),
+                units_sold=Sum('quantity')
+            ).order_by('period')
+        else:
+            sales_periods = []
+        
+        # Combine periods
+        period_map = {}
+        
+        for item in adj_periods:
+            period_date = item['period']
+            period_key = period_date.strftime('%Y-%m-%d')
+            
+            if period_key not in period_map:
+                period_map[period_key] = {
+                    'period': period_key,
+                    'period_start': period_date.strftime('%Y-%m-%d'),
+                    'period_end': self._get_period_end(period_date, grouping).strftime('%Y-%m-%d'),
+                    'units_in': 0,
+                    'units_out': 0,
+                    'net_change': 0,
+                    'movements_count': 0
+                }
+            
+            period_map[period_key]['units_in'] += item['units_in'] or 0
+            period_map[period_key]['units_out'] += abs(item['units_out'] or 0)
+            period_map[period_key]['movements_count'] += item['count']
+        
+        for item in sales_periods:
+            period_date = item['period']
+            period_key = period_date.strftime('%Y-%m-%d')
+            
+            if period_key not in period_map:
+                period_map[period_key] = {
+                    'period': period_key,
+                    'period_start': period_date.strftime('%Y-%m-%d'),
+                    'period_end': self._get_period_end(period_date, grouping).strftime('%Y-%m-%d'),
+                    'units_in': 0,
+                    'units_out': 0,
+                    'net_change': 0,
+                    'movements_count': 0
+                }
+            
+            period_map[period_key]['units_out'] += item['units_sold'] or 0
+            period_map[period_key]['movements_count'] += item['count']
+        
+        # Calculate net change
+        for period_data in period_map.values():
+            period_data['net_change'] = period_data['units_in'] - period_data['units_out']
+        
+        # Sort by period
+        time_series = sorted(period_map.values(), key=lambda x: x['period'])
         
         return time_series
     
     def _build_movements(self, start_date, end_date, warehouse_id, product_id,
-                        movement_type, adjustment_type, request,
-                        search_term=None, category_id=None, sort_by='date_desc') -> tuple:
-        """Build list of individual movements using MovementTracker (Phase 3)"""
-        # Use MovementTracker to get unified movements
-        movements_data = MovementTracker.get_movements(
-            business_id=str(self.request.user.primary_business.id),
-            warehouse_id=warehouse_id,
-            product_id=product_id,
-            start_date=start_date,
-            end_date=end_date,
-            movement_types=None  # Get all types, filter later
-        )
-        
-        # Transform to frontend format
+                        movement_type, adjustment_type, request) -> tuple:
+        """Build detailed movements list with pagination"""
         movements = []
-        for movement in movements_data:
-            # Apply movement_type filter
-            if movement_type == 'sales' and movement['type'] != 'SALE':
-                continue
-            if movement_type == 'adjustments' and movement['type'] not in ['TRANSFER', 'ADJUSTMENT', 'SHRINKAGE']:
-                continue
-            
-            # Apply search filter
-            if search_term:
-                search_lower = search_term.lower()
-                if (search_lower not in movement.get('product_name', '').lower() and
-                    search_lower not in movement.get('product_sku', '').lower()):
-                    continue
-            
-            # Format movement for frontend
-            formatted = {
-                'movement_id': movement['id'],
-                'product_id': movement.get('product_id'),
-                'product_name': movement.get('product_name'),
-                'sku': movement.get('product_sku'),
-                'category_id': movement.get('category_id'),
-                'category_name': movement.get('category'),
-                'warehouse_id': movement.get('source_location') if movement['direction'] == 'out' else movement.get('destination_location'),
-                'warehouse_name': movement.get('source_location') if movement['direction'] == 'out' else movement.get('destination_location'),
-                'movement_type': movement['type'].lower(),
-                'quantity': movement['quantity'],
-                'quantity_before': None,  # Not available in MovementTracker
-                'quantity_after': None,   # Not available in MovementTracker
-                'reference_type': movement['source_type'],
-                'reference_id': movement['id'],
-                'performed_by': movement.get('created_by'),
-                'performed_by_id': None,  # Not available in current MovementTracker
-                'notes': movement.get('reason'),
-                'created_at': movement['date'],
-            }
-            movements.append(formatted)
         
-        # Apply sorting
-        if sort_by == 'date_desc':
-            movements.sort(key=lambda x: x['created_at'], reverse=True)
-        elif sort_by == 'date_asc':
-            movements.sort(key=lambda x: x['created_at'])
-        elif sort_by == 'quantity':
-            movements.sort(key=lambda x: abs(x['quantity']), reverse=True)
-        elif sort_by == 'product':
-            movements.sort(key=lambda x: x['product_name'] or '')
+        # Get adjustments
+        if movement_type in ['all', 'adjustments']:
+            adjustments_qs = StockAdjustment.objects.filter(
+                created_at__date__gte=start_date,
+                created_at__date__lte=end_date,
+                status='COMPLETED'
+            ).select_related(
+                'stock_product__product',
+                'stock_product__warehouse',
+                'created_by'
+            )
+            
+            if warehouse_id:
+                adjustments_qs = adjustments_qs.filter(stock_product__warehouse_id=warehouse_id)
+            if product_id:
+                adjustments_qs = adjustments_qs.filter(stock_product__product_id=product_id)
+            if adjustment_type:
+                adjustments_qs = adjustments_qs.filter(adjustment_type=adjustment_type)
+            
+            for adj in adjustments_qs.order_by('-created_at'):
+                movements.append({
+                    'movement_id': str(adj.id),
+                    'movement_type': 'adjustment',
+                    'adjustment_type': adj.adjustment_type,
+                    'product_id': str(adj.stock_product.product.id),
+                    'product_name': adj.stock_product.product.name,
+                    'warehouse_id': str(adj.stock_product.warehouse.id),
+                    'warehouse_name': adj.stock_product.warehouse.name,
+                    'quantity_change': adj.quantity,
+                    'unit_cost': str(adj.unit_cost),
+                    'total_value': str(adj.total_cost) if adj.quantity < 0 else f"-{adj.total_cost}",
+                    'reason': adj.reason,
+                    'created_by': adj.created_by.name if adj.created_by else None,
+                    'created_at': adj.created_at.isoformat()
+                })
+        
+        # Get sales
+        if movement_type in ['all', 'sales']:
+            sales_qs = SaleItem.objects.filter(
+                sale__created_at__date__gte=start_date,
+                sale__created_at__date__lte=end_date,
+                sale__status__in=['COMPLETED', 'PARTIAL']
+            ).select_related(
+                'product',
+                'sale',
+                'sale__user'
+            )
+            
+            if product_id:
+                sales_qs = sales_qs.filter(product_id=product_id)
+            
+            for sale_item in sales_qs.order_by('-sale__created_at'):
+                movements.append({
+                    'movement_id': str(sale_item.id),
+                    'movement_type': 'sale',
+                    'adjustment_type': None,
+                    'product_id': str(sale_item.product.id),
+                    'product_name': sale_item.product.name,
+                    'warehouse_id': None,  # Sales don't track warehouse
+                    'warehouse_name': None,
+                    'quantity_change': -sale_item.quantity,
+                    'unit_cost': str(sale_item.unit_price),
+                    'total_value': f"-{sale_item.quantity * sale_item.unit_price}",
+                    'reason': f"Sale #{sale_item.sale.id}",
+                    'created_by': sale_item.sale.user.name if sale_item.sale.user else None,
+                    'created_at': sale_item.sale.created_at.isoformat()
+                })
+        
+        # Sort all movements by date descending
+        movements.sort(key=lambda x: x['created_at'], reverse=True)
         
         # Apply pagination
         page, page_size = self.get_pagination_params(request)
@@ -990,36 +990,6 @@ class StockMovementHistoryReportView(BaseReportView):
         }
         
         return paginated_movements, pagination
-    
-    def _build_warehouse_grouping(self, movements: list) -> dict:
-        """Group movements by warehouse for filter dropdown"""
-        warehouse_groups = {}
-        for movement in movements:
-            warehouse_id = movement.get('warehouse_id')
-            if not warehouse_id:
-                continue
-            if warehouse_id not in warehouse_groups:
-                warehouse_groups[warehouse_id] = {
-                    'name': movement['warehouse_name'],
-                    'movements': 0
-                }
-            warehouse_groups[warehouse_id]['movements'] += 1
-        return warehouse_groups
-
-    def _build_category_grouping(self, movements: list) -> dict:
-        """Group movements by category for filter dropdown"""
-        category_groups = {}
-        for movement in movements:
-            category_id = movement.get('category_id')
-            if not category_id:
-                continue
-            if category_id not in category_groups:
-                category_groups[category_id] = {
-                    'name': movement['category_name'],
-                    'movements': 0
-                }
-            category_groups[category_id]['movements'] += 1
-        return category_groups
     
     def _get_period_end(self, period_start: date, grouping: str) -> date:
         """Calculate period end date based on grouping"""

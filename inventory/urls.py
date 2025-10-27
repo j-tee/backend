@@ -18,6 +18,10 @@ from .adjustment_views import (
     StockCountViewSet,
     StockCountItemViewSet,
 )
+from .transfer_views import (
+    WarehouseTransferViewSet,
+    StorefrontTransferViewSet,
+)
 
 router = DefaultRouter()
 router.register(r'categories', CategoryViewSet)
@@ -40,6 +44,9 @@ router.register(r'adjustment-photos', StockAdjustmentPhotoViewSet, basename='adj
 router.register(r'adjustment-documents', StockAdjustmentDocumentViewSet, basename='adjustment-documents')
 router.register(r'stock-counts', StockCountViewSet, basename='stock-counts')
 router.register(r'stock-count-items', StockCountItemViewSet, basename='stock-count-items')
+# Phase 4: New Transfer endpoints (replaces legacy stock-adjustments/transfer)
+router.register(r'warehouse-transfers', WarehouseTransferViewSet, basename='warehouse-transfers')
+router.register(r'storefront-transfers', StorefrontTransferViewSet, basename='storefront-transfers')
 
 urlpatterns = [
     path('api/stock/availability/', WarehouseStockAvailabilityView.as_view(), name='warehouse-stock-availability'),
@@ -81,4 +88,5 @@ urlpatterns = [
     path('api/reports/stock-arrivals/', StockArrivalReportView.as_view(), name='stock-arrivals'),
     path('api/employee/workspace/', EmployeeWorkspaceView.as_view(), name='employee-workspace'),
     path('api/owner/workspace/', OwnerWorkspaceView.as_view(), name='owner-workspace'),
+    # Removed separate inter-warehouse transfer endpoints; now handled by stock-adjustments/transfer action
 ]

@@ -71,7 +71,7 @@ def setup_test_data():
     BusinessWarehouse.objects.create(business=business, warehouse=warehouse)
     
     # Create stock
-    stock = Stock.objects.create(warehouse=warehouse, description='Test batch')
+    stock = Stock.objects.create(business=business, description='Test batch')
     supplier = Supplier.objects.create(
         business=business,
         name='Test Supplier',

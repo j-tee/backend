@@ -168,7 +168,8 @@ class InventoryValuationReportBuilder:
         if product_id:
             queryset = queryset.filter(product_id=product_id)
         if business_id:
-            queryset = queryset.filter(warehouse__business_link__business_id=business_id)
+            # Scope inventory by the Stock's business via StockProduct.stock
+            queryset = queryset.filter(stock__business_id=business_id)
         if min_quantity is not None:
             queryset = queryset.filter(quantity__gte=min_quantity)
 
@@ -244,8 +245,9 @@ class InventoryExporter(BaseDataExporter):
             
             if business:
                 # Get unit cost from StockProduct if available
+                # Prefer StockProduct rows whose parent Stock belongs to the storefront's business
                 stock_product = StockProduct.objects.filter(
-                    warehouse__business_link__business=business,
+                    stock__business=business,
                     product=item.product
                 ).first()
                 
@@ -314,7 +316,7 @@ class InventoryExporter(BaseDataExporter):
             
             if business:
                 stock_product = StockProduct.objects.filter(
-                    warehouse__business_link__business=business,
+                    stock__business=business,
                     product=product
                 ).first()
                 

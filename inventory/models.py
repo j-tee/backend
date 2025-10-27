@@ -200,6 +200,7 @@ class Stock(models.Model):
     """Stock batches for organizing inventory."""
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    business = models.ForeignKey('accounts.Business', on_delete=models.CASCADE, related_name='stocks')
     arrival_date = models.DateField(blank=True, null=True)
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
@@ -227,6 +228,10 @@ class StockProduct(models.Model):
     supplier = models.ForeignKey(Supplier, on_delete=models.SET_NULL, null=True, blank=True, related_name='stock_items')
     expiry_date = models.DateField(blank=True, null=True)
     quantity = models.PositiveIntegerField()
+    # calculated_quantity represents the current available/working quantity
+    # after transfers and movements. quantity remains the original intake amount
+    # for audit and accounting purposes.
+    calculated_quantity = models.IntegerField(default=0)
     unit_cost = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'))
     unit_tax_rate = models.DecimalField(max_digits=5, decimal_places=2, validators=[MinValueValidator(Decimal('0.00')), MaxValueValidator(Decimal('100.00'))], default=Decimal('0.00'), null=True, blank=True)
     unit_tax_amount = models.DecimalField(max_digits=12, decimal_places=2, validators=[MinValueValidator(Decimal('0.00'))], default=Decimal('0.00'), null=True, blank=True)
@@ -264,6 +269,11 @@ class StockProduct(models.Model):
         if self.unit_cost and self.unit_tax_rate is not None and (self.unit_tax_amount is None or self.unit_tax_amount == Decimal('0.00')):
             tax_value = (self.unit_cost * self.unit_tax_rate) / Decimal('100.00')
             self.unit_tax_amount = tax_value.quantize(Decimal('0.01'))
+        # Ensure calculated_quantity is initialized on creation to match intake quantity
+        if getattr(self, '_state', None) and getattr(self._state, 'adding', False):
+            if not self.calculated_quantity:
+                # initialize calculated_quantity from intake quantity
+                self.calculated_quantity = int(self.quantity or 0)
         super().save(*args, **kwargs)
 
     @property
@@ -278,22 +288,22 @@ class StockProduct(models.Model):
     @property
     def total_base_cost(self) -> Decimal:
         """Total base cost for all units (without taxes and additional costs)"""
-        return (self.unit_cost or Decimal('0.00')) * self.quantity
+        return (self.unit_cost or Decimal('0.00')) * (self.calculated_quantity or 0)
 
     @property
     def total_tax_amount(self) -> Decimal:
         """Total tax amount for all units"""
-        return (self.unit_tax_amount or Decimal('0.00')) * self.quantity
+        return (self.unit_tax_amount or Decimal('0.00')) * (self.calculated_quantity or 0)
 
     @property
     def total_additional_cost(self) -> Decimal:
         """Total additional costs for all units"""
-        return (self.unit_additional_cost or Decimal('0.00')) * self.quantity
+        return (self.unit_additional_cost or Decimal('0.00')) * (self.calculated_quantity or 0)
 
     @property
     def total_landed_cost(self) -> Decimal:
         """Total landed cost including all taxes and additional costs"""
-        return self.landed_unit_cost * self.quantity
+        return self.landed_unit_cost * (self.calculated_quantity or 0)
 
     @property
     def expected_profit_amount(self) -> Decimal:
@@ -312,15 +322,14 @@ class StockProduct(models.Model):
     @property
     def expected_total_profit(self) -> Decimal:
         """Expected total profit if all units sold at retail price"""
-        return self.expected_profit_amount * self.quantity
+        return self.expected_profit_amount * (self.calculated_quantity or 0)
     
     def get_adjustment_summary(self):
         """Get summary of all adjustments for this stock product"""
         from django.db.models import Sum, Count
         from .stock_adjustments import StockAdjustment
-        
         adjustments = self.adjustments.filter(status='COMPLETED')
-        
+
         summary = adjustments.aggregate(
             total_adjustments=Count('id'),
             total_increase=Sum('quantity', filter=models.Q(quantity__gt=0)),
@@ -379,8 +388,8 @@ class StockProduct(models.Model):
         ).aggregate(
             total=Sum('quantity')
         )['total'] or Decimal('0.00')
-        
-        available = Decimal(str(self.quantity)) - reserved
+        # Use calculated_quantity as the working/current quantity after transfers
+        available = Decimal(str(self.calculated_quantity or 0)) - reserved
         return max(Decimal('0.00'), available)
     
     def get_expected_profit_scenarios(self) -> dict:
@@ -439,8 +448,9 @@ class StockProduct(models.Model):
         ]
         
         for retail_pct, wholesale_pct, description in common_splits:
-            retail_units = (retail_pct / Decimal('100.00')) * self.quantity
-            wholesale_units = (wholesale_pct / Decimal('100.00')) * self.quantity
+            working_qty = Decimal(str(self.calculated_quantity or 0))
+            retail_units = (retail_pct / Decimal('100.00')) * working_qty
+            wholesale_units = (wholesale_pct / Decimal('100.00')) * working_qty
             
             retail_profit = self.expected_profit_amount * retail_units
             wholesale_profit = wholesale_profit_per_unit * wholesale_units
@@ -448,7 +458,7 @@ class StockProduct(models.Model):
             
             # Weighted average selling price
             total_revenue = (self.retail_price * retail_units) + (self.wholesale_price * wholesale_units)
-            avg_price = total_revenue / self.quantity if self.quantity > 0 else Decimal('0.00')
+            avg_price = total_revenue / working_qty if working_qty > 0 else Decimal('0.00')
             
             # Weighted average margin
             avg_margin = (total_profit / total_revenue * Decimal('100')).quantize(Decimal('0.01')) if total_revenue > 0 else Decimal('0.00')
@@ -461,7 +471,7 @@ class StockProduct(models.Model):
                 'retail_units': retail_units,
                 'wholesale_units': wholesale_units,
                 'avg_selling_price': avg_price,
-                'profit_per_unit': total_profit / self.quantity if self.quantity > 0 else Decimal('0.00'),
+                'profit_per_unit': total_profit / working_qty if working_qty > 0 else Decimal('0.00'),
                 'profit_margin': avg_margin,
                 'total_profit': total_profit,
             })
@@ -574,10 +584,12 @@ class TransferRequest(models.Model):
     ]
 
     STATUS_NEW = 'NEW'
+    STATUS_ASSIGNED = 'ASSIGNED'
     STATUS_FULFILLED = 'FULFILLED'
     STATUS_CANCELLED = 'CANCELLED'
     STATUS_CHOICES = [
         (STATUS_NEW, 'New'),
+        (STATUS_ASSIGNED, 'Assigned'),
         (STATUS_FULFILLED, 'Fulfilled'),
         (STATUS_CANCELLED, 'Cancelled'),
     ]
@@ -826,3 +838,14 @@ class WarehouseEmployee(models.Model):
     def save(self, *args, **kwargs):
         self.full_clean()
         super().save(*args, **kwargs)
+
+
+# Import new Transfer models (Phase 2 - Week 2)
+from .transfer_models import Transfer, TransferItem
+
+__all__ = [
+    'Category', 'Supplier', 'Product', 'Warehouse', 'BusinessWarehouse',
+    'Stock', 'StockProduct', 'StoreFront', 'BusinessStoreFront',
+    'StockAdjustment', 'StockAdjustmentDocument', 'StoreFrontEmployee',
+    'Transfer', 'TransferItem',  # New models
+]

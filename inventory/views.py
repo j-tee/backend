@@ -52,7 +52,9 @@ except ImportError:
     SaleItem = None
     SALES_APP_AVAILABLE = False
 
+
 from .stock_adjustments import StockAdjustment
+from .stock_adjustment_serializers import StockAdjustmentSerializer
 
 
 User = get_user_model()
@@ -707,8 +709,8 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
                     'category_name': product.category.name if product.category else None,
                     'unit': product.unit if hasattr(product, 'unit') else None,
                     'product_image': product.image.url if hasattr(product, 'image') and product.image else None,
-                    'retail_price': retail_price,
-                    'wholesale_price': wholesale_price,
+                    'retail_price': str(retail_price) if retail_price is not None else None,
+                    'wholesale_price': str(wholesale_price) if wholesale_price is not None else None,
                     'last_stocked_at': latest.created_at.isoformat() if latest and latest.created_at else None,
                 })
             
@@ -1317,8 +1319,8 @@ class StockViewSet(viewsets.ModelViewSet):
         business_ids = _business_ids_for_user(user)
         if not business_ids:
             return queryset.none()
-        # Filter by warehouse through stock items (StockProduct)
-        return queryset.filter(items__warehouse__business_link__business_id__in=business_ids).distinct().prefetch_related('items__product', 'items__warehouse')
+        # Prefer direct business FK on Stock when available
+        return queryset.filter(business_id__in=business_ids).distinct().prefetch_related('items__product', 'items__warehouse')
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1336,10 +1338,9 @@ class StockViewSet(viewsets.ModelViewSet):
             return
 
         instance = self.get_object()
-        # Check permission through stock items' warehouses
+        # Check permission through the stock's direct business FK
         user_business_ids = _business_ids_for_user(self.request.user)
-        stock_warehouses = instance.items.values_list('warehouse__business_link__business_id', flat=True).distinct()
-        if not any(biz_id in user_business_ids for biz_id in stock_warehouses if biz_id):
+        if instance.business_id not in user_business_ids:
             raise PermissionDenied('You do not have permission to update this stock receipt.')
         serializer.save()
 
@@ -1367,8 +1368,9 @@ class StockProductViewSet(viewsets.ModelViewSet):
         if not business_ids:
             return queryset.none()
         
-        # Filter by warehouse business_link since warehouse is directly on StockProduct now
-        return queryset.filter(warehouse__business_link__business_id__in=business_ids)
+        # Prefer direct stock/stockproduct business filtering for accuracy and performance
+        # Filter StockProducts whose parent Stock belongs to the user's businesses
+        return queryset.filter(stock__business_id__in=business_ids)
 
     def perform_create(self, serializer):
         user = self.request.user
@@ -1398,8 +1400,8 @@ class StockProductViewSet(viewsets.ModelViewSet):
         instance = self.get_object()
         business_ids = _business_ids_for_user(self.request.user)
         
-        # Check if warehouse belongs to user's business
-        if instance.warehouse and instance.warehouse.business_link and instance.warehouse.business_link.business_id not in business_ids:
+        # Check that the parent stock belongs to the user's business
+        if instance.stock_id and instance.stock.business_id not in business_ids:
             raise PermissionDenied('You do not have permission to update this stock item.')
         serializer.save()
 

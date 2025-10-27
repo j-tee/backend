@@ -9,6 +9,7 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 from django.db.models import Q, Sum, Count
 from django.utils import timezone
+from django.core.exceptions import ValidationError as DjangoValidationError
 from decimal import Decimal
 
 from .stock_adjustments import (
@@ -150,21 +151,33 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
             )
         
         try:
-            # Approve the adjustment
+            # Approve the adjustment (this may approve/complete linked transfer pair)
             adjustment.approve(request.user)
-            
-            # Immediately complete it to apply stock changes
-            # This ensures stock levels update right away
-            adjustment.complete()
-            
+
+            # Refresh to get the latest status (approve() may complete linked adjustments)
+            try:
+                adjustment.refresh_from_db()
+            except Exception:
+                pass
+
+            # Only call complete() if the adjustment is still APPROVED (not already COMPLETED)
+            if adjustment.status == 'APPROVED':
+                try:
+                    adjustment.complete()
+                except DjangoValidationError as e:
+                    # Return a consumable error to the frontend instead of a 500
+                    return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
             serializer = self.get_serializer(adjustment)
             return Response(serializer.data)
-        
+
+        except DjangoValidationError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
         except ValueError as e:
-            return Response(
-                {'error': str(e)},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            # Unexpected error - return 500 with a concise message
+            return Response({'error': f'Failed to approve adjustment: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
@@ -390,14 +403,15 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
                     create_destination_if_missing = True
 
                 # Prefer a candidate with enough quantity for the source
-                sufficient_qs = from_qs.filter(quantity__gte=quantity)
+                # Prefer candidates with sufficient calculated quantity (working quantity)
+                sufficient_qs = from_qs.filter(calculated_quantity__gte=quantity)
                 if sufficient_qs.exists():
-                    from_sp = sufficient_qs.order_by('-quantity').first()
+                    from_sp = sufficient_qs.order_by('-calculated_quantity').first()
                     if from_qs.count() > 1:
                         ambiguity_warnings.append('multiple source stock entries found; selected one with sufficient quantity')
                 else:
                     # No candidate has enough quantity; pick the one with highest quantity (best-effort)
-                    from_sp = from_qs.order_by('-quantity').first()
+                    from_sp = from_qs.order_by('-calculated_quantity').first()
                     if from_qs.count() > 1:
                         ambiguity_warnings.append('multiple source stock entries found; selected one with highest quantity')
 
@@ -405,8 +419,8 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
                 if to_qs.count() == 1:
                     to_sp = to_qs.first()
                 else:
-                    to_sp = to_qs.order_by('-quantity').first()
-                    ambiguity_warnings.append('multiple destination stock entries found; selected one with highest quantity')
+                    to_sp = to_qs.order_by('-calculated_quantity').first()
+                    ambiguity_warnings.append('multiple destination stock entries found; selected one with highest calculated quantity')
         except StockProduct.DoesNotExist:
             return Response({'error': 'stock product for given product/warehouse not found'}, status=status.HTTP_404_NOT_FOUND)
 
@@ -421,31 +435,71 @@ class StockAdjustmentViewSet(viewsets.ModelViewSet):
         except Exception:
             unit_cost = Decimal('0.00')
 
-        # If destination StockProduct was missing, create a new Stock + StockProduct with zero quantity
-        if create_destination_if_missing and to_sp is None:
-            try:
-                from django.db import transaction
-                with transaction.atomic():
-                    # Resolve product and warehouse instances
-                    prod = Product.objects.get(id=product_id)
-                    dest_wh = Warehouse.objects.get(id=to_warehouse_id)
+        # New behavior: always create a new destination Stock + StockProduct for the transfer.
+        # Copy all relevant fields from the source StockProduct except created_at/updated_at.
+        try:
+            prod = Product.objects.get(id=product_id) if product_id else from_sp.product
+            dest_wh = Warehouse.objects.get(id=to_warehouse_id) if to_warehouse_id else (to_sp.warehouse if to_sp else None)
+            if dest_wh is None:
+                return Response({'error': 'destination warehouse could not be resolved'}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'failed to resolve product/warehouse: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-                    # Create a new stock batch for this destination entry
-                    new_stock = Stock.objects.create(description='Auto-created stock batch for transfer')
+        # Validate source has enough working (calculated) quantity
+        if (getattr(from_sp, 'calculated_quantity', None) or 0) < quantity:
+            return Response({'error': 'source does not have enough available quantity for this transfer'}, status=status.HTTP_400_BAD_REQUEST)
 
-                    to_sp = StockProduct.objects.create(
-                        stock=new_stock,
-                        warehouse=dest_wh,
-                        product=prod,
-                        supplier=None,
-                        expiry_date=None,
-                        quantity=0,
-                        unit_cost=unit_cost or 0
-                    )
+        try:
+            from django.db import transaction
+            with transaction.atomic():
+                # Create a new Stock for destination, copying arrival_date/description from source stock where present
+                new_stock = Stock.objects.create(
+                    arrival_date=getattr(from_sp.stock, 'arrival_date', None),
+                    description=(getattr(from_sp.stock, 'description', None) or 'Auto-created stock batch for transfer')
+                )
 
-                    ambiguity_warnings.append('destination stock entry was missing; created a new stock product record (quantity=0)')
-            except Exception as e:
-                return Response({'error': f'failed to create destination stock product: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                # Build kwargs copying fields from source (destination quantity = transferred quantity)
+                sp_kwargs = dict(
+                    stock=new_stock,
+                    warehouse=dest_wh,
+                    product=prod,
+                    supplier=getattr(from_sp, 'supplier', None),
+                    expiry_date=getattr(from_sp, 'expiry_date', None),
+                    # Historically we created the destination batch with the
+                    # transferred quantity. Keep that behavior here: the
+                    # incoming transfer may be represented on the intake. The
+                    # completion logic in StockAdjustment.complete() special-
+                    # cases TRANSFER_IN to avoid double-counting when the
+                    # intake already includes the transferred units.
+                    quantity=quantity,
+                    unit_cost=unit_cost or getattr(from_sp, 'unit_cost', Decimal('0.00')),
+                    unit_tax_rate=getattr(from_sp, 'unit_tax_rate', None),
+                    unit_tax_amount=getattr(from_sp, 'unit_tax_amount', None),
+                    unit_additional_cost=getattr(from_sp, 'unit_additional_cost', None),
+                    retail_price=getattr(from_sp, 'retail_price', None),
+                    wholesale_price=getattr(from_sp, 'wholesale_price', None),
+                    description=getattr(from_sp, 'description', None),
+                )
+
+                # Create the destination StockProduct (this is the new batch representing the transferred items)
+                new_to_sp = StockProduct.objects.create(**sp_kwargs)
+                to_sp = new_to_sp
+                ambiguity_warnings.append('created a new destination stock product record for this transfer')
+
+                # Do NOT alter the source intake `quantity` field. We preserve the
+                # intake quantity as the system of record. Transfer effects are
+                # recorded via StockAdjustment records which update
+                # StockProduct.calculated_quantity when completed.
+                # Refresh source to ensure latest read, but do not modify it here.
+                try:
+                    from_sp.refresh_from_db()
+                except Exception:
+                    pass
+
+        except AssertionError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            return Response({'error': f'Failed to perform transfer: {str(e)}'}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Generate a transfer reference if none provided
         if not reference_number:
@@ -530,7 +584,6 @@ class StockAdjustmentPhotoViewSet(viewsets.ModelViewSet):
 class StockAdjustmentDocumentViewSet(viewsets.ModelViewSet):
     """ViewSet for managing adjustment documents"""
     
-    serializer_class = StockAdjustmentDocumentSerializer
     permission_classes = [IsAuthenticated]
     
     def get_queryset(self):

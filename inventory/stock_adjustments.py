@@ -161,7 +161,13 @@ class StockAdjustment(models.Model):
     def save(self, *args, **kwargs):
         # Capture quantity before on creation (historical snapshot)
         if not self.pk and self.stock_product:  # New object
+            # Snapshot both intake and calculated quantities
             self.quantity_before = self.stock_product.quantity
+            try:
+                # store calculated quantity as additional context (not persisted on model)
+                self._calculated_before = int(getattr(self.stock_product, 'calculated_quantity', self.stock_product.quantity))
+            except Exception:
+                self._calculated_before = int(self.stock_product.quantity)
         
         # Auto-calculate total cost
         if self.unit_cost and self.quantity:
@@ -194,7 +200,45 @@ class StockAdjustment(models.Model):
     def approve(self, user):
         """Approve the adjustment"""
         from django.utils import timezone
-        
+        from django.db import transaction
+
+        # Idempotent: if already approved, nothing to do
+        if self.status == 'APPROVED':
+            return
+
+        # If this is part of a paired transfer (same reference_number and a TRANSFER_* type)
+        # we must approve the entire pair together (all-or-nothing).
+        if self.reference_number and self.adjustment_type in ('TRANSFER_IN', 'TRANSFER_OUT'):
+            # Load all linked transfer adjustments for this reference_number
+            qs = StockAdjustment.objects.filter(
+                reference_number=self.reference_number,
+                adjustment_type__in=['TRANSFER_IN', 'TRANSFER_OUT'],
+                business=self.business
+            )
+
+            # Defensive: if any linked adjustment is REJECTED or COMPLETED, we cannot approve the pair
+            bad_statuses = set(qs.exclude(status='PENDING').values_list('status', flat=True))
+            if any(s in ('REJECTED', 'COMPLETED') for s in bad_statuses):
+                raise ValueError('Cannot approve transfer when a linked adjustment is rejected or completed')
+
+            now = timezone.now()
+            with transaction.atomic():
+                for adj in qs.select_for_update():
+                    # Only update those not already approved
+                    if adj.status != 'APPROVED':
+                        adj.status = 'APPROVED'
+                        adj.approved_by = user
+                        adj.approved_at = now
+                        adj.save(update_fields=['status', 'approved_by', 'approved_at'])
+                # After approving the linked transfer adjustments, complete them immediately
+                # so calculated quantities are updated atomically with approval.
+                for adj in qs.select_for_update():
+                    # complete() will raise if it would cause negative calculated quantity
+                    if adj.status == 'APPROVED' and adj.completed_at is None:
+                        adj.complete()
+            return
+
+        # Default single-adjustment approval path
         self.status = 'APPROVED'
         self.approved_by = user
         self.approved_at = timezone.now()
@@ -220,13 +264,59 @@ class StockAdjustment(models.Model):
         
         if self.status != 'APPROVED':
             raise ValueError('Only approved adjustments can be completed')
-        
-        # The pre_save signal will validate this won't cause negative stock
-        # We do NOT modify stock_product.quantity here
-        
-        self.status = 'COMPLETED'
-        self.completed_at = timezone.now()
-        self.save()
+
+        # When a completed adjustment represents a movement (TRANSFER_OUT / TRANSFER_IN)
+        # we update the StockProduct.calculated_quantity accordingly. We DO NOT alter
+        # the original intake `quantity` field, which remains as the audit intake value.
+        from django.db import transaction
+
+        with transaction.atomic():
+            # apply calculated quantity changes on the stock_product
+            sp = self.stock_product
+            # ensure we have a numeric starting value
+            current_calc = int(getattr(sp, 'calculated_quantity', sp.quantity or 0))
+
+            # Special-case: avoid double-counting for TRANSFER_IN when the destination
+            # StockProduct intake already equals the incoming transfer quantity and
+            # there is a linked TRANSFER_OUT for the same reference number. This
+            # uses DB relations (no extra model fields) and is deterministic in
+            # the common auto-create transfer flow.
+            if self.adjustment_type == 'TRANSFER_IN' and self.reference_number:
+                try:
+                    incoming_qty = abs(int(self.quantity))
+                    sp_qty = int(sp.quantity or 0)
+
+                    if sp_qty == incoming_qty:
+                        linked_out_exists = StockAdjustment.objects.filter(
+                            reference_number=self.reference_number,
+                            adjustment_type='TRANSFER_OUT',
+                            business=self.business
+                        ).exists()
+
+                        if linked_out_exists:
+                            # Intake already reflects the transfer; avoid adding again.
+                            self.status = 'COMPLETED'
+                            self.completed_at = timezone.now()
+                            self.save(update_fields=['status', 'completed_at'])
+                            return
+                except Exception:
+                    # If anything goes wrong, fall back to default behavior below.
+                    pass
+
+            # For decreases (negative quantity) we subtract; for increases we add
+            new_calc = current_calc + int(self.quantity)
+
+            # Prevent negative calculated quantity
+            if new_calc < 0:
+                raise ValueError('Completing this adjustment would result in negative calculated quantity')
+
+            # Persist the calculated change
+            sp.calculated_quantity = new_calc
+            sp.save(update_fields=['calculated_quantity'])
+
+            self.status = 'COMPLETED'
+            self.completed_at = timezone.now()
+            self.save()
 
 
 class StockAdjustmentPhoto(models.Model):

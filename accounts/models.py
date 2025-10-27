@@ -795,11 +795,35 @@ class BusinessMembership(models.Model):
         db_table = 'business_memberships'
         unique_together = ['business', 'user']
         ordering = ['business__name', 'user__name']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user'],
+                name='one_user_one_business',
+                violation_error_message='A user can only belong to one business. This email is already registered with another business.'
+            )
+        ]
 
     def __str__(self):
         return f"{self.user.name} - {self.business.name} ({self.role})"
 
+    def clean(self):
+        """Validate that user doesn't already belong to another business."""
+        from django.core.exceptions import ValidationError
+        
+        # Check if this user already has a membership in a different business
+        if self.user_id:
+            existing = BusinessMembership.objects.filter(user=self.user).exclude(id=self.id)
+            if existing.exists():
+                existing_business = existing.first().business.name
+                raise ValidationError(
+                    f"This user is already registered with {existing_business}. "
+                    f"A user can only belong to one business."
+                )
+
     def save(self, *args, **kwargs):
+        # Validate before saving
+        self.clean()
+        
         if self.role == self.OWNER:
             self.is_admin = True
         

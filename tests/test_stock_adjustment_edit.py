@@ -58,13 +58,13 @@ class StockAdjustmentEditTest(TestCase):
         BusinessWarehouse.objects.create(business=self.business, warehouse=self.warehouse)
         
         # Create stock
-        self.stock = Stock.objects.create(warehouse=self.warehouse, description='Test stock')
+        self.stock = Stock.objects.create(business=self.business, description='Test stock')
         self.supplier = Supplier.objects.create(
             business=self.business,
             name='Test Supplier',
             email='supplier@test.com'
         )
-        
+
         # Create stock product
         self.stock_product = StockProduct.objects.create(
             stock=self.stock,
@@ -74,7 +74,7 @@ class StockAdjustmentEditTest(TestCase):
             unit_cost=Decimal('10.00'),
             retail_price=Decimal('15.00')
         )
-        
+
         # Create API client
         self.client = APIClient()
         self.client.force_authenticate(user=self.owner)

@@ -163,48 +163,59 @@ def validate_adjustment_wont_cause_negative_stock(sender, instance, **kwargs):
     if instance.quantity >= 0:
         return
     
-    # Calculate current available stock
+    # Calculate current available stock AT THE PRODUCT LEVEL
+    # Rationale: the signal previously mixed a single-batch intake with product-level
+    # transferred/sold totals which caused per-batch checks to go negative even when
+    # the product-level available stock was sufficient. We therefore compute
+    # available as the product-level intake + completed adjustments - transferred - sold.
     stock_product = instance.stock_product
     if not stock_product:
         return
-    
-    from inventory.models import StoreFrontInventory
+
+    from inventory.models import StockProduct as SPModel, StoreFrontInventory
     from sales.models import SaleItem
-    
-    # Start with initial intake
-    available = stock_product.quantity
-    
-    # Add completed adjustments (excluding this one)
-    adjustments_sum = stock_product.adjustments.filter(
+    from decimal import Decimal
+
+    # Total intake across all batches for this product
+    batches = SPModel.objects.filter(product=stock_product.product)
+    total_intake = sum((b.quantity for b in batches), Decimal('0'))
+
+    # Sum completed adjustments across all batches (this includes completed
+    # TRANSFER_OUT / TRANSFER_IN adjustments because they are stored as
+    # StockAdjustment records with signed quantities). We query StockAdjustment
+    # directly to avoid accidental joins or double-counting.
+    from inventory.stock_adjustments import StockAdjustment as StockAdjModel
+    adjustments_sum = StockAdjModel.objects.filter(
+        stock_product__product=stock_product.product,
         status='COMPLETED'
-    ).exclude(pk=instance.pk).aggregate(
-        total=models.Sum('quantity')
-    )['total'] or 0
-    available += adjustments_sum
-    
-    # Subtract transferred stock (storefront inventory for this product)
-    transferred = StoreFrontInventory.objects.filter(
+    ).aggregate(total=models.Sum('quantity'))['total'] or Decimal('0')
+
+    # Subtract transfers to storefront only (StoreFrontInventory). Note that
+    # inter-warehouse transfers are represented by StockAdjustment records and
+    # are therefore already included in `adjustments_sum` when COMPLETED.
+    storefront_transferred = StoreFrontInventory.objects.filter(
         product=stock_product.product
-    ).aggregate(total=models.Sum('quantity'))['total'] or 0
-    available -= transferred
-    
-    # Subtract completed sales
+    ).aggregate(total=models.Sum('quantity'))['total'] or Decimal('0')
+
+    # Subtract sold (completed sales for this product)
     sold = SaleItem.objects.filter(
         product=stock_product.product,
         sale__status='COMPLETED'
-    ).aggregate(total=models.Sum('quantity'))['total'] or 0
-    available -= sold
-    
-    # Check if this adjustment would make it negative
-    new_available = available + instance.quantity
-    
+    ).aggregate(total=models.Sum('quantity'))['total'] or Decimal('0')
+
+    # Compute product-level available
+    available = Decimal(total_intake) + Decimal(adjustments_sum) - Decimal(storefront_transferred) - Decimal(sold)
+
+    # What the available would be after applying this adjustment
+    new_available = available + Decimal(instance.quantity)
+
     if new_available < 0:
         raise ValidationError(
             f'Cannot complete adjustment: would result in negative available stock. '
-            f'Current available: {available} units, Adjustment: {instance.quantity} units, '
+            f'Product-level available: {available} units, Adjustment: {instance.quantity} units, '
             f'Would result in: {new_available} units. '
-            f'(Initial intake: {stock_product.quantity}, Adjustments: {adjustments_sum}, '
-            f'Transferred: {transferred}, Sold: {sold})'
+            f'(Product total intake: {total_intake}, Adjustments(completed): {adjustments_sum}, '
+            f'Storefront transferred: {storefront_transferred}, Sold: {sold})'
         )
 
 

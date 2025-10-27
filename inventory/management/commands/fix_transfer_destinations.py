@@ -9,14 +9,19 @@ class Command(BaseCommand):
     help = 'Fix destination StockProduct records created by the auto-transfer flow by copying missing metadata from existing batches'
 
     def add_arguments(self, parser):
-        parser.add_argument('--description', default='Auto-created stock batch for transfer', help='Stock.description to match for auto-created batches')
+        parser.add_argument(
+            '--description',
+            default='Auto-created stock batch for transfer',
+            help='Stock.description substring to match for auto-created batches (case-insensitive)'
+        )
         parser.add_argument('--apply', action='store_true', help='Apply changes. Without this flag the command runs in dry-run mode')
 
     def handle(self, *args, **options):
         description = options['description']
         do_apply = options['apply']
 
-        stocks = Stock.objects.filter(description__iexact=description).order_by('created_at')
+        # Use case-insensitive containment so we match both original and annotated descriptions
+        stocks = Stock.objects.filter(description__icontains=description).order_by('created_at')
         total_stocks = stocks.count()
         if total_stocks == 0:
             self.stdout.write(self.style.SUCCESS('No auto-created stock batches found.'))
@@ -54,10 +59,21 @@ class Command(BaseCommand):
                     continue
 
                 # Find candidate source stock product for the same product with non-zero quantity
-                candidate = StockProduct.objects.filter(product=sp.product).exclude(id=sp.id).filter(quantity__gt=0).order_by('-quantity', '-created_at').first()
+                candidate = (
+                    StockProduct.objects.filter(product=sp.product)
+                    .exclude(id=sp.id)
+                    .filter(quantity__gt=0)
+                    .order_by('-quantity', '-created_at')
+                    .first()
+                )
                 if not candidate:
                     # fallback to any other batch for the product
-                    candidate = StockProduct.objects.filter(product=sp.product).exclude(id=sp.id).order_by('-created_at').first()
+                    candidate = (
+                        StockProduct.objects.filter(product=sp.product)
+                        .exclude(id=sp.id)
+                        .order_by('-created_at')
+                        .first()
+                    )
 
                 if not candidate:
                     self.stdout.write(self.style.WARNING(f'No candidate source found to copy metadata for StockProduct {sp.id} (product {sp.product_id}).'))
@@ -68,6 +84,7 @@ class Command(BaseCommand):
                 if do_apply:
                     with transaction.atomic():
                         changed = False
+                        stock_changed = False
                         # Copy a safe set of metadata if missing
                         if (not sp.retail_price or Decimal(str(sp.retail_price)) == Decimal('0')) and candidate.retail_price:
                             sp.retail_price = candidate.retail_price
@@ -91,20 +108,51 @@ class Command(BaseCommand):
                             sp.description = candidate.description
                             changed = True
 
+                        # Save StockProduct if any changes
                         if changed:
                             sp.save()
-                            # annotate stock description to mark it fixed
+
+                        # Now consider copying safe Stock-level fields from the candidate's associated Stock
+                        candidate_stock = getattr(candidate, 'stock', None)
+                        if candidate_stock:
                             try:
-                                stock.description = (stock.description or '') + ' [fixed-transfer-metadata]'
-                                stock.save(update_fields=['description'])
+                                # arrival_date: only copy if destination stock arrival_date is missing
+                                if (not getattr(stock, 'arrival_date', None)) and getattr(candidate_stock, 'arrival_date', None):
+                                    stock.arrival_date = candidate_stock.arrival_date
+                                    stock_changed = True
+
+                                # stock.description: copy only if the current description is empty or appears to be the auto-created marker
+                                current_desc = (stock.description or '').strip()
+                                auto_marker = 'auto-created stock batch for transfer'
+                                if ((not current_desc) or auto_marker in current_desc.lower()) and (candidate_stock.description):
+                                    # set the candidate's description but keep an audit marker
+                                    stock.description = candidate_stock.description + ' [fixed-transfer-metadata]'
+                                    stock_changed = True
+
+                                if stock_changed:
+                                    stock.save(update_fields=[f for f in ['arrival_date', 'description'] if getattr(stock, f) is not None])
                             except Exception:
-                                pass
+                                # never crash the whole job for a single stock copy failure
+                                self.stdout.write(self.style.WARNING(f'Failed to copy stock-level fields for stock {stock.id}'))
+
+                        if changed or stock_changed:
                             updated += 1
                             self.stdout.write(self.style.SUCCESS(f'Updated StockProduct {sp.id}'))
                         else:
                             self.stdout.write(self.style.NOTICE(f'No updatable fields for StockProduct {sp.id}'))
                 else:
-                    # Dry-run output
-                    self.stdout.write(f'Would copy from candidate {candidate.id} to {sp.id}: fields={missing_fields}')
+                    # Dry-run output — include proposed stock-level copies when applicable
+                    # Determine proposed stock-level changes
+                    stock_proposals = []
+                    candidate_stock = getattr(candidate, 'stock', None)
+                    if candidate_stock:
+                        if (not getattr(stock, 'arrival_date', None)) and getattr(candidate_stock, 'arrival_date', None):
+                            stock_proposals.append('arrival_date')
+                        current_desc = (stock.description or '').strip()
+                        auto_marker = 'auto-created stock batch for transfer'
+                        if ((not current_desc) or auto_marker in current_desc.lower()) and (candidate_stock.description):
+                            stock_proposals.append('stock.description')
+
+                    self.stdout.write(f'Would copy from candidate {candidate.id} to {sp.id}: fields={missing_fields} stock_fields={stock_proposals}')
 
         self.stdout.write(self.style.SUCCESS(f'Inspected {inspected} StockProduct(s); updated {updated}'))

@@ -48,7 +48,7 @@ class ReleaseExpiredReservationsCommandTest(TestCase):
             name="Main Warehouse",
             location="Downtown"
         )
-        self.stock = Stock.objects.create(warehouse=self.warehouse)
+        self.stock = Stock.objects.create(business=self.business)
         self.stock_product = StockProduct.objects.create(
             stock=self.stock,
             product=self.product,

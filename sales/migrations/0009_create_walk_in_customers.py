@@ -50,7 +50,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('sales', '0008_migrate_credit_sales_to_ar'),
-        ('accounts', '__latest__'),  # Ensure Business model is available
+        ('accounts', '0010_link_membership_rbac_roles'),  # Ensure Business model is available
     ]
 
     operations = [
