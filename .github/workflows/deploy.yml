@@ -106,14 +106,8 @@ jobs:
             sudo systemctl restart celery || echo "celery service not installed yet"
             sudo systemctl restart celery-beat || echo "celery-beat service not installed yet"
             
-            # Reload Nginx (handles systemd, init.d, or source-compiled)
-            if systemctl list-unit-files 2>/dev/null | grep -q nginx.service; then
-              sudo systemctl reload nginx
-            elif [ -f /etc/init.d/nginx ]; then
-              sudo /etc/init.d/nginx reload
-            else
-              sudo nginx -t && sudo nginx -s reload
-            fi
+            # Reload Nginx (compiled from source at /opt/nginx)
+            sudo /opt/nginx/sbin/nginx -t && sudo /opt/nginx/sbin/nginx -s reload
             
             # Check service status
             sudo systemctl status gunicorn --no-pager || echo "gunicorn not running"
