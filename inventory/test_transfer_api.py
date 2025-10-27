@@ -76,8 +76,7 @@ class TransferSerializerTest(BusinessTestMixin, TestCase):
         )
         
         self.category = Category.objects.create(
-            name='Test Category',
-            user=self.user
+            name='Test Category'
         )
         self.product = Product.objects.create(
             name='Test Product',
@@ -216,8 +215,7 @@ class WarehouseTransferViewSetTest(BusinessTestMixin, APITestCase):
         )
         
         self.category = Category.objects.create(
-            name='Test Category',
-            user=self.user
+            name='Test Category'
         )
         self.product = Product.objects.create(
             name='Test Product',
@@ -443,8 +441,7 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
         )
         
         self.category = Category.objects.create(
-            name='Test Category',
-            user=self.user
+            name='Test Category'
         )
         self.product = Product.objects.create(
             name='Test Product',
@@ -532,8 +529,7 @@ class TransferPermissionsTest(BusinessTestMixin, APITestCase):
         )
         
         self.category = Category.objects.create(
-            name='Category',
-            user=self.user1
+            name='Category'
         )
         self.product = Product.objects.create(
             name='Product',
