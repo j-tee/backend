@@ -29,17 +29,7 @@ class StockAdjustmentSearchBugFixTest(TestCase):
     
     def setUp(self):
         """Set up test data"""
-        # Create two businesses
-        self.business1 = Business.objects.create(
-            name="DataLogique Systems",
-            owner_email="owner1@test.com"
-        )
-        self.business2 = Business.objects.create(
-            name="Competitor Corp",
-            owner_email="owner2@test.com"
-        )
-        
-        # Create users
+        # Create users first
         self.user1 = User.objects.create_user(
             email="mike@datalogique.com",
             name="Mike Tetteh",
@@ -49,6 +39,22 @@ class StockAdjustmentSearchBugFixTest(TestCase):
             email="john@competitor.com",
             name="John Doe",
             password="testpass123"
+        )
+        
+        # Create two businesses
+        self.business1 = Business.objects.create(
+            name="DataLogique Systems",
+            owner=self.user1,
+            tin="TIN001",
+            email="owner1@test.com",
+            address="Address 1"
+        )
+        self.business2 = Business.objects.create(
+            name="Competitor Corp",
+            owner=self.user2,
+            tin="TIN002",
+            email="owner2@test.com",
+            address="Address 2"
         )
         
         # Create memberships

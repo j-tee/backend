@@ -68,6 +68,7 @@ class StockAdjustmentEditTest(TestCase):
         # Create stock product
         self.stock_product = StockProduct.objects.create(
             stock=self.stock,
+            warehouse=self.warehouse,
             product=self.product,
             supplier=self.supplier,
             quantity=100,
