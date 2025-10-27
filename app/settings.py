@@ -230,6 +230,9 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 MEDIA_URL = '/media/'
 MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
 
+# Ensure media directory exists
+os.makedirs(MEDIA_ROOT, exist_ok=True)
+
 # Email settings
 configured_email_backend = config('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
 
@@ -259,6 +262,10 @@ BACKEND_URL = config('BACKEND_URL', default='http://localhost:8000')
 ENV_NAME = config('ENV_NAME', default='development')
 
 # Logging configuration
+# Ensure logs directory exists
+LOGS_DIR = os.path.join(BASE_DIR, 'logs')
+os.makedirs(LOGS_DIR, exist_ok=True)
+
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
@@ -276,7 +283,7 @@ LOGGING = {
         'file': {
             'level': 'INFO',
             'class': 'logging.FileHandler',
-            'filename': os.path.join(BASE_DIR, 'logs', 'django.log'),
+            'filename': os.path.join(LOGS_DIR, 'django.log'),
             'formatter': 'verbose',
         },
         'console': {
