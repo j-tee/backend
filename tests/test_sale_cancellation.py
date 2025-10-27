@@ -186,7 +186,7 @@ class SaleCancellationTestCase(TestCase):
         )
         
         # Complete the sale (this deducts from storefront inventory)
-        sale.complete_sale(user=self.user)
+        sale.complete_sale()
         
         # Check inventory was deducted
         self.storefront_inv1.refresh_from_db()
@@ -290,7 +290,7 @@ class SaleCancellationTestCase(TestCase):
         )
         
         # Complete the sale (increases customer debt)
-        sale.complete_sale(user=self.user)
+        sale.complete_sale()
         
         # Check customer balance increased
         self.customer.refresh_from_db()
@@ -351,7 +351,7 @@ class SaleCancellationTestCase(TestCase):
             total_price=Decimal('600.00')
         )
         
-        sale.complete_sale(user=self.user)
+        sale.complete_sale()
         
         # Cancel once
         print(f"\n✓ First cancellation...")
@@ -415,7 +415,7 @@ class SaleCancellationTestCase(TestCase):
             total_price=Decimal('125.00')
         )
         
-        sale.complete_sale(user=self.user)
+        sale.complete_sale()
         
         print(f"\n✓ Sale completed:")
         print(f"  Total: {sale.total_amount}")

@@ -731,13 +731,16 @@ class Sale(models.Model):
         with transaction.atomic():
             # Build list of all items to refund
             items_to_refund = []
-            for sale_item in self.sale_items.all():
-                refundable = sale_item.refundable_quantity
-                if refundable > 0:
-                    items_to_refund.append({
-                        'sale_item': sale_item,
-                        'quantity': refundable
-                    })
+            # Only process refunds for completed/in-progress sales
+            # DRAFT sales are just cancelled without refund processing
+            if self.status in {'COMPLETED', 'PARTIAL', 'PENDING'}:
+                for sale_item in self.sale_items.all():
+                    refundable = sale_item.refundable_quantity
+                    if refundable > 0:
+                        items_to_refund.append({
+                            'sale_item': sale_item,
+                            'quantity': refundable
+                        })
             
             # Process full refund if there are items to refund
             refund = None
