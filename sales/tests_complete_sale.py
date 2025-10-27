@@ -54,11 +54,12 @@ class CompleteSaleEndpointTest(APITestCase):
             manager=self.user
         )
         self.stock = Stock.objects.create(
-            warehouse=self.warehouse,
+            business=self.business,
             description="Initial stock"
         )
         self.stock_product = StockProduct.objects.create(
             stock=self.stock,
+            warehouse=self.warehouse,
             product=self.product,
             quantity=50,
             unit_cost=Decimal("5.00"),

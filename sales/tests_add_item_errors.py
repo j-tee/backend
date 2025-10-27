@@ -61,11 +61,12 @@ class AddSaleItemErrorPayloadTestCase(APITestCase):
             manager=self.user,
         )
         stock = Stock.objects.create(
-            warehouse=self.warehouse,
+            business=self.business,
             arrival_date=timezone.now().date(),
         )
         self.stock_product = StockProduct.objects.create(
             stock=stock,
+            warehouse=self.warehouse,
             product=self.product,
             quantity=1,
             unit_cost=Decimal("45.00"),

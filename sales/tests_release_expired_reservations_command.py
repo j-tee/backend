@@ -51,6 +51,7 @@ class ReleaseExpiredReservationsCommandTest(TestCase):
         self.stock = Stock.objects.create(business=self.business)
         self.stock_product = StockProduct.objects.create(
             stock=self.stock,
+            warehouse=self.warehouse,
             product=self.product,
             quantity=10,
             unit_cost=Decimal("5.00"),

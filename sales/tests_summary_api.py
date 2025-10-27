@@ -65,15 +65,16 @@ class SalesSummaryAPITestCase(APITestCase):
             manager=self.user,
         )
         self.stock_cash = Stock.objects.create(
-            warehouse=self.warehouse,
+            business=self.business,
             arrival_date=timezone.now().date(),
         )
         self.stock_credit = Stock.objects.create(
-            warehouse=self.warehouse,
+            business=self.business,
             arrival_date=timezone.now().date(),
         )
         self.stock_product_cash = StockProduct.objects.create(
             stock=self.stock_cash,
+            warehouse=self.warehouse,
             product=self.product_cash,
             quantity=100,
             unit_cost=Decimal("60.00"),
@@ -81,6 +82,7 @@ class SalesSummaryAPITestCase(APITestCase):
         )
         self.stock_product_credit = StockProduct.objects.create(
             stock=self.stock_credit,
+            warehouse=self.warehouse,
             product=self.product_credit,
             quantity=100,
             unit_cost=Decimal("30.00"),
