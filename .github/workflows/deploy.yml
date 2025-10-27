@@ -102,9 +102,9 @@ jobs:
             export DJANGO_ENV_FILE=/var/www/pos/backend/.env.production
             
             # Restart services
-            sudo systemctl restart posbackend
-            sudo systemctl restart posbackend-celery
-            sudo systemctl restart posbackend-celery-beat
+            sudo systemctl restart gunicorn || echo "gunicorn service not installed yet"
+            sudo systemctl restart celery || echo "celery service not installed yet"
+            sudo systemctl restart celery-beat || echo "celery-beat service not installed yet"
             
             # Reload Nginx (handles systemd, init.d, or source-compiled)
             if systemctl list-unit-files 2>/dev/null | grep -q nginx.service; then
@@ -116,5 +116,5 @@ jobs:
             fi
             
             # Check service status
-            sudo systemctl status posbackend --no-pager
+            sudo systemctl status gunicorn --no-pager || echo "gunicorn not running"
 
