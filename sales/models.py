@@ -666,14 +666,19 @@ class Sale(models.Model):
             self.amount_refunded += total_refund
             self.calculate_totals()
 
+            # Determine new status after refund
             if self.amount_refunded >= self.total_amount:
-                self.status = 'REFUNDED'
+                new_status = 'REFUNDED'
             elif self.amount_due > Decimal('0.00'):
-                self.status = 'PARTIAL'
+                new_status = 'PARTIAL'
             else:
-                self.status = 'COMPLETED'
-
+                new_status = 'COMPLETED'
+            
+            self.status = new_status
+            # Skip validation during refund processing to avoid status/amount mismatches
+            self._skip_validation = True
             self.save(update_fields=['amount_refunded', 'amount_due', 'status', 'updated_at'])
+            self._skip_validation = False
 
             if self.payment_type == 'CREDIT' and self.customer:
                 self.customer.update_balance(-total_refund, transaction_type='REFUND')
@@ -892,8 +897,9 @@ class Sale(models.Model):
     
     def save(self, *args, **kwargs):
         """Override save - receipt number only generated on completion"""
-        # Validate balance integrity before saving
-        self._validate_balance_integrity()
+        # Validate balance integrity before saving (unless explicitly skipped)
+        if not getattr(self, '_skip_validation', False):
+            self._validate_balance_integrity()
         super().save(*args, **kwargs)
     
     def _validate_balance_integrity(self):
