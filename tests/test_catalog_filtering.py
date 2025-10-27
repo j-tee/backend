@@ -88,6 +88,7 @@ class CatalogFilteringTestCase(TestCase):
         
         # Create stock batch
         self.stock = Stock.objects.create(
+            business=self.business,
             description='Test Stock Batch',
             arrival_date='2025-10-01'
         )

@@ -14,7 +14,7 @@ from rest_framework.test import APITestCase, APIClient
 from rest_framework import status
 
 from accounts.models import Business, BusinessMembership
-from inventory.models import Product, Warehouse, Category, StoreFront, StockProduct
+from inventory.models import Product, Warehouse, Category, StoreFront, StockProduct, Stock
 from inventory.transfer_models import Transfer, TransferItem
 from inventory.transfer_serializers import (
     WarehouseTransferSerializer,
@@ -456,10 +456,14 @@ class StorefrontTransferViewSetTest(BusinessTestMixin, APITestCase):
         )
         
         # Create stock in warehouse
+        stock_batch = Stock.objects.create(
+            business=self.business,
+            description='Test stock batch'
+        )
         self.stock = StockProduct.objects.create(
+            stock=stock_batch,
             warehouse=self.warehouse,
             product=self.product,
-            business=self.business,
             quantity=100
         )
     
