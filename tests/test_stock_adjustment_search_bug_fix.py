@@ -57,19 +57,8 @@ class StockAdjustmentSearchBugFixTest(TestCase):
             address="Address 2"
         )
         
-        # Create memberships
-        self.membership1 = BusinessMembership.objects.create(
-            business=self.business1,
-            user=self.user1,
-            role='OWNER',
-            is_active=True
-        )
-        self.membership2 = BusinessMembership.objects.create(
-            business=self.business2,
-            user=self.user2,
-            role='OWNER',
-            is_active=True
-        )
+        # Note: BusinessMembership is automatically created when Business has an owner
+        # No need to manually create memberships as it violates one-user-one-business constraint
         
         # Create warehouses
         self.warehouse1 = Warehouse.objects.create(

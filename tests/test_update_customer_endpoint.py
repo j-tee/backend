@@ -259,7 +259,9 @@ class UpdateCustomerEndpointTest(TestCase):
         
         # Assertions
         self.assertEqual(response.status_code, 404)
-        self.assertIn('not found', response.json()['error'].lower())
+        response_data = response.json()
+        error_message = response_data.get('error', '')
+        self.assertIn('not found', error_message.lower())
         
         # Verify customer NOT updated
         sale.refresh_from_db()
