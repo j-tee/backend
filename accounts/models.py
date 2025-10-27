@@ -112,7 +112,7 @@ class Role(models.Model):
         ]
     
     def __str__(self):
-        return f"{self.name} ({self.level})"
+        return self.name
     
     def add_permission(self, permission_codename):
         """Add a permission to this role by codename"""
@@ -811,8 +811,14 @@ class BusinessMembership(models.Model):
         from django.core.exceptions import ValidationError
         
         # Check if this user already has a membership in a different business
-        if self.user_id:
-            existing = BusinessMembership.objects.filter(user=self.user).exclude(id=self.id)
+        if self.user_id and self.business_id:
+            existing = BusinessMembership.objects.filter(
+                user=self.user
+            ).exclude(
+                id=self.id
+            ).exclude(
+                business=self.business
+            )
             if existing.exists():
                 existing_business = existing.first().business.name
                 raise ValidationError(

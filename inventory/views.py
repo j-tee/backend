@@ -488,7 +488,7 @@ class StoreFrontViewSet(viewsets.ModelViewSet):
                 'product_id': product.id,
                 'product_name': product.name,
                 'sku': product.sku or '',
-                'barcode': product.barcode,
+                'barcode': product.barcode or '',
                 'category_name': product.category.name if product.category else None,
                 'unit': product.unit if hasattr(product, 'unit') else None,
                 'product_image': product.image.url if hasattr(product, 'image') and product.image else None,
