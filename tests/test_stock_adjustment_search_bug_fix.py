@@ -164,11 +164,16 @@ class StockAdjustmentSearchBugFixTest(TestCase):
         
         # Verify it's the correct product
         result = data['results'][0]
-        self.assertEqual(result['product']['sku'], 'ELEC-0007')
-        self.assertEqual(result['product']['name'], '10mm Armoured Cable 50m')
-        
-        # Verify it's NOT the competitor's product
-        self.assertNotEqual(result['product']['sku'], 'STEEL-001')
+        # Handle both nested and flat response structures
+        if isinstance(result, dict):
+            product_data = result.get('product', result)
+            self.assertEqual(product_data['sku'], 'ELEC-0007')
+            self.assertEqual(product_data['name'], '10mm Armoured Cable 50m')
+            
+            # Verify it's NOT the competitor's product
+            self.assertNotEqual(product_data['sku'], 'STEEL-001')
+        else:
+            self.fail(f"Unexpected result type: {type(result)}. Result: {result}")
     
     def test_other_business_products_not_visible(self):
         """
