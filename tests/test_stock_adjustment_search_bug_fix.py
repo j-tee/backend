@@ -63,11 +63,11 @@ class StockAdjustmentSearchBugFixTest(TestCase):
         # Create warehouses
         self.warehouse1 = Warehouse.objects.create(
             name="Rawlings Park Warehouse",
-            address="123 Main St"
+            location="123 Main St"
         )
         self.warehouse2 = Warehouse.objects.create(
             name="Competitor Warehouse",
-            address="456 Oak Ave"
+            location="456 Oak Ave"
         )
         
         # Link warehouses to businesses
