@@ -112,17 +112,18 @@ class StockAdjustmentSearchBugFixTest(TestCase):
         
         # Create stocks
         self.stock1 = Stock.objects.create(
-            warehouse=self.warehouse1,
+            business=self.business1,
             arrival_date="2025-01-01"
         )
         self.stock2 = Stock.objects.create(
-            warehouse=self.warehouse2,
+            business=self.business2,
             arrival_date="2025-01-01"
         )
         
         # Create stock products
         self.stock_product1 = StockProduct.objects.create(
             stock=self.stock1,
+            warehouse=self.warehouse1,
             product=self.product1,
             supplier=self.supplier1,
             quantity=26,
@@ -131,6 +132,7 @@ class StockAdjustmentSearchBugFixTest(TestCase):
         )
         self.stock_product2 = StockProduct.objects.create(
             stock=self.stock2,
+            warehouse=self.warehouse2,
             product=self.product2,
             supplier=self.supplier2,
             quantity=50,
