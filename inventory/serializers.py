@@ -85,7 +85,7 @@ class SupplierSerializer(serializers.ModelSerializer):
             'id', 'business', 'business_name', 'name', 'contact_person', 'email',
             'phone_number', 'address', 'notes', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name']
+        read_only_fields = ['id', 'business', 'created_at', 'updated_at', 'business_name']
 
 
 class ProductSerializer(serializers.ModelSerializer):
