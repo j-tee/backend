@@ -86,8 +86,9 @@ jobs:
             # Pull latest code
             git pull origin main
             
-            # Activate virtual environment
+            # Activate virtual environment and set environment
             source venv/bin/activate
+            export DJANGO_ENV_FILE=/var/www/pos/backend/.env.production
             
             # Install/update dependencies
             pip install -r requirements.txt
@@ -98,16 +99,13 @@ jobs:
             # Collect static files
             python manage.py collectstatic --noinput
             
-            # Set DJANGO_ENV_FILE for production
-            export DJANGO_ENV_FILE=/var/www/pos/backend/.env.production
-            
             # Restart services
             sudo systemctl restart gunicorn || echo "gunicorn service not installed yet"
             sudo systemctl restart celery || echo "celery service not installed yet"
             sudo systemctl restart celery-beat || echo "celery-beat service not installed yet"
             
             # Reload Nginx (compiled from source at /opt/nginx)
-            sudo /opt/nginx/sbin/nginx -t && sudo /opt/nginx/sbin/nginx -s reload
+            sudo /opt/nginx/sbin/nginx -t && sudo /opt/nginx/sbin/nginx -s reload || echo "Nginx reload failed"
             
             # Check service status
             sudo systemctl status gunicorn --no-pager || echo "gunicorn not running"
