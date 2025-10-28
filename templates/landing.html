@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>POS Backend API - Alphalogique Technologies</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            width: 100%;
+        }
+
+        .header {
+            text-align: center;
+            color: white;
+            margin-bottom: 3rem;
+            animation: fadeInDown 0.8s ease-out;
+        }
+
+        .header h1 {
+            font-size: 3rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            font-size: 1.2rem;
+            opacity: 0.9;
+        }
+
+        .cards-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 2rem;
+            margin-bottom: 2rem;
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            transition: transform 0.3s ease, box-shadow 0.3s ease;
+            animation: fadeInUp 0.8s ease-out;
+        }
+
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 40px rgba(0,0,0,0.3);
+        }
+
+        .card-icon {
+            width: 60px;
+            height: 60px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+        }
+
+        .card h2 {
+            font-size: 1.5rem;
+            color: #2d3748;
+            margin-bottom: 1rem;
+        }
+
+        .card p {
+            color: #718096;
+            line-height: 1.6;
+            margin-bottom: 1.5rem;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 0.75rem 1.5rem;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: 600;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 0.5rem 1rem;
+            background: #48bb78;
+            color: white;
+            border-radius: 20px;
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .footer {
+            text-align: center;
+            color: white;
+            margin-top: 3rem;
+            opacity: 0.8;
+            animation: fadeIn 1s ease-out;
+        }
+
+        .footer a {
+            color: white;
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .footer a:hover {
+            text-decoration: underline;
+        }
+
+        .api-links {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            margin-top: 2rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.2);
+            animation: fadeInUp 1s ease-out;
+        }
+
+        .api-links h3 {
+            color: #2d3748;
+            margin-bottom: 1.5rem;
+            font-size: 1.3rem;
+        }
+
+        .api-link-item {
+            display: flex;
+            align-items: center;
+            padding: 0.75rem;
+            border-left: 3px solid #667eea;
+            background: #f7fafc;
+            margin-bottom: 0.75rem;
+            border-radius: 4px;
+            transition: background 0.2s ease;
+        }
+
+        .api-link-item:hover {
+            background: #edf2f7;
+        }
+
+        .api-link-item code {
+            flex: 1;
+            color: #667eea;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+
+        .api-link-item .method {
+            background: #667eea;
+            color: white;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            margin-right: 1rem;
+            min-width: 60px;
+            text-align: center;
+        }
+
+        .method.get { background: #48bb78; }
+        .method.post { background: #4299e1; }
+        .method.put { background: #ed8936; }
+        .method.delete { background: #f56565; }
+
+        @keyframes fadeInDown {
+            from {
+                opacity: 0;
+                transform: translateY(-20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeInUp {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+
+            .cards-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 POS Backend API</h1>
+            <p>Point of Sale Management System by Alphalogique Technologies</p>
+        </div>
+
+        <div class="cards-grid">
+            <div class="card">
+                <div class="card-icon">🔐</div>
+                <span class="status-badge">✓ Active</span>
+                <h2>Admin Dashboard</h2>
+                <p>Access the Django admin interface to manage your POS system, users, inventory, and more.</p>
+                <a href="/admin/" class="btn">Go to Admin</a>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">📡</div>
+                <span class="status-badge">✓ Live</span>
+                <h2>API Documentation</h2>
+                <p>Explore the RESTful API endpoints for integration with your frontend applications.</p>
+                <a href="/api/docs/" class="btn">View API Docs</a>
+            </div>
+
+            <div class="card">
+                <div class="card-icon">🔍</div>
+                <span class="status-badge">✓ Available</span>
+                <h2>API Browser</h2>
+                <p>Interactive browsable API powered by Django REST Framework for testing and exploration.</p>
+                <a href="/api/" class="btn">Browse API</a>
+            </div>
+        </div>
+
+        <div class="api-links">
+            <h3>📋 Quick API Reference</h3>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/inventory/products/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/sales/sales/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method post">POST</span>
+                <code>/api/accounts/login/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/inventory/warehouses/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/inventory/storefronts/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method post">POST</span>
+                <code>/api/sales/sales/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/reports/inventory-summary/</code>
+            </div>
+            
+            <div class="api-link-item">
+                <span class="method get">GET</span>
+                <code>/api/inventory/employee/workspace/</code>
+            </div>
+        </div>
+
+        <div class="footer">
+            <p>Built with ❤️ by <a href="https://alphalogiquetechnologies.com" target="_blank">Alphalogique Technologies</a></p>
+            <p style="margin-top: 0.5rem; font-size: 0.9rem;">Django {{ django_version }} • DRF {{ drf_version }}</p>
+        </div>
+    </div>
+</body>
+</html>
