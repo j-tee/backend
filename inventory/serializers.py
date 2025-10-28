@@ -98,7 +98,7 @@ class ProductSerializer(serializers.ModelSerializer):
             'id', 'business', 'business_name', 'name', 'sku', 'barcode', 'description',
             'category', 'category_name', 'unit', 'is_active', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'business_name', 'category_name']
+        read_only_fields = ['id', 'business', 'created_at', 'updated_at', 'business_name', 'category_name']
 
 
 class StockProductSerializer(serializers.ModelSerializer):
