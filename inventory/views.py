@@ -1334,7 +1334,7 @@ class StockViewSet(viewsets.ModelViewSet):
 
         # Stock model no longer has warehouse field
         # Warehouse is now on StockProduct items
-        serializer.save()
+        serializer.save(business=business)
 
     def perform_update(self, serializer):
         if self.request.user.is_superuser:
@@ -1391,9 +1391,11 @@ class StockProductViewSet(viewsets.ModelViewSet):
         if supplier and supplier.business_id != business.id:
             raise ValidationError({'supplier': 'Supplier does not belong to your business.'})
 
-        stock = serializer.validated_data.get('stock')
-        if stock and stock.warehouse:
-            BusinessWarehouse.objects.get_or_create(business=business, warehouse=stock.warehouse)
+        # Validate warehouse and create business-warehouse relationship
+        warehouse = serializer.validated_data.get('warehouse')
+        if warehouse:
+            BusinessWarehouse.objects.get_or_create(business=business, warehouse=warehouse)
+        
         serializer.save()
 
     def perform_update(self, serializer):

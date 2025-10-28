@@ -181,14 +181,15 @@ class StockSerializer(serializers.ModelSerializer):
     warehouse_name = serializers.SerializerMethodField()
     total_items = serializers.SerializerMethodField()
     total_quantity = serializers.SerializerMethodField()
+    business_name = serializers.CharField(source='business.name', read_only=True)
 
     class Meta:
         model = Stock
         fields = [
-            'id', 'arrival_date', 'description', 'warehouse_id', 'warehouse_name',
+            'id', 'business', 'business_name', 'arrival_date', 'description', 'warehouse_id', 'warehouse_name',
             'total_items', 'total_quantity', 'items', 'created_at', 'updated_at'
         ]
-        read_only_fields = ['id', 'created_at', 'updated_at', 'warehouse_id', 'warehouse_name', 'total_items', 'total_quantity', 'items']
+        read_only_fields = ['id', 'business', 'business_name', 'created_at', 'updated_at', 'warehouse_id', 'warehouse_name', 'total_items', 'total_quantity', 'items']
 
     def _prefetched_items(self, obj):
         cache = getattr(obj, '_prefetched_objects_cache', {})
