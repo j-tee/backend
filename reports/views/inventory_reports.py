@@ -267,12 +267,13 @@ class StockLevelsSummaryReportView(BaseReportView):
         
         # PRE-CALCULATE: Get all reservations grouped by product (PERFORMANCE OPTIMIZATION)
         # This prevents querying reservations N times in the loop
+        # NOTE: Only DRAFT sales are reservations. PENDING/PARTIAL/COMPLETED have already committed stock.
         reservations_by_product = {}
         all_product_ids = queryset.values_list('product_id', flat=True).distinct()
         
         reservation_data = SaleItem.objects.filter(
             product_id__in=all_product_ids,
-            sale__status__in=['DRAFT', 'PENDING']
+            sale__status='DRAFT'  # Only uncommitted cart items are true reservations
         ).values('product_id').annotate(
             total_reserved=Sum('quantity')
         )

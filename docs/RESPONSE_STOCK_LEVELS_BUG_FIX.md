@@ -1,25 +1,30 @@
-# 📊 Stock Levels Report - Reserved Quantity Bug - RESOLVED ✅
+# 📊 Stock Levels Report - Reserved Quantity Bugs - RESOLVED ✅
 
 **Date:** October 30, 2025  
 **Priority:** HIGH  
-**Status:** 🟢 **FIXED AND DEPLOYED**  
+**Status:** 🟢 **BOTH BUGS FIXED**  
 **Module:** Reports - Stock Levels Summary
 
 ---
 
 ## 🎯 Response to Frontend Team
 
-Thank you for the detailed bug report! You were absolutely correct - there was a serious calculation error in the backend.
+Thank you for the detailed bug reports! You identified TWO critical issues:
+
+1. ✅ **Proportional Distribution Bug** - Reserved quantities double-counted across warehouses
+2. ✅ **Sale Status Lifecycle Bug** - PENDING sales incorrectly counted as reservations
+
+Both have been fixed!
 
 ---
 
-## 🔍 Root Cause Identified
+## 🔍 Root Causes Identified
 
-### **The Bug:**
+### **Bug #1: Proportional Distribution (Fixed First)**
 
 The reserved quantity calculation was querying **ALL reservations for a product globally** (across all warehouses), then incorrectly assigning that same total to **EACH individual warehouse location**.
 
-**Buggy Code (Line 293-296):**
+**Buggy Code:**
 ```python
 # WRONG! This gets ALL reservations system-wide
 reserved_qty = SaleItem.objects.filter(
@@ -30,23 +35,32 @@ reserved_qty = SaleItem.objects.filter(
 # Then this value was assigned to EVERY warehouse!
 ```
 
-### **What Was Happening to Samsung TV:**
+### **Bug #2: Sale Status Lifecycle (Fixed Second)**
 
-| Step | Warehouse | Reserved Calculation | Result |
-|------|-----------|---------------------|--------|
-| Loop 1 | Location A (150 units) | Gets 323 units (global) | Assigns 323 to Location A |
-| Loop 2 | Location B (334 units) | Gets 323 units (same global query!) | Assigns 323 to Location B |
+Even after fixing the proportional distribution, reserved quantities still "stuck around forever" because **PENDING sales were counted as reservations**.
 
-**Result:**
-- Frontend sums: 323 + 323 = **646 units reserved** (double-counted!)
-- Backend calculates available incorrectly
-- Total math doesn't add up
+**The Problem:**
+- When `complete_sale()` is called, it:
+  1. Calls `commit_stock()` - **reduces warehouse inventory**
+  2. Sets status to `PENDING` (credit sales) or `COMPLETED` (paid sales)
+  3. Calls `release_reservations(delete=True)` - clears reservation records
+
+- BUT the code still counted `PENDING` sales as reservations
+- This caused **double-counting**: inventory already reduced + still showing as reserved
+
+**Buggy Code:**
+```python
+# WRONG! PENDING sales have already committed stock
+reservation_data = SaleItem.objects.filter(
+    sale__status__in=['DRAFT', 'PENDING']  # ❌ Includes committed sales
+)
+```
 
 ---
 
-## ✅ The Fix
+## ✅ The Fixes
 
-### **Solution Implemented: Proportional Distribution**
+### **Fix #1: Proportional Distribution**
 
 We now:
 1. **Pre-calculate** total reservations once per product (performance optimization)
@@ -59,7 +73,7 @@ We now:
 reservations_by_product = {}
 reservation_data = SaleItem.objects.filter(
     product_id__in=all_product_ids,
-    sale__status__in=['DRAFT', 'PENDING']
+    sale__status='DRAFT'  # ✅ Only DRAFT (see Fix #2)
 ).values('product_id').annotate(
     total_reserved=Sum('quantity')
 )
@@ -81,37 +95,68 @@ for product_data in product_stocks.values():
         location['available'] = location['quantity'] - location['reserved']
 ```
 
----
+### **Fix #2: Only Count DRAFT Sales**
 
-## 📊 Samsung TV Example - After Fix
+**The Critical Change:**
+```python
+# ✅ CORRECT - Only uncommitted cart items are reservations
+reservation_data = SaleItem.objects.filter(
+    product_id__in=all_product_ids,
+    sale__status='DRAFT'  # NOT PENDING/PARTIAL/COMPLETED
+).values('product_id').annotate(
+    total_reserved=Sum('quantity')
+)
+```
 
-### **Inputs:**
+**Why This is Correct:**
+
+| Status | Stock State | Should Count as Reserved? |
+|--------|-------------|---------------------------|
+| DRAFT | NOT committed | ✅ YES |
+| PENDING | COMMITTED | ❌ NO |
+| PARTIAL | COMMITTED | ❌ NO |
+| COMPLETED | COMMITTED | ❌ NO |
+
+**Explanation:**
+- **DRAFT** = Customer has items in cart, stock NOT yet deducted → counts as reserved ✅
+- **PENDING** = Sale completed, stock COMMITTED (deducted), awaiting payment → does NOT count ❌
+- **PARTIAL** = Sale completed, stock COMMITTED, partially paid → does NOT count ❌
+- **COMPLETED** = Sale completed, stock COMMITTED, fully paid → does NOT count ❌
+
+Once `complete_sale()` runs, the stock is committed and reservations are released. Only DRAFT sales are true reservations.
+
+
+## 📊 Samsung TV Example - After Both Fixes
+
+### **Scenario:**
 - Location A: 150 units (31% of total)
 - Location B: 334 units (69% of total)
 - **Total Stock:** 484 units
-- **Total Reserved (system-wide):** 323 units
+- **DRAFT sales (active carts):** 200 units
+- **PENDING sales (completed, awaiting payment):** 123 units (❌ NO LONGER COUNTED)
 
-### **Calculation:**
+### **Before Fix #2 (Wrong):**
+```
+Total Reserved: 200 + 123 = 323 units (includes committed stock!)
+Location A Reserved: 323 × 0.31 = 100 units
+Location B Reserved: 323 × 0.69 = 223 units
+Total Available: 484 - 323 = 161 units ❌ WRONG (stock already deducted)
+```
 
-**Location A:**
+### **After Both Fixes (Correct):**
 ```
-Proportion: 150 / 484 = 0.31 (31%)
-Reserved: 323 × 0.31 = 100 units
-Available: 150 - 100 = 50 units
-```
-
-**Location B:**
-```
-Proportion: 334 / 484 = 0.69 (69%)
-Reserved: 323 × 0.69 = 223 units
-Available: 334 - 223 = 111 units
+Total Reserved: 200 units (only DRAFT sales) ✅
+Location A Reserved: 200 × 0.31 = 62 units
+Location B Reserved: 200 × 0.69 = 138 units
+Total Available: 484 - 200 = 284 units ✅ CORRECT
 ```
 
 ### **Verification:**
 ```
-✅ Total Available: 50 + 111 = 161 units
-✅ Total Reserved: 100 + 223 = 323 units
-✅ Total Quantity: 161 + 323 = 484 units ← MATH ADDS UP!
+✅ Total Quantity: 484 units
+✅ Total Reserved: 62 + 138 = 200 units (only DRAFT)
+✅ Total Available: 222 + 196 = 284 units (after PENDING committed)
+✅ Math: 484 = 200 + 284 ← PERFECT!
 ```
 
 ---
@@ -135,18 +180,26 @@ Available: 334 - 223 = 111 units
 3. Second pass distributes reservations
 4. All calculations use the same data snapshot
 
+
 ### **3. Reserved Stock Logic**
 
 **What "reserved" means:**
 
-> Reserved = Quantity in DRAFT or PENDING sales that haven't been completed yet
+> Reserved = Quantity in **DRAFT** sales (active carts) that haven't been completed yet
 
 **Clarifications:**
 - ✅ Calculated at **product level** (system-wide reservations)
 - ✅ Distributed **proportionally** to each warehouse
 - ✅ Includes reservations from **all storefronts**
+- ✅ **ONLY counts DRAFT status** - PENDING/PARTIAL/COMPLETED excluded
 - ❌ Does NOT filter expired reservations (consider as future enhancement)
 - ❌ Does NOT filter by storefront-to-warehouse mapping (uses proportional distribution)
+
+**Sale Status → Reservation Mapping:**
+- DRAFT sale → ✅ Counts as reserved (stock not committed)
+- PENDING sale → ❌ Does NOT count (stock already committed, awaiting payment)
+- PARTIAL sale → ❌ Does NOT count (stock already committed, partially paid)
+- COMPLETED sale → ❌ Does NOT count (stock already committed, fully paid)
 
 ### **4. Multi-Storefront vs Multi-Warehouse**
 
@@ -245,26 +298,38 @@ for wh in warehouses:
 
 ## 🚀 Deployment Status
 
-### **Fix Applied To:**
-- ✅ `reports/views/inventory_reports.py` (Lines 262-390)
+### **Fixes Applied To:**
+- ✅ `reports/views/inventory_reports.py` (Lines 262-390) - Both fixes
+- ✅ `inventory/views.py` (Line 872-875) - Status fix
+- ✅ `scripts/update_build_stock_levels.py` (Line 53-56) - Status fix
 - ✅ Django check passed: No errors
 - ✅ Committed to development branch
 - ⏳ **Awaiting deployment to production**
 
 ### **Performance Improvements:**
-- **Before:** N queries for reservations (one per warehouse)
-- **After:** 1 query for all reservations (grouped by product)
-- **Result:** Significantly faster report generation
+- **Before:** N queries for reservations (one per warehouse) + counting PENDING sales
+- **After:** 1 query for all reservations (grouped by product) + only DRAFT sales
+- **Result:** Significantly faster report generation + more accurate data
+
+### **Impact Summary:**
+1. ✅ Reserved quantities will **drop** (PENDING sales no longer counted)
+2. ✅ Available quantities will **increase** (no more double-counting)
+3. ✅ Math consistency guaranteed: `total = available + reserved`
+4. ✅ Faster queries (equality check vs IN clause)
 
 ---
 
 ## 📎 Related Files
 
 **Fixed:**
-- `/backend/reports/views/inventory_reports.py` - Stock levels calculation
+- `/backend/reports/views/inventory_reports.py` - Stock levels calculation (both fixes)
+- `/backend/inventory/views.py` - Stock detail API (status fix)
+- `/backend/scripts/update_build_stock_levels.py` - Build script (status fix)
 
 **Documentation:**
-- `/backend/docs/BUG_FIX_STOCK_LEVELS_RESERVED_CALCULATION.md` - Detailed bug analysis
+- `/backend/docs/BUG_FIX_STOCK_LEVELS_RESERVED_CALCULATION.md` - Proportional distribution bug analysis
+- `/backend/docs/BUG_FIX_SALE_STATUS_RESERVATIONS.md` - Sale status lifecycle bug analysis
+- `/backend/docs/FRONTEND_STOCK_RESERVATION_FIX.md` - Frontend team guide
 - `/backend/docs/BACKEND-REPORTS-MODULE-REQUIREMENTS.md` - Original specification
 - `/backend/docs/STOCK-LEVELS-COMPLETE-UPDATE.md` - Implementation details
 
@@ -274,11 +339,19 @@ for wh in warehouses:
 
 You can now tell users:
 
-> **Issue Resolved:** The stock levels report was showing incorrect reserved quantities due to a calculation error. This has been fixed. The math now correctly shows:
+> **Issues Resolved:** The stock levels report had TWO calculation errors:
+> 
+> 1. **Reserved quantities were double-counted across warehouses** - Fixed with proportional distribution
+> 2. **Completed sales (PENDING status) were incorrectly counted as reservations** - Fixed by only counting DRAFT sales
+> 
+> The math now correctly shows:
 > 
 > **Total Stock = Available + Reserved**
 > 
-> Reserved quantities are distributed proportionally across warehouse locations based on stock levels.
+> Reserved quantities now:
+> - Only count DRAFT sales (active carts)
+> - Exclude PENDING/PARTIAL/COMPLETED sales (already committed)
+> - Distribute proportionally across warehouse locations based on stock levels
 
 ---
 
@@ -286,10 +359,12 @@ You can now tell users:
 
 Before deploying to production, verify:
 
-- [ ] Samsung TV example shows correct math (484 = 161 + 323)
-- [ ] No negative available quantities
-- [ ] `SUM(location.available) === total_available`
+- [ ] Products with DRAFT sales show reserved quantities
+- [ ] Products with PENDING sales show **ZERO** reservations (stock already committed)
 - [ ] `SUM(location.reserved) === total_reserved`
+- [ ] `SUM(location.available) === total_available`  
+- [ ] `total_quantity === total_reserved + total_available`
+- [ ] No negative available quantities
 - [ ] Products with zero reservations show 100% available
 - [ ] Products in single warehouse show all reservations there
 - [ ] Report loads faster (due to query optimization)

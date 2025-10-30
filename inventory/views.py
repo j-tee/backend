@@ -872,7 +872,7 @@ class ProductViewSet(viewsets.ModelViewSet):
                         sale = Sale.objects.filter(
                             id=sale_uuid,
                             storefront=entry.storefront,
-                            status__in=['DRAFT', 'PENDING', 'PARTIAL']
+                            status='DRAFT'  # Only uncommitted cart items are reservations
                         ).first()
                         if sale:
                             reserved_qty += to_decimal(res.quantity)

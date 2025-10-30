@@ -48,12 +48,12 @@ def update_build_stock_levels():
                 }
             
             # Calculate reserved quantity for this product at this warehouse
-            # Query DRAFT and PENDING sales for reserved stock
+            # Query only DRAFT sales - PENDING/PARTIAL/COMPLETED have already committed stock
             from sales.models import Sale, SaleItem
             reserved_qty = SaleItem.objects.filter(
                 sale__warehouse_id=stock.warehouse.id,
                 product_id=stock.product.id,
-                sale__status__in=['DRAFT', 'PENDING']
+                sale__status='DRAFT'  # Only uncommitted cart items are reservations
             ).aggregate(total=Sum('quantity'))['total'] or 0
             
             # Calculate available quantity
