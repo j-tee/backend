@@ -1304,7 +1304,41 @@ class BusinessMembershipStorefrontAssignmentView(APIView):
 
 
 class StockViewSet(viewsets.ModelViewSet):
-    """ViewSet for managing stock batches with pagination, filtering, and ordering."""
+    """
+    ViewSet for managing stock batches with pagination, filtering, and ordering.
+    
+    ## Batch Filtering
+    
+    When retrieving individual stock details (GET /api/stocks/{id}/), you can filter
+    statistics by specific batch using the `batch_id` query parameter:
+    
+    - **No filter** (default): Shows aggregated statistics across all batches
+    - **With ?batch_id={uuid}**: Shows statistics for only that specific batch
+    
+    ### Example Requests:
+    
+    ```
+    # Get aggregated view for all batches
+    GET /api/stocks/{id}/
+    
+    # Get filtered view for specific batch
+    GET /api/stocks/{id}/?batch_id={batch-uuid}
+    ```
+    
+    ### Response Fields:
+    
+    - `batches`: Array of all available batches for this product
+    - `selected_batch_id`: The batch_id filter (null if aggregated)
+    - `batch_size`: Total quantity (filtered by batch if specified)
+    - `warehouse_quantity`: Current warehouse stock (filtered)
+    - `storefront_transferred`: Quantity sent to storefronts (filtered)
+    - `available_for_sale`: Available quantity (filtered)
+    - `sold`: Quantity sold (filtered)
+    - `shrinkage`: Losses/damage/theft (filtered)
+    - `corrections`: Inventory adjustments (filtered)
+    - `reconciliation_formula`: Shows calculation breakdown
+    - `inventory_balanced`: Whether expected matches actual
+    """
     queryset = Stock.objects.all()
     serializer_class = StockSerializer
     permission_classes = [permissions.IsAuthenticated]
@@ -1314,6 +1348,14 @@ class StockViewSet(viewsets.ModelViewSet):
     search_fields = ['description']
     ordering_fields = ['arrival_date', 'created_at', 'updated_at']
     ordering = ['-arrival_date']  # Default ordering by newest arrivals first
+
+    def get_serializer_class(self):
+        """Use detailed serializer for retrieve action to support batch filtering."""
+        from inventory.serializers import StockDetailSerializer
+        
+        if self.action == 'retrieve':
+            return StockDetailSerializer
+        return StockSerializer
 
     def get_queryset(self):
         queryset = Stock.objects.all()

@@ -224,6 +224,252 @@ class StockSerializer(serializers.ModelSerializer):
         return obj.items.aggregate(total=Sum('quantity'))['total'] or 0
 
 
+class StockBatchInfoSerializer(serializers.Serializer):
+    """Serializer for individual batch information in stock details."""
+    id = serializers.UUIDField()
+    batch_identifier = serializers.CharField(source='description')
+    batch_size = serializers.IntegerField()
+    created_at = serializers.DateTimeField()
+    arrival_date = serializers.DateField()
+
+
+class StockDetailSerializer(serializers.ModelSerializer):
+    """
+    Enhanced stock serializer with batch filtering support.
+    
+    Supports ?batch_id= query parameter to filter statistics by specific batch.
+    When batch_id is provided, all statistics (warehouse_quantity, transferred, etc.)
+    are calculated only for that batch's stock items.
+    """
+    items = StockProductSerializer(many=True, read_only=True)
+    warehouse_id = serializers.SerializerMethodField()
+    warehouse_name = serializers.SerializerMethodField()
+    total_items = serializers.SerializerMethodField()
+    total_quantity = serializers.SerializerMethodField()
+    business_name = serializers.CharField(source='business.name', read_only=True)
+    
+    # Batch-related fields
+    batches = serializers.SerializerMethodField()
+    selected_batch_id = serializers.SerializerMethodField()
+    batch_size = serializers.SerializerMethodField()
+    warehouse_quantity = serializers.SerializerMethodField()
+    storefront_transferred = serializers.SerializerMethodField()
+    available_for_sale = serializers.SerializerMethodField()
+    sold = serializers.SerializerMethodField()
+    reserved = serializers.SerializerMethodField()
+    shrinkage = serializers.SerializerMethodField()
+    corrections = serializers.SerializerMethodField()
+    landed_cost = serializers.SerializerMethodField()
+    reconciliation_formula = serializers.SerializerMethodField()
+    inventory_balanced = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Stock
+        fields = [
+            'id', 'business', 'business_name', 'arrival_date', 'description',
+            'warehouse_id', 'warehouse_name', 'total_items', 'total_quantity',
+            'items', 'created_at', 'updated_at',
+            # Batch-specific fields
+            'batches', 'selected_batch_id', 'batch_size', 'warehouse_quantity',
+            'storefront_transferred', 'available_for_sale', 'sold', 'reserved',
+            'shrinkage', 'corrections', 'landed_cost', 'reconciliation_formula',
+            'inventory_balanced'
+        ]
+        read_only_fields = ['id', 'business', 'business_name', 'created_at', 'updated_at']
+
+    def _get_batch_filter(self):
+        """Get batch_id from context if provided."""
+        request = self.context.get('request')
+        if request:
+            return request.query_params.get('batch_id')
+        return None
+
+    def _get_filtered_items(self, obj):
+        """Get stock items filtered by batch if batch_id is provided."""
+        batch_id = self._get_batch_filter()
+        items = obj.items.all()
+        
+        if batch_id:
+            # Filter items to only those in the specified batch
+            items = items.filter(stock_id=batch_id)
+        
+        return items
+
+    def get_batches(self, obj):
+        """Get list of all batches for this stock's product(s)."""
+        # Get all unique batches that contain products from this stock
+        from django.db.models import Count, Sum as DbSum
+        
+        # Find all batches that have the same products as this stock
+        product_ids = obj.items.values_list('product_id', flat=True)
+        
+        batches = Stock.objects.filter(
+            items__product_id__in=product_ids,
+            business=obj.business
+        ).annotate(
+            batch_size=DbSum('items__quantity')
+        ).values(
+            'id', 'description', 'created_at', 'arrival_date', 'batch_size'
+        ).distinct().order_by('-created_at')
+        
+        return list(batches)
+
+    def get_selected_batch_id(self, obj):
+        """Return the batch_id filter if provided, otherwise None for aggregated view."""
+        return self._get_batch_filter()
+
+    def get_batch_size(self, obj):
+        """Get total batch size (filtered by batch_id if provided)."""
+        items = self._get_filtered_items(obj)
+        return items.aggregate(total=Sum('quantity'))['total'] or 0
+
+    def get_warehouse_quantity(self, obj):
+        """Get warehouse on-hand quantity (filtered by batch_id if provided)."""
+        items = self._get_filtered_items(obj)
+        return items.aggregate(total=Sum('calculated_quantity'))['total'] or 0
+
+    def get_storefront_transferred(self, obj):
+        """Get quantity transferred to storefronts (filtered by batch_id if provided)."""
+        from inventory.models import StoreFrontInventory
+        
+        items = self._get_filtered_items(obj)
+        product_ids = items.values_list('product_id', flat=True)
+        
+        transferred = StoreFrontInventory.objects.filter(
+            product_id__in=product_ids
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        
+        return transferred
+
+    def get_available_for_sale(self, obj):
+        """Get quantity available for sale (warehouse + storefront - sold - reserved)."""
+        warehouse = self.get_warehouse_quantity(obj)
+        storefront = self.get_storefront_transferred(obj)
+        sold = self.get_sold(obj)
+        reserved = self.get_reserved(obj)
+        
+        return warehouse + storefront - sold - reserved
+
+    def get_sold(self, obj):
+        """Get quantity sold (filtered by batch_id if provided)."""
+        from sales.models import SaleItem
+        
+        items = self._get_filtered_items(obj)
+        product_ids = items.values_list('product_id', flat=True)
+        
+        sold = SaleItem.objects.filter(
+            product_id__in=product_ids,
+            sale__status='COMPLETED'
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        
+        return sold
+
+    def get_reserved(self, obj):
+        """Get quantity reserved (filtered by batch_id if provided)."""
+        # TODO: Implement reservation tracking if you have a Reservation model
+        return 0
+
+    def get_shrinkage(self, obj):
+        """Get shrinkage (theft, loss, damage, etc.) (filtered by batch_id if provided)."""
+        from inventory.stock_adjustments import StockAdjustment
+        
+        items = self._get_filtered_items(obj)
+        stock_product_ids = items.values_list('id', flat=True)
+        
+        shrinkage_types = ['THEFT', 'LOSS', 'DAMAGE', 'EXPIRED', 'SPOILAGE', 'WRITE_OFF']
+        
+        shrinkage = StockAdjustment.objects.filter(
+            stock_product_id__in=stock_product_ids,
+            status='COMPLETED',
+            adjustment_type__in=shrinkage_types
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        
+        return abs(shrinkage)
+
+    def get_corrections(self, obj):
+        """Get corrections/adjustments (filtered by batch_id if provided)."""
+        from inventory.stock_adjustments import StockAdjustment
+        
+        items = self._get_filtered_items(obj)
+        stock_product_ids = items.values_list('id', flat=True)
+        
+        correction_types = ['CORRECTION', 'RECOUNT']
+        
+        corrections = StockAdjustment.objects.filter(
+            stock_product_id__in=stock_product_ids,
+            status='COMPLETED',
+            adjustment_type__in=correction_types
+        ).aggregate(total=Sum('quantity'))['total'] or 0
+        
+        return corrections
+
+    def get_landed_cost(self, obj):
+        """Get total landed cost (filtered by batch_id if provided)."""
+        items = self._get_filtered_items(obj)
+        
+        total_cost = Decimal('0.00')
+        for item in items:
+            total_cost += item.landed_unit_cost * item.quantity
+        
+        return total_cost
+
+    def get_reconciliation_formula(self, obj):
+        """Generate reconciliation formula showing how quantities are calculated."""
+        warehouse = self.get_warehouse_quantity(obj)
+        storefront = self.get_storefront_transferred(obj)
+        shrinkage = self.get_shrinkage(obj)
+        corrections = self.get_corrections(obj)
+        reserved = self.get_reserved(obj)
+        
+        available = warehouse + storefront - shrinkage + corrections - reserved
+        
+        return (
+            f"Warehouse ({warehouse}) + Storefront transferred ({storefront}) - "
+            f"Shrinkage ({shrinkage}) + Corrections ({corrections}) - "
+            f"Reservations ({reserved}) = {available}"
+        )
+
+    def get_inventory_balanced(self, obj):
+        """Check if inventory is balanced (expected equals actual)."""
+        batch_size = self.get_batch_size(obj)
+        warehouse = self.get_warehouse_quantity(obj)
+        storefront = self.get_storefront_transferred(obj)
+        shrinkage = self.get_shrinkage(obj)
+        corrections = self.get_corrections(obj)
+        
+        actual = warehouse + storefront - shrinkage + corrections
+        
+        # Allow small rounding differences
+        return abs(batch_size - actual) < 0.01
+
+    def _prefetched_items(self, obj):
+        cache = getattr(obj, '_prefetched_objects_cache', {})
+        if 'items' in cache:
+            return cache['items']
+        return None
+
+    def _primary_item(self, obj):
+        prefetched = self._prefetched_items(obj)
+        if prefetched is not None:
+            return prefetched[0] if prefetched else None
+        return obj.items.select_related('warehouse').first()
+
+    def get_warehouse_id(self, obj):
+        item = self._primary_item(obj)
+        return str(item.warehouse_id) if item and item.warehouse_id else None
+
+    def get_warehouse_name(self, obj):
+        item = self._primary_item(obj)
+        return item.warehouse.name if item and item.warehouse else None
+
+    def get_total_items(self, obj):
+        items = self._get_filtered_items(obj)
+        return items.count()
+
+    def get_total_quantity(self, obj):
+        return self.get_batch_size(obj)
+
+
 class StorefrontSaleProductSerializer(serializers.Serializer):
     product_id = serializers.UUIDField()
     product_name = serializers.CharField()
