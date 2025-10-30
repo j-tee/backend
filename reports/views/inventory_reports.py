@@ -263,6 +263,22 @@ class StockLevelsSummaryReportView(BaseReportView):
         """Build product-level stock details with pagination"""
         from django.db.models import Sum, Q
         from datetime import datetime, timedelta
+        from sales.models import SaleItem
+        
+        # PRE-CALCULATE: Get all reservations grouped by product (PERFORMANCE OPTIMIZATION)
+        # This prevents querying reservations N times in the loop
+        reservations_by_product = {}
+        all_product_ids = queryset.values_list('product_id', flat=True).distinct()
+        
+        reservation_data = SaleItem.objects.filter(
+            product_id__in=all_product_ids,
+            sale__status__in=['DRAFT', 'PENDING']
+        ).values('product_id').annotate(
+            total_reserved=Sum('quantity')
+        )
+        
+        for item in reservation_data:
+            reservations_by_product[str(item['product_id'])] = item['total_reserved']
         
         # Group by product and aggregate across warehouses
         product_stocks = {}
@@ -278,29 +294,26 @@ class StockLevelsSummaryReportView(BaseReportView):
                     'category': stock.product.category.name if stock.product.category else None,
                     'total_quantity': 0,
                     'total_value': Decimal('0.00'),
-                    'total_available': 0,  # New field
+                    'total_available': 0,  # Will be calculated after proportional distribution
                     'locations': [],  # Renamed from 'warehouses'
                     'is_low_stock': False,
                     'is_out_of_stock': False,
                     'last_restocked': None,  # New field
-                    'days_until_stockout': None  # New field
+                    'days_until_stockout': None,  # New field
+                    '_total_reserved': reservations_by_product.get(product_id, 0),  # Total reserved for this product
+                    '_total_stock': 0  # Total stock across all warehouses (for proportional calc)
                 }
             
-            # Calculate reserved quantity for this product at this warehouse
-            # Query DRAFT and PENDING sales for reserved stock
-            from sales.models import Sale, SaleItem
-            reserved_qty = SaleItem.objects.filter(
-                product=stock.product,
-                sale__status__in=['DRAFT', 'PENDING']
-            ).aggregate(total=Sum('quantity'))['total'] or 0
+            # Track total stock for this product (needed for proportional distribution)
+            product_stocks[product_id]['_total_stock'] += stock.quantity
             
-            # Calculate available quantity
-            available_qty = max(0, stock.quantity - reserved_qty)
+            # NOTE: reserved and available will be calculated AFTER the loop
+            # using proportional distribution to ensure math consistency
             
             # Get reorder point (default to 10 if not set on product)
             reorder_point = getattr(stock.product, 'reorder_point', 10)
             
-            # Determine status for this location
+            # Determine status for this location (will be recalculated after reserved is set)
             if stock.quantity == 0:
                 location_status = 'out_of_stock'
             elif stock.quantity < reorder_point:
@@ -308,16 +321,16 @@ class StockLevelsSummaryReportView(BaseReportView):
             else:
                 location_status = 'in_stock'
             
-            # Add location entry (renamed from warehouse)
+            # Add location entry (reserved and available will be set in second pass)
             warehouse_value = stock.quantity * stock.unit_cost
             product_stocks[product_id]['locations'].append({
                 'warehouse_id': str(stock.warehouse.id),
                 'warehouse_name': stock.warehouse.name,
                 'quantity': stock.quantity,
-                'reserved': reserved_qty,  # New field
-                'available': available_qty,  # New field
-                'reorder_point': reorder_point,  # New field
-                'status': location_status,  # New field
+                'reserved': 0,  # Placeholder - will be calculated in second pass
+                'available': stock.quantity,  # Placeholder - will be calculated in second pass
+                'reorder_point': reorder_point,
+                'status': location_status,
                 'unit_cost': str(stock.unit_cost),
                 'value': str(warehouse_value),
                 'supplier': stock.supplier.name if stock.supplier else None
@@ -325,7 +338,6 @@ class StockLevelsSummaryReportView(BaseReportView):
             
             # Update totals
             product_stocks[product_id]['total_quantity'] += stock.quantity
-            product_stocks[product_id]['total_available'] += available_qty
             product_stocks[product_id]['total_value'] += warehouse_value
             
             # Track last restocked date (most recent stock record for this product)
@@ -333,6 +345,43 @@ class StockLevelsSummaryReportView(BaseReportView):
                 if (product_stocks[product_id]['last_restocked'] is None or 
                     stock.created_at > product_stocks[product_id]['last_restocked']):
                     product_stocks[product_id]['last_restocked'] = stock.created_at
+        
+        # SECOND PASS: Distribute reservations proportionally across warehouses
+        # This ensures: total_quantity = total_available + total_reserved (math consistency)
+        for product_data in product_stocks.values():
+            total_reserved = product_data['_total_reserved']
+            total_stock = product_data['_total_stock']
+            total_available = 0
+            
+            if total_stock > 0 and total_reserved > 0:
+                # Distribute reservations proportionally based on each warehouse's stock share
+                for location in product_data['locations']:
+                    warehouse_qty = location['quantity']
+                    proportion = warehouse_qty / total_stock
+                    location['reserved'] = int(total_reserved * proportion)
+                    location['available'] = max(0, warehouse_qty - location['reserved'])
+                    total_available += location['available']
+                    
+                    # Update status based on available quantity
+                    if location['available'] == 0:
+                        location['status'] = 'out_of_stock'
+                    elif location['available'] < location['reorder_point']:
+                        location['status'] = 'low_stock'
+                    else:
+                        location['status'] = 'in_stock'
+            elif total_stock > 0:
+                # No reservations - all stock is available
+                for location in product_data['locations']:
+                    location['reserved'] = 0
+                    location['available'] = location['quantity']
+                    total_available += location['available']
+            
+            # Set total available
+            product_data['total_available'] = total_available
+            
+            # Clean up internal tracking fields
+            del product_data['_total_reserved']
+            del product_data['_total_stock']
         
         # Finalize and add status flags + sales velocity calculations
         stock_levels = []
