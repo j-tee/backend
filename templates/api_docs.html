@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>API Documentation - POS Backend</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: #f7fafc;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 3rem 2rem;
+            border-radius: 12px;
+            margin-bottom: 2rem;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-size: 1.1rem;
+        }
+
+        .back-link {
+            display: inline-block;
+            margin-bottom: 1rem;
+            color: white;
+            text-decoration: none;
+            opacity: 0.9;
+            transition: opacity 0.2s;
+        }
+
+        .back-link:hover {
+            opacity: 1;
+        }
+
+        .section {
+            background: white;
+            border-radius: 12px;
+            padding: 2rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.05);
+        }
+
+        .section h2 {
+            color: #2d3748;
+            margin-bottom: 1.5rem;
+            font-size: 1.8rem;
+            border-bottom: 3px solid #667eea;
+            padding-bottom: 0.5rem;
+        }
+
+        .section h3 {
+            color: #4a5568;
+            margin-top: 2rem;
+            margin-bottom: 1rem;
+            font-size: 1.3rem;
+        }
+
+        .endpoint {
+            background: #f7fafc;
+            border-left: 4px solid #667eea;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border-radius: 4px;
+        }
+
+        .endpoint-header {
+            display: flex;
+            align-items: center;
+            margin-bottom: 0.5rem;
+        }
+
+        .method {
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-weight: 600;
+            font-size: 0.85rem;
+            margin-right: 1rem;
+            color: white;
+            min-width: 70px;
+            text-align: center;
+        }
+
+        .method.get { background: #48bb78; }
+        .method.post { background: #4299e1; }
+        .method.put { background: #ed8936; }
+        .method.patch { background: #f6ad55; }
+        .method.delete { background: #f56565; }
+
+        .endpoint-path {
+            font-family: 'Courier New', monospace;
+            color: #2d3748;
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .endpoint-description {
+            color: #718096;
+            margin-top: 0.5rem;
+            line-height: 1.6;
+        }
+
+        .auth-required {
+            display: inline-block;
+            background: #fed7d7;
+            color: #c53030;
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
+            font-size: 0.75rem;
+            margin-left: 1rem;
+            font-weight: 600;
+        }
+
+        .code-block {
+            background: #2d3748;
+            color: #68d391;
+            padding: 1rem;
+            border-radius: 6px;
+            overflow-x: auto;
+            margin: 1rem 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9rem;
+        }
+
+        .info-box {
+            background: #bee3f8;
+            border-left: 4px solid #4299e1;
+            padding: 1rem;
+            margin: 1rem 0;
+            border-radius: 4px;
+        }
+
+        .info-box strong {
+            color: #2c5282;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 1rem 0;
+        }
+
+        th, td {
+            padding: 0.75rem;
+            text-align: left;
+            border-bottom: 1px solid #e2e8f0;
+        }
+
+        th {
+            background: #f7fafc;
+            color: #2d3748;
+            font-weight: 600;
+        }
+
+        tr:hover {
+            background: #f7fafc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <a href="/" class="back-link">← Back to Home</a>
+            <h1>📡 API Documentation</h1>
+            <p>Complete reference for POS Backend RESTful API</p>
+        </div>
+
+        <div class="section">
+            <h2>Authentication</h2>
+            <p>Most endpoints require authentication. Include the JWT token in the Authorization header:</p>
+            <div class="code-block">
+Authorization: Bearer &lt;your_jwt_token&gt;
+            </div>
+            
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/accounts/login/</span>
+                </div>
+                <div class="endpoint-description">
+                    Authenticate and receive JWT tokens. Required fields: <code>username</code>, <code>password</code>
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/accounts/refresh/</span>
+                </div>
+                <div class="endpoint-description">
+                    Refresh your access token using a refresh token.
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Inventory Management</h2>
+            
+            <h3>Products</h3>
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/products/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List all products with filtering options. Supports pagination, search, and filtering by category, business, and more.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/inventory/products/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Create a new product. Required fields include name, price, category, and business.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/products/{id}/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Retrieve details of a specific product.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method put">PUT</span>
+                    <span class="endpoint-path">/api/inventory/products/{id}/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Update an existing product.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method delete">DELETE</span>
+                    <span class="endpoint-path">/api/inventory/products/{id}/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Delete a product.
+                </div>
+            </div>
+
+            <h3>Warehouses & Storefronts</h3>
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/warehouses/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List all warehouses for the current business.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/storefronts/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List all storefronts for the current business.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/employee/workspace/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get the current employee's assigned workspace (warehouse or storefront).
+                </div>
+            </div>
+
+            <h3>Stock Management</h3>
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/stock/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List stock levels across all locations. Supports filtering by product, location, and business.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/inventory/transfers/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Create a stock transfer request between locations.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/inventory/transfers/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List all transfer requests with filtering options.
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Sales Management</h2>
+            
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/sales/sales/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    List all sales transactions with filtering by date, location, payment type, and more.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/sales/sales/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Create a new sale transaction with line items.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/sales/sales/{id}/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Retrieve details of a specific sale including all line items.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/sales/cart/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get the current user's shopping cart.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method post">POST</span>
+                    <span class="endpoint-path">/api/sales/cart/add/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Add an item to the cart. Required fields: <code>product_id</code>, <code>quantity</code>
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Reports & Analytics</h2>
+            
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/reports/sales-summary/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get sales summary with filters for date range, location, and grouping options.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/reports/inventory-summary/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get inventory summary showing stock levels, valuation, and turnover.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/reports/reconciliation/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get reconciliation reports for cash and inventory.
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Business Settings</h2>
+            
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method get">GET</span>
+                    <span class="endpoint-path">/api/settings/business-settings/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Get current business settings and configurations.
+                </div>
+            </div>
+
+            <div class="endpoint">
+                <div class="endpoint-header">
+                    <span class="method patch">PATCH</span>
+                    <span class="endpoint-path">/api/settings/business-settings/</span>
+                    <span class="auth-required">🔒 Auth Required</span>
+                </div>
+                <div class="endpoint-description">
+                    Update business settings (partial update supported).
+                </div>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Common Query Parameters</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Parameter</th>
+                        <th>Type</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>page</code></td>
+                        <td>integer</td>
+                        <td>Page number for pagination</td>
+                    </tr>
+                    <tr>
+                        <td><code>page_size</code></td>
+                        <td>integer</td>
+                        <td>Number of items per page (default: 20)</td>
+                    </tr>
+                    <tr>
+                        <td><code>search</code></td>
+                        <td>string</td>
+                        <td>Search query (searches multiple fields)</td>
+                    </tr>
+                    <tr>
+                        <td><code>ordering</code></td>
+                        <td>string</td>
+                        <td>Field to order by (prefix with - for descending)</td>
+                    </tr>
+                    <tr>
+                        <td><code>business</code></td>
+                        <td>UUID</td>
+                        <td>Filter by business ID</td>
+                    </tr>
+                    <tr>
+                        <td><code>start_date</code></td>
+                        <td>date</td>
+                        <td>Start date for date range filters (YYYY-MM-DD)</td>
+                    </tr>
+                    <tr>
+                        <td><code>end_date</code></td>
+                        <td>date</td>
+                        <td>End date for date range filters (YYYY-MM-DD)</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h2>Response Format</h2>
+            <div class="info-box">
+                <strong>All API responses are in JSON format.</strong> List endpoints return paginated results with the following structure:
+            </div>
+            <div class="code-block">
+{
+    "count": 150,
+    "next": "http://api.example.com/endpoint/?page=2",
+    "previous": null,
+    "results": [...]
+}
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>Error Responses</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Status Code</th>
+                        <th>Description</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td><code>400</code></td>
+                        <td>Bad Request - Invalid input data</td>
+                    </tr>
+                    <tr>
+                        <td><code>401</code></td>
+                        <td>Unauthorized - Authentication required or token invalid</td>
+                    </tr>
+                    <tr>
+                        <td><code>403</code></td>
+                        <td>Forbidden - Insufficient permissions</td>
+                    </tr>
+                    <tr>
+                        <td><code>404</code></td>
+                        <td>Not Found - Resource doesn't exist</td>
+                    </tr>
+                    <tr>
+                        <td><code>500</code></td>
+                        <td>Internal Server Error - Server-side error</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
