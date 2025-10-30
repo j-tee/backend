@@ -6,6 +6,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.exceptions import PermissionDenied, ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django_filters.rest_framework import DjangoFilterBackend, FilterSet, CharFilter, BooleanFilter, UUIDFilter
@@ -1593,6 +1594,34 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
 
         return membership
 
+    def _convert_django_validation_error(self, exc: DjangoValidationError):
+        """Convert Django ValidationError to DRF ValidationError for consistent responses."""
+        if hasattr(exc, 'message_dict') and exc.message_dict:
+            raise ValidationError(exc.message_dict) from exc
+
+        messages = getattr(exc, 'messages', None)
+        if not messages:
+            raise ValidationError(str(exc)) from exc
+
+        if len(messages) == 1:
+            raise ValidationError(messages[0]) from exc
+
+        raise ValidationError(messages) from exc
+
+    def _complete_transfer_request(self, transfer_request: TransferRequest, actor) -> list[dict]:
+        """Mark transfer as fulfilled and apply inventory adjustments atomically."""
+        try:
+            with transaction.atomic():
+                transfer_request.status = TransferRequest.STATUS_FULFILLED
+                transfer_request.fulfilled_at = timezone.now()
+                transfer_request.fulfilled_by = actor
+                transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+                adjustments = transfer_request.apply_manual_inventory_fulfillment()
+        except DjangoValidationError as exc:
+            self._convert_django_validation_error(exc)
+
+        return adjustments
+
     def perform_create(self, serializer):
         storefront = serializer.validated_data.get('storefront')
         if storefront is None:
@@ -1651,11 +1680,7 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         else:
             self._ensure_membership(transfer_request.business, allowed_roles=self._manager_roles())
 
-        adjustments = transfer_request.apply_manual_inventory_fulfillment()
-        transfer_request.status = TransferRequest.STATUS_FULFILLED
-        transfer_request.fulfilled_at = timezone.now()
-        transfer_request.fulfilled_by = request.user
-        transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+        adjustments = self._complete_transfer_request(transfer_request, request.user)
         transfer_request.refresh_from_db()
         payload = self.get_serializer(transfer_request).data
         payload['_inventory_adjustments'] = adjustments
@@ -1704,11 +1729,7 @@ class TransferRequestViewSet(viewsets.ModelViewSet):
         elif new_status == TransferRequest.STATUS_FULFILLED:
             # Allow manual fulfillment override
             if transfer_request.status != TransferRequest.STATUS_FULFILLED:
-                inventory_adjustments = transfer_request.apply_manual_inventory_fulfillment()
-                transfer_request.status = TransferRequest.STATUS_FULFILLED
-                transfer_request.fulfilled_at = timezone.now()
-                transfer_request.fulfilled_by = request.user
-                transfer_request.save(update_fields=['status', 'fulfilled_at', 'fulfilled_by', 'updated_at'])
+                inventory_adjustments = self._complete_transfer_request(transfer_request, request.user)
         elif new_status == TransferRequest.STATUS_NEW:
             # Reset to NEW (clear assignment)
             transfer_request.clear_assignment()
