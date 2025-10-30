@@ -95,11 +95,11 @@ class StockLevelsSummaryReportView(BaseReportView):
         if supplier_id:
             queryset = queryset.filter(supplier_id=supplier_id)
         if not include_zero_stock:
-            queryset = queryset.filter(quantity__gt=0)
+            queryset = queryset.filter(calculated_quantity__gt=0)  # Use current working quantity
         if min_quantity:
-            queryset = queryset.filter(quantity__gte=int(min_quantity))
+            queryset = queryset.filter(calculated_quantity__gte=int(min_quantity))
         if max_quantity:
-            queryset = queryset.filter(quantity__lte=int(max_quantity))
+            queryset = queryset.filter(calculated_quantity__lte=int(max_quantity))
         
         # Build summary
         summary = self._build_summary(queryset)
@@ -151,11 +151,11 @@ class StockLevelsSummaryReportView(BaseReportView):
         # Get warehouse count
         warehouses_count = queryset.values('warehouse').distinct().count()
         
-        # Aggregate totals using unit_cost
+        # Aggregate totals using calculated_quantity (current working quantity)
         totals = queryset.aggregate(
-            total_units=Sum('quantity'),
+            total_units=Sum('calculated_quantity'),
             total_value=Sum(
-                F('quantity') * F('unit_cost'),
+                F('calculated_quantity') * F('unit_cost'),
                 output_field=DecimalField()
             )
         )
@@ -167,6 +167,8 @@ class StockLevelsSummaryReportView(BaseReportView):
         
         for stock in queryset:
             prod_id = str(stock.product.id)
+            current_qty = stock.calculated_quantity or 0  # Current working quantity
+            
             if prod_id not in product_statuses:
                 product_statuses[prod_id] = {
                     'has_good_stock': False,
@@ -175,11 +177,11 @@ class StockLevelsSummaryReportView(BaseReportView):
                 }
             
             # If ANY location has stock above reorder point, product is "in stock"
-            if stock.quantity > REORDER_POINT:
+            if current_qty > REORDER_POINT:
                 product_statuses[prod_id]['has_good_stock'] = True
                 product_statuses[prod_id]['has_no_stock'] = False
             # If ANY location has some stock (but all below reorder point), it's "low stock"
-            elif stock.quantity > 0:
+            elif current_qty > 0:
                 product_statuses[prod_id]['has_some_stock'] = True
                 product_statuses[prod_id]['has_no_stock'] = False
         
@@ -207,16 +209,16 @@ class StockLevelsSummaryReportView(BaseReportView):
             'warehouse__id', 'warehouse__name'
         ).annotate(
             total_products=Count('product', distinct=True),
-            total_units=Sum('quantity'),
+            total_units=Sum('calculated_quantity'),  # Current working quantity
             total_value=Sum(
-                F('quantity') * (
+                F('calculated_quantity') * (  # Use calculated_quantity not quantity
                     F('unit_cost') + 
                     Coalesce(F('unit_tax_amount'), Value(0)) + 
                     Coalesce(F('unit_additional_cost'), Value(0))
                 ),
                 output_field=DecimalField()
             ),
-            low_stock_count=Count('id', filter=Q(quantity__lt=10, quantity__gt=0))
+            low_stock_count=Count('id', filter=Q(calculated_quantity__lt=10, calculated_quantity__gt=0))
         ).order_by('-total_value')
         
         return [
@@ -237,9 +239,9 @@ class StockLevelsSummaryReportView(BaseReportView):
             'product__category__id', 'product__category__name'
         ).annotate(
             total_products=Count('product', distinct=True),
-            total_units=Sum('quantity'),
+            total_units=Sum('calculated_quantity'),  # Current working quantity
             total_value=Sum(
-                F('quantity') * (
+                F('calculated_quantity') * (  # Use calculated_quantity not quantity
                     F('unit_cost') + 
                     Coalesce(F('unit_tax_amount'), Value(0)) + 
                     Coalesce(F('unit_additional_cost'), Value(0))
@@ -306,7 +308,9 @@ class StockLevelsSummaryReportView(BaseReportView):
                 }
             
             # Track total stock for this product (needed for proportional distribution)
-            product_stocks[product_id]['_total_stock'] += stock.quantity
+            # Use calculated_quantity (current working quantity) not quantity (original intake)
+            current_qty = stock.calculated_quantity or 0
+            product_stocks[product_id]['_total_stock'] += current_qty
             
             # NOTE: reserved and available will be calculated AFTER the loop
             # using proportional distribution to ensure math consistency
@@ -315,21 +319,21 @@ class StockLevelsSummaryReportView(BaseReportView):
             reorder_point = getattr(stock.product, 'reorder_point', 10)
             
             # Determine status for this location (will be recalculated after reserved is set)
-            if stock.quantity == 0:
+            if current_qty == 0:
                 location_status = 'out_of_stock'
-            elif stock.quantity < reorder_point:
+            elif current_qty < reorder_point:
                 location_status = 'low_stock'
             else:
                 location_status = 'in_stock'
             
             # Add location entry (reserved and available will be set in second pass)
-            warehouse_value = stock.quantity * stock.unit_cost
+            warehouse_value = current_qty * stock.unit_cost
             product_stocks[product_id]['locations'].append({
                 'warehouse_id': str(stock.warehouse.id),
                 'warehouse_name': stock.warehouse.name,
-                'quantity': stock.quantity,
+                'quantity': current_qty,  # Current working quantity, not original intake
                 'reserved': 0,  # Placeholder - will be calculated in second pass
-                'available': stock.quantity,  # Placeholder - will be calculated in second pass
+                'available': current_qty,  # Placeholder - will be calculated in second pass
                 'reorder_point': reorder_point,
                 'status': location_status,
                 'unit_cost': str(stock.unit_cost),
@@ -338,7 +342,7 @@ class StockLevelsSummaryReportView(BaseReportView):
             })
             
             # Update totals
-            product_stocks[product_id]['total_quantity'] += stock.quantity
+            product_stocks[product_id]['total_quantity'] += current_qty
             product_stocks[product_id]['total_value'] += warehouse_value
             
             # Track last restocked date (most recent stock record for this product)
