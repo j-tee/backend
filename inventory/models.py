@@ -680,19 +680,20 @@ class TransferRequest(models.Model):
 
         adjustments: list[dict[str, int]] = []
 
-        with transaction.atomic():
-            for line in self.line_items.select_related('product'):
-                entry, _ = StoreFrontInventory.objects.select_for_update().get_or_create(
-                    storefront=self.storefront,
-                    product=line.product,
-                    defaults={'quantity': 0},
-                )
-                entry.quantity += line.requested_quantity
-                entry.save(update_fields=['quantity', 'updated_at'])
-                adjustments.append({
-                    'product_id': str(line.product_id),
-                    'quantity_added': line.requested_quantity,
-                })
+        # Note: No transaction.atomic() here - caller must handle transaction boundary
+        # This ensures rollback works if validation fails after inventory changes
+        for line in self.line_items.select_related('product'):
+            entry, _ = StoreFrontInventory.objects.select_for_update().get_or_create(
+                storefront=self.storefront,
+                product=line.product,
+                defaults={'quantity': 0},
+            )
+            entry.quantity += line.requested_quantity
+            entry.save(update_fields=['quantity', 'updated_at'])
+            adjustments.append({
+                'product_id': str(line.product_id),
+                'quantity_added': line.requested_quantity,
+            })
 
         return adjustments
 
