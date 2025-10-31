@@ -368,17 +368,40 @@ class TransferWorkflowViewSet(viewsets.ViewSet):
                     'transferred_quantity': item.quantity,
                 })
 
+        # ✅ CRITICAL FIX: Base payload with transfer_number
         payload = {
             'id': str(transfer.id),
             'reference': transfer.reference_number,
+            'transfer_number': transfer.reference_number,  # ✅ Add transfer_number field
             'status': transfer.status.upper(),
             'request_id': str(request_obj.id) if request_obj else None,
-            'source_warehouse': str(transfer.source_warehouse_id),
-            'destination_storefront': str(transfer.destination_storefront_id) if transfer.destination_storefront_id else None,
             'created_at': transfer.created_at.isoformat(),
             'updated_at': transfer.updated_at.isoformat(),
             'line_items': line_items,
+            'items_detail': transfer.get_items_detail(),  # Add items_detail for frontend modals
         }
+
+        # ✅ CRITICAL FIX: Add specific location fields based on transfer type
+        # Determine transfer type and set appropriate from/to fields
+        if transfer.source_warehouse and transfer.destination_warehouse:
+            # Warehouse → Warehouse transfer
+            payload['from_warehouse'] = transfer.source_warehouse.name
+            payload['to_warehouse'] = transfer.destination_warehouse.name
+            payload['source_warehouse'] = str(transfer.source_warehouse_id)  # Keep for backward compatibility
+        elif transfer.source_warehouse and transfer.destination_storefront:
+            # Warehouse → Storefront transfer
+            payload['from_warehouse'] = transfer.source_warehouse.name
+            payload['to_storefront'] = transfer.destination_storefront.name
+            payload['source_warehouse'] = str(transfer.source_warehouse_id)  # Keep for backward compatibility
+            payload['destination_storefront'] = str(transfer.destination_storefront_id)  # Keep for backward compatibility
+        # Note: Storefront → Warehouse would be handled here if that transfer type exists
+        # elif transfer.source_storefront and transfer.destination_warehouse:
+        #     payload['from_storefront'] = transfer.source_storefront.name
+        #     payload['to_warehouse'] = transfer.destination_warehouse.name
+
+        # Add user information if available
+        if transfer.created_by:
+            payload['created_by'] = transfer.created_by.name if hasattr(transfer.created_by, 'name') else str(transfer.created_by)
 
         payload['received_at'] = transfer.received_at.isoformat() if transfer.received_at else None
         payload['received_by'] = str(transfer.received_by_id) if transfer.received_by_id else None

@@ -38,6 +38,7 @@ from .views.inventory_reports import (
     StockLevelsSummaryReportView,
     LowStockAlertsReportView,
     StockMovementHistoryReportView,
+    StockMovementHistoryExportView,
     WarehouseAnalyticsReportView,
 )
 
@@ -89,6 +90,7 @@ urlpatterns = [
     path('api/inventory/stock-levels/', StockLevelsSummaryReportView.as_view(), name='stock-levels-report'),
     path('api/inventory/low-stock-alerts/', LowStockAlertsReportView.as_view(), name='low-stock-alerts-report'),
     path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
+    path('api/inventory/movements/export/', StockMovementHistoryExportView.as_view(), name='stock-movements-export'),
     path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
     
     # Customer Reports (Phase 5) - Complete

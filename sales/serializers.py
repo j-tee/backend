@@ -245,8 +245,16 @@ class PaymentSerializer(serializers.ModelSerializer):
 class SaleSerializer(serializers.ModelSerializer):
     """Serializer for Sale model"""
     line_items = SaleItemSerializer(many=True, read_only=True, source='sale_items')
+    items_detail = serializers.SerializerMethodField()
     payments = PaymentSerializer(many=True, read_only=True)
-    storefront_name = serializers.CharField(source='storefront.name', read_only=True)
+    
+    # ✅ CRITICAL FIX: Add sale_number (alias for receipt_number)
+    sale_number = serializers.CharField(source='receipt_number', read_only=True)
+    
+    # ✅ CRITICAL FIX: Use 'storefront' (not warehouse) - sales happen at storefronts
+    storefront = serializers.CharField(source='storefront.name', read_only=True)
+    storefront_name = serializers.CharField(source='storefront.name', read_only=True)  # Keep for backward compatibility
+    
     customer_name = serializers.CharField(source='customer.name', read_only=True, allow_null=True)
     user_name = serializers.SerializerMethodField()
     
@@ -305,15 +313,15 @@ class SaleSerializer(serializers.ModelSerializer):
         model = Sale
         fields = [
             'id', 'business', 'storefront', 'storefront_name', 'user', 'user_name',
-            'customer', 'customer_name', 'receipt_number', 'type', 'status',
+            'customer', 'customer_name', 'receipt_number', 'sale_number', 'type', 'status',
             'subtotal', 'discount_amount', 'tax_amount', 'total_amount',
             'amount_paid', 'amount_refunded', 'amount_due', 'payment_type', 'manager_override',
             'override_reason', 'override_by', 'notes', 'cart_session_id',
-            'created_at', 'updated_at', 'completed_at', 'line_items', 'payments',
+            'created_at', 'updated_at', 'completed_at', 'line_items', 'items_detail', 'payments',
             'payment_status', 'payment_completion_percentage'
         ]
         read_only_fields = [
-            'id', 'receipt_number', 'subtotal', 'total_amount', 'amount_due',
+            'id', 'receipt_number', 'sale_number', 'subtotal', 'total_amount', 'amount_due',
             'amount_paid', 'amount_refunded',  # System-managed fields
             'created_at', 'updated_at', 'completed_at'
         ]
@@ -323,6 +331,10 @@ class SaleSerializer(serializers.ModelSerializer):
         if obj.user:
             return obj.user.name if hasattr(obj.user, 'name') else str(obj.user)
         return None
+    
+    def get_items_detail(self, obj):
+        """Get detailed items payload for movement detail view"""
+        return obj.get_items_detail()
     
     def get_payment_status(self, obj):
         """

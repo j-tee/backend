@@ -2,18 +2,30 @@
 Unit tests for MovementTracker service.
 
 Tests the MovementTracker's ability to aggregate movements from multiple sources
-(legacy StockAdjustment, new Transfer, and Sales) and provide unified reporting.
+(new Transfer and Sales) and provide unified reporting.
+
+Note: Legacy TRANSFER_IN/TRANSFER_OUT StockAdjustment tests are deprecated.
 """
 
 from decimal import Decimal
 from datetime import datetime, timedelta
-from django.test import TestCase
+from django.test import TestCase, skip
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from accounts.models import Business
-from inventory.models import Warehouse, Product, Stock, StockProduct, Category
+from inventory.models import (
+    Warehouse,
+    Product,
+    Stock,
+    StockProduct,
+    Category,
+    StoreFront,
+    BusinessStoreFront,
+)
 from inventory.stock_adjustments import StockAdjustment
+from inventory.transfer_models import Transfer, TransferItem
+from sales.models import Sale, SaleItem
 from reports.services import MovementTracker
 
 
@@ -91,8 +103,14 @@ class MovementTrackerTestCase(TestCase):
             unit_cost=Decimal('10.00')
         )
     
+    @skip("DEPRECATED: Legacy TRANSFER_IN/TRANSFER_OUT excluded from MovementTracker after migration")
     def test_get_movements_with_legacy_adjustments(self):
-        """Test getting movements from legacy StockAdjustment records."""
+        """
+        DEPRECATED: Test getting movements from legacy StockAdjustment records.
+        
+        Legacy TRANSFER_IN/TRANSFER_OUT adjustments are now excluded from MovementTracker.
+        All transfers use the Transfer model instead.
+        """
         # Create a transfer using StockAdjustment (old system)
         reference = 'TRF-TEST-001'
         
@@ -337,3 +355,138 @@ class MovementTrackerTestCase(TestCase):
         # Should be sorted newest first
         self.assertEqual(len(movements), 2)
         self.assertGreater(movements[0]['date'], movements[1]['date'])
+
+    def test_paginated_movements_reference_and_location(self):
+        """Verify paginated movements expose correct reference and warehouse identifiers."""
+        adjustment = StockAdjustment.objects.create(
+            stock_product=self.stock_product_a,
+            adjustment_type='TRANSFER_OUT',
+            quantity=-8,
+            unit_cost=Decimal('12.50'),
+            created_by=self.user,
+            business=self.business,
+            status='COMPLETED'
+        )
+
+        total = MovementTracker.count_movements(
+            business_id=str(self.business.id)
+        )
+        self.assertGreaterEqual(total, 1)
+
+        page = MovementTracker.get_paginated_movements(
+            business_id=str(self.business.id),
+            warehouse_id=str(self.warehouse_a.id),
+            product_id=str(self.product.id),
+            category_id=None,
+            start_date=None,
+            end_date=None,
+            movement_types=None,
+            adjustment_type=None,
+            search=None,
+            sort='date_desc',
+            limit=1,
+            offset=0,
+        )
+
+        self.assertEqual(len(page), 1)
+        movement = page[0]
+        self.assertEqual(movement['reference_id'], str(adjustment.id))
+        self.assertEqual(movement['adjustment_id'], str(adjustment.id))
+        self.assertEqual(movement['source_location_id'], str(self.warehouse_a.id))
+        self.assertEqual(movement['warehouse_id'], str(self.warehouse_a.id))
+        self.assertEqual(movement['warehouse_name'], self.warehouse_a.name)
+
+    def test_movements_include_new_transfer_identifiers(self):
+        """Ensure new transfer records expose transfer IDs and warehouse UUIDs."""
+        transfer = Transfer.objects.create(
+            business=self.business,
+            transfer_type=Transfer.TYPE_WAREHOUSE_TO_WAREHOUSE,
+            status=Transfer.STATUS_COMPLETED,
+            source_warehouse=self.warehouse_a,
+            destination_warehouse=self.warehouse_b,
+            reference_number='TRF-UNIT-001',
+            created_by=self.user,
+            completed_at=timezone.now(),
+            completed_by=self.user,
+        )
+
+        TransferItem.objects.create(
+            transfer=transfer,
+            product=self.product,
+            quantity=5,
+            unit_cost=Decimal('11.25'),
+        )
+
+        movements = MovementTracker.get_movements(
+            business_id=str(self.business.id)
+        )
+
+        transfer_rows = [m for m in movements if m['type'] == 'transfer']
+        self.assertEqual(len(transfer_rows), 1)
+
+        transfer_row = transfer_rows[0]
+        self.assertEqual(transfer_row['reference_id'], str(transfer.id))
+        self.assertEqual(transfer_row['transfer_id'], str(transfer.id))
+        self.assertEqual(transfer_row['source_location_id'], str(self.warehouse_a.id))
+        self.assertEqual(transfer_row['destination_location_id'], str(self.warehouse_b.id))
+        self.assertEqual(transfer_row['warehouse_id'], str(self.warehouse_a.id))
+        self.assertEqual(transfer_row['warehouse_name'], self.warehouse_a.name)
+
+    def test_movements_include_sale_identifiers(self):
+        """Ensure sale records expose sale IDs and storefront UUIDs."""
+        storefront = StoreFront.objects.create(
+            user=self.user,
+            name='Main Storefront',
+            location='Storefront Location',
+        )
+        BusinessStoreFront.objects.create(
+            business=self.business,
+            storefront=storefront,
+        )
+
+        sale = Sale.objects.create(
+            business=self.business,
+            storefront=storefront,
+            user=self.user,
+            payment_type='CASH',
+            status=Sale.STATUS_COMPLETED,
+            type=Sale.TYPE_RETAIL,
+            receipt_number='RCPT-UNIT-001',
+        )
+
+        SaleItem.objects.create(
+            sale=sale,
+            product=self.product,
+            stock=self.stock_a,
+            stock_product=self.stock_product_a,
+            quantity=Decimal('2'),
+            unit_price=Decimal('15.00'),
+            tax_rate=Decimal('0.00'),
+        )
+
+        sale.calculate_totals()
+        sale.amount_paid = sale.total_amount
+        sale.amount_due = Decimal('0.00')
+        sale.completed_at = timezone.now()
+        sale.save(update_fields=[
+            'subtotal',
+            'total_amount',
+            'amount_paid',
+            'amount_due',
+            'completed_at',
+            'updated_at',
+        ])
+
+        movements = MovementTracker.get_movements(
+            business_id=str(self.business.id)
+        )
+
+        sale_rows = [m for m in movements if m['type'] == 'sale']
+        self.assertEqual(len(sale_rows), 1)
+
+        sale_row = sale_rows[0]
+        self.assertEqual(sale_row['reference_id'], str(sale.id))
+        self.assertEqual(sale_row['sale_id'], str(sale.id))
+        self.assertEqual(sale_row['source_location_id'], str(storefront.id))
+        self.assertEqual(sale_row['warehouse_id'], str(storefront.id))
+        self.assertEqual(sale_row['warehouse_name'], storefront.name)

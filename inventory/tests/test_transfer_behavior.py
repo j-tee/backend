@@ -1,4 +1,12 @@
-from django.test import TestCase
+"""
+DEPRECATED: Legacy transfer behavior tests for TRANSFER_IN/TRANSFER_OUT.
+
+These tests are kept for historical reference but are skipped as the legacy
+transfer system has been replaced with the Transfer model.
+
+For current transfer testing, see tests for the Transfer model in transfer_tests.py
+"""
+from django.test import TestCase, skip
 from accounts.models import Business
 from django.contrib.auth import get_user_model
 from inventory.models import Stock, StockProduct, Product, Warehouse
@@ -8,6 +16,8 @@ User = get_user_model()
 
 
 class TransferBehaviorTests(TestCase):
+    """DEPRECATED: Legacy transfer tests - use Transfer model instead"""
+    
     def setUp(self):
         self.user = User.objects.create(username='u1')
         self.business = Business.objects.create(owner=self.user, name='B1', email='b1@example.com')
@@ -21,6 +31,7 @@ class TransferBehaviorTests(TestCase):
         # Destination intake already equals transfer qty (5)
         self.sp_dst = StockProduct.objects.create(stock=self.stock_dst, warehouse=self.warehouse_dst, product=self.product, quantity=5, calculated_quantity=5)
 
+    @skip("DEPRECATED: Legacy TRANSFER_IN/TRANSFER_OUT system replaced with Transfer model")
     def test_transfer_in_double_count_prevention(self):
         # Create linked adjustments
         ref = 'TRF-TEST-1'

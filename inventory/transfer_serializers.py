@@ -94,6 +94,7 @@ class TransferSerializer(serializers.ModelSerializer):
     """Base serializer for Transfer operations"""
     
     items = TransferItemSerializer(many=True)
+    items_detail = serializers.SerializerMethodField()
     source_warehouse_name = serializers.CharField(
         source='source_warehouse.name',
         read_only=True
@@ -127,6 +128,7 @@ class TransferSerializer(serializers.ModelSerializer):
             'expected_arrival_date',
             'notes',
             'items',
+            'items_detail',
             'created_by',
             'created_by_name',
             'created_at',
@@ -152,6 +154,10 @@ class TransferSerializer(serializers.ModelSerializer):
         return (getattr(obj.created_by, 'name', None) or 
                 getattr(obj.created_by, 'username', None) or 
                 str(obj.created_by))
+    
+    def get_items_detail(self, obj):
+        """Get detailed items payload for movement detail view"""
+        return obj.get_items_detail()
     
     def get_completed_by_name(self, obj):
         """Get completer's display name"""

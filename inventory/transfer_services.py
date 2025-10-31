@@ -1,3 +1,11 @@
+"""
+DEPRECATED: Legacy transfer services for TRANSFER_IN/TRANSFER_OUT StockAdjustments.
+
+This module is deprecated and should not be used for new code.
+All transfers should use the new Transfer model instead.
+
+Historical functionality preserved for reference only.
+"""
 from django.db import transaction
 from .stock_adjustments import StockAdjustment
 from .models import StockProduct
@@ -15,41 +23,14 @@ def create_paired_transfer_adjustments(
     requires_approval=True,
 ) -> Tuple[StockAdjustment, StockAdjustment]:
     """
-    Create paired StockAdjustment records for inter-warehouse transfer.
-    - from_stock_product: StockProduct to transfer FROM (decrease)
-    - to_stock_product: StockProduct to transfer TO (increase)
-    - quantity: Number of units to transfer (positive integer)
-    - unit_cost: Cost per unit for both adjustments
-    - reference_number: Optional reference for both adjustments
-    - reason: Optional reason for both adjustments
-    - created_by: User creating the adjustments
-    - requires_approval: Whether approval is required
-    Returns (out_adjustment, in_adjustment)
+    DEPRECATED: Use the Transfer model API instead.
+    
+    This function creates legacy TRANSFER_IN/TRANSFER_OUT adjustments.
+    New code should use POST /inventory/api/transfers/ endpoint.
+    
+    Kept for historical reference only - do not use in new code.
     """
-    assert quantity > 0, "Quantity must be positive"
-    with transaction.atomic():
-        out_adj = StockAdjustment.objects.create(
-            business=from_stock_product.product.business,
-            stock_product=from_stock_product,
-            adjustment_type='TRANSFER_OUT',
-            quantity=-quantity,
-            unit_cost=unit_cost,
-            reason=reason or f"Transfer out to {to_stock_product.warehouse.name}",
-            reference_number=reference_number,
-            status='PENDING',
-            requires_approval=requires_approval,
-            created_by=created_by,
-        )
-        in_adj = StockAdjustment.objects.create(
-            business=to_stock_product.product.business,
-            stock_product=to_stock_product,
-            adjustment_type='TRANSFER_IN',
-            quantity=quantity,
-            unit_cost=unit_cost,
-            reason=reason or f"Transfer in from {from_stock_product.warehouse.name}",
-            reference_number=reference_number,
-            status='PENDING',
-            requires_approval=requires_approval,
-            created_by=created_by,
-        )
-        return out_adj, in_adj
+    raise DeprecationWarning(
+        "create_paired_transfer_adjustments() is deprecated. "
+        "Use the Transfer model and POST /inventory/api/transfers/ endpoint instead."
+    )

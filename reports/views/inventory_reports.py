@@ -5,12 +5,20 @@ Endpoints for inventory management and warehouse analytics.
 Tracks stock levels, movements, low stock alerts, and warehouse performance.
 """
 
+import math
+import csv
+
 from decimal import Decimal
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional, Tuple
 from datetime import timedelta, date, datetime
+from io import StringIO, BytesIO
+from zoneinfo import ZoneInfo
+
+from django.conf import settings
 from django.db.models import Sum, Count, Avg, Q, F, Min, Max, DecimalField, Case, When, Value
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth, Coalesce
 from django.utils import timezone
+from django.http import StreamingHttpResponse
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
@@ -73,9 +81,9 @@ class StockLevelsSummaryReportView(BaseReportView):
             return ReportResponse.error(error)
         
         # Parse filters
-        warehouse_id = request.GET.get('warehouse_id')
-        category_id = request.GET.get('category_id')
-        product_id = request.GET.get('product_id')
+        warehouse_id = request.GET.get('warehouse_id') or None
+        category_id = request.GET.get('category_id') or None
+        product_id = request.GET.get('product_id') or None
         supplier_id = request.GET.get('supplier_id')
         min_quantity = request.GET.get('min_quantity')
         max_quantity = request.GET.get('max_quantity')
@@ -804,36 +812,78 @@ class StockMovementHistoryReportView(BaseReportView):
         product_id = request.GET.get('product_id')
         movement_type = request.GET.get('movement_type', 'all')
         adjustment_type = request.GET.get('adjustment_type')
+        include_cancelled = request.GET.get('include_cancelled', 'false').lower() == 'true'
         sort_by = request.GET.get('sort_by', 'date_desc')  # date_desc|date_asc|quantity|product
         grouping = request.GET.get('grouping', 'daily')
         
-        # Build summary
+        movement_types_filter = self._resolve_movement_types_filter(movement_type)
+
         summary = self._build_summary(
-            start_date, end_date, warehouse_id, product_id, 
-            movement_type, adjustment_type
+            business_id=business_id,
+            start_date=start_date,
+            end_date=end_date,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            movement_types=movement_types_filter,
+            adjustment_type=adjustment_type,
+            search_term=search_term or None,
+            include_cancelled=include_cancelled,
         )
-        
-        # Build time series
+
         time_series = self._build_time_series(
-            start_date, end_date, warehouse_id, product_id,
-            movement_type, grouping
+            business_id=business_id,
+            start_date=start_date,
+            end_date=end_date,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            movement_types=movement_types_filter,
+            grouping=grouping,
+            search_term=search_term or None,
+            include_cancelled=include_cancelled,
         )
-        
-        # Build movements list (paginated)
+
         movements, pagination = self._build_movements(
-            start_date, end_date, warehouse_id, product_id,
-            movement_type, adjustment_type, request
+            business_id=business_id,
+            start_date=start_date,
+            end_date=end_date,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            movement_types=movement_types_filter,
+            adjustment_type=adjustment_type,
+            request=request,
+            search_term=search_term or None,
+            category_id=category_id,
+            sort_by=sort_by,
+            include_cancelled=include_cancelled,
         )
-        
-        # Combine summary with time series
-        summary_data = {
-            **summary,
-            'time_series': time_series
-        }
-        
-        # Build warehouse and category groupings for filters
-        by_warehouse = self._build_warehouse_grouping(movements)
-        by_category = self._build_category_grouping(movements)
+
+        by_warehouse = self._build_warehouse_grouping(MovementTracker.aggregate_by_warehouse(
+            business_id=business_id,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            start_date=start_date,
+            end_date=end_date,
+            movement_types=movement_types_filter,
+            adjustment_type=adjustment_type,
+            search=search_term or None,
+            include_cancelled=include_cancelled,
+        ))
+
+        by_category = self._build_category_grouping(MovementTracker.aggregate_by_category(
+            business_id=business_id,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            start_date=start_date,
+            end_date=end_date,
+            movement_types=movement_types_filter,
+            adjustment_type=adjustment_type,
+            search=search_term or None,
+            include_cancelled=include_cancelled,
+        ))
         
         # Build response data
         data = {
@@ -860,28 +910,50 @@ class StockMovementHistoryReportView(BaseReportView):
             'meta': metadata
         })
     
-    def _build_summary(self, start_date, end_date, warehouse_id, product_id,
-                      movement_type, adjustment_type) -> Dict[str, Any]:
-        """Build summary of all movements using MovementTracker (Phase 3)"""
-        # Use MovementTracker to get unified summary
+    def _build_summary(
+        self,
+        *,
+        business_id: str,
+        start_date: date,
+        end_date: date,
+        warehouse_id: Optional[str],
+        product_id: Optional[str],
+        category_id: Optional[str],
+        movement_types: Optional[List[str]],
+        adjustment_type: Optional[str],
+        search_term: Optional[str],
+        include_cancelled: bool,
+    ) -> Dict[str, Any]:
+        """Build summary payload from MovementTracker aggregate data."""
+
         summary = MovementTracker.get_summary(
-            business_id=str(self.request.user.primary_business.id),
+            business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            category_id=category_id,
             start_date=start_date,
-            end_date=end_date
+            end_date=end_date,
+            movement_types=movement_types,
+            adjustment_type=adjustment_type,
+            search=search_term,
+            include_cancelled=include_cancelled,
         )
-        
-        # Calculate shrinkage percentage
-        shrinkage_pct = 0
-        if summary['total_quantity_out'] > 0:
-            shrinkage_pct = (summary.get('shrinkage_count', 0) / summary['total_quantity_out'] * 100)
-        
+
+        total_in = float(summary['total_quantity_in'])
+        total_out = float(summary['total_quantity_out'])
+        net_quantity = float(summary['net_quantity'])
+        shrinkage_units = float(summary['shrinkage_quantity'])
+        shrinkage_value = summary['shrinkage_value']
+
+        shrinkage_pct = 0.0
+        if total_out:
+            shrinkage_pct = round((shrinkage_units / total_out) * 100, 2)
+
         return {
             'total_movements': summary['total_movements'],
-            'total_units_in': summary['total_quantity_in'],
-            'total_units_out': summary['total_quantity_out'],
-            'net_change': summary['net_quantity'],
+            'total_units_in': total_in,
+            'total_units_out': total_out,
+            'net_change': net_quantity,
             'value_in': str(summary['total_value_in']),
             'value_out': str(summary['total_value_out']),
             'net_value_change': str(summary['net_value']),
@@ -889,28 +961,44 @@ class StockMovementHistoryReportView(BaseReportView):
                 'transfers': summary.get('transfers_count', 0),
                 'sales': summary.get('sales_count', 0),
                 'shrinkage': summary.get('shrinkage_count', 0),
+                'adjustments': summary.get('adjustments_count', 0),
             },
             'shrinkage': {
-                'total_units': summary.get('shrinkage_count', 0),
-                'total_value': str(abs(summary.get('shrinkage_value', 0))),
-                'percentage_of_outbound': round(shrinkage_pct, 2)
-            }
+                'total_units': shrinkage_units,
+                'total_value': str(abs(shrinkage_value)),
+                'percentage_of_outbound': shrinkage_pct,
+            },
         }
     
-    def _build_time_series(self, start_date, end_date, warehouse_id, product_id,
-                          movement_type, grouping) -> List[Dict]:
-        """Build time-series breakdown of movements using MovementTracker (Phase 3)"""
+    def _build_time_series(
+        self,
+        *,
+        business_id: str,
+        start_date: date,
+        end_date: date,
+        warehouse_id: Optional[str],
+        product_id: Optional[str],
+        category_id: Optional[str],
+        movement_types: Optional[List[str]],
+        grouping: str,
+        search_term: Optional[str],
+        include_cancelled: bool,
+    ) -> List[Dict]:
+        """Build time-series breakdown of movements using MovementTracker."""
         from datetime import timedelta
         from collections import defaultdict
         
         # Get all movements using MovementTracker
         movements_data = MovementTracker.get_movements(
-            business_id=str(self.request.user.primary_business.id),
+            business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            category_id=category_id,
             start_date=start_date,
             end_date=end_date,
-            movement_types=None  # Get all types, filter later
+            movement_types=movement_types,
+            search=search_term,
+            include_cancelled=include_cancelled,
         )
         
         # Group movements by period
@@ -921,14 +1009,24 @@ class StockMovementHistoryReportView(BaseReportView):
         })
         
         for movement in movements_data:
-            # Apply movement_type filter
-            if movement_type == 'sales' and movement['type'] != 'SALE':
+            movement_raw_date = movement.get('date')
+            if movement_raw_date is None:
                 continue
-            if movement_type == 'adjustments' and movement['type'] not in ['TRANSFER', 'ADJUSTMENT', 'SHRINKAGE']:
+
+            if isinstance(movement_raw_date, datetime):
+                movement_dt = movement_raw_date
+            elif isinstance(movement_raw_date, date):
+                movement_dt = datetime.combine(movement_raw_date, datetime.min.time())
+            elif isinstance(movement_raw_date, str):
+                movement_dt = datetime.fromisoformat(movement_raw_date.replace('Z', '+00:00'))
+            else:
+                # Unsupported type; skip to avoid breaking the report
                 continue
-            
-            # Parse movement date
-            movement_date = datetime.fromisoformat(movement['date'].replace('Z', '+00:00')).date()
+
+            if movement_dt.tzinfo is None:
+                movement_dt = movement_dt.replace(tzinfo=timezone.utc)
+
+            movement_date = movement_dt.date()
             
             # Determine period based on grouping
             if grouping == 'daily':
@@ -966,114 +1064,216 @@ class StockMovementHistoryReportView(BaseReportView):
         
         return time_series
     
-    def _build_movements(self, start_date, end_date, warehouse_id, product_id,
-                        movement_type, adjustment_type, request,
-                        search_term=None, category_id=None, sort_by='date_desc') -> tuple:
-        """Build list of individual movements using MovementTracker (Phase 3)"""
-        # Use MovementTracker to get unified movements
-        movements_data = MovementTracker.get_movements(
-            business_id=str(self.request.user.primary_business.id),
+    def _build_movements(
+        self,
+        *,
+        business_id: str,
+        start_date: date,
+        end_date: date,
+        warehouse_id: Optional[str],
+        product_id: Optional[str],
+        movement_types: Optional[List[str]],
+        adjustment_type: Optional[str],
+        request,
+        search_term: Optional[str],
+        category_id: Optional[str],
+        sort_by: str = 'date_desc',
+        include_cancelled: bool,
+    ) -> tuple:
+        """Build paginated list of individual movements using MovementTracker."""
+        search_value = (search_term or '').strip() or None
+        page, page_size = self.get_pagination_params(request)
+        page_size = max(page_size, 1)
+        offset = max(0, (page - 1) * page_size)
+        sort_option = sort_by or 'date_desc'
+
+        total_count = MovementTracker.count_movements(
+            business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            category_id=category_id,
             start_date=start_date,
             end_date=end_date,
-            movement_types=None  # Get all types, filter later
+            movement_types=movement_types,
+            adjustment_type=adjustment_type,
+            search=search_value,
+            include_cancelled=include_cancelled,
         )
-        
-        # Transform to frontend format
-        movements = []
-        for movement in movements_data:
-            # Apply movement_type filter
-            if movement_type == 'sales' and movement['type'] != 'SALE':
-                continue
-            if movement_type == 'adjustments' and movement['type'] not in ['TRANSFER', 'ADJUSTMENT', 'SHRINKAGE']:
-                continue
-            
-            # Apply search filter
-            if search_term:
-                search_lower = search_term.lower()
-                if (search_lower not in movement.get('product_name', '').lower() and
-                    search_lower not in movement.get('product_sku', '').lower()):
-                    continue
-            
-            # Format movement for frontend
-            formatted = {
-                'movement_id': movement['id'],
-                'product_id': movement.get('product_id'),
-                'product_name': movement.get('product_name'),
-                'sku': movement.get('product_sku'),
-                'category_id': movement.get('category_id'),
-                'category_name': movement.get('category'),
-                'warehouse_id': movement.get('source_location') if movement['direction'] == 'out' else movement.get('destination_location'),
-                'warehouse_name': movement.get('source_location') if movement['direction'] == 'out' else movement.get('destination_location'),
-                'movement_type': movement['type'].lower(),
-                'quantity': movement['quantity'],
-                'quantity_before': None,  # Not available in MovementTracker
-                'quantity_after': None,   # Not available in MovementTracker
-                'reference_type': movement['source_type'],
-                'reference_id': movement['id'],
-                'performed_by': movement.get('created_by'),
-                'performed_by_id': None,  # Not available in current MovementTracker
-                'notes': movement.get('reason'),
-                'created_at': movement['date'],
-            }
-            movements.append(formatted)
-        
-        # Apply sorting
-        if sort_by == 'date_desc':
-            movements.sort(key=lambda x: x['created_at'], reverse=True)
-        elif sort_by == 'date_asc':
-            movements.sort(key=lambda x: x['created_at'])
-        elif sort_by == 'quantity':
-            movements.sort(key=lambda x: abs(x['quantity']), reverse=True)
-        elif sort_by == 'product':
-            movements.sort(key=lambda x: x['product_name'] or '')
-        
-        # Apply pagination
-        page, page_size = self.get_pagination_params(request)
-        total_count = len(movements)
-        start_idx = (page - 1) * page_size
-        end_idx = start_idx + page_size
-        paginated_movements = movements[start_idx:end_idx]
-        
+
+        raw_movements = MovementTracker.get_paginated_movements(
+            business_id=business_id,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            start_date=start_date,
+            end_date=end_date,
+            movement_types=movement_types,
+            adjustment_type=adjustment_type,
+            search=search_value,
+            sort=sort_option,
+            limit=page_size,
+            offset=offset,
+            include_cancelled=include_cancelled,
+        )
+
+        formatted = [self._format_movement_record(m) for m in raw_movements]
+        total_pages = math.ceil(total_count / page_size) if page_size else 1
+
         pagination = {
             'page': page,
             'page_size': page_size,
             'total_count': total_count,
-            'total_pages': (total_count + page_size - 1) // page_size
+            'total_pages': total_pages
         }
-        
-        return paginated_movements, pagination
-    
-    def _build_warehouse_grouping(self, movements: list) -> dict:
-        """Group movements by warehouse for filter dropdown"""
-        warehouse_groups = {}
-        for movement in movements:
-            warehouse_id = movement.get('warehouse_id')
-            if not warehouse_id:
-                continue
-            if warehouse_id not in warehouse_groups:
-                warehouse_groups[warehouse_id] = {
-                    'name': movement['warehouse_name'],
-                    'movements': 0
-                }
-            warehouse_groups[warehouse_id]['movements'] += 1
-        return warehouse_groups
 
-    def _build_category_grouping(self, movements: list) -> dict:
-        """Group movements by category for filter dropdown"""
-        category_groups = {}
-        for movement in movements:
-            category_id = movement.get('category_id')
-            if not category_id:
-                continue
-            if category_id not in category_groups:
-                category_groups[category_id] = {
-                    'name': movement['category_name'],
-                    'movements': 0
-                }
-            category_groups[category_id]['movements'] += 1
-        return category_groups
+        return formatted, pagination
+
+    @staticmethod
+    def _resolve_movement_types_filter(movement_type: Optional[str]) -> Optional[List[str]]:
+        if not movement_type or movement_type.lower() == 'all':
+            return None
+        movement_type = movement_type.lower()
+        if movement_type == 'sales':
+            return [MovementTracker.MOVEMENT_TYPE_SALE]
+        if movement_type == 'adjustments':
+            return [
+                MovementTracker.MOVEMENT_TYPE_ADJUSTMENT,
+                MovementTracker.MOVEMENT_TYPE_SHRINKAGE,
+                MovementTracker.MOVEMENT_TYPE_TRANSFER,
+            ]
+        if movement_type == 'transfers':
+            return [MovementTracker.MOVEMENT_TYPE_TRANSFER]
+        if movement_type == 'shrinkage':
+            return [MovementTracker.MOVEMENT_TYPE_SHRINKAGE]
+        if movement_type == 'returns':
+            return [MovementTracker.MOVEMENT_TYPE_ADJUSTMENT]
+        return None
+
+    def _format_movement_record(self, movement: Dict[str, Any]) -> Dict[str, Any]:
+        direction = (movement.get('direction') or '').lower()
+        source_name = movement.get('source_location')
+        source_id = movement.get('source_location_id')
+        dest_name = movement.get('destination_location')
+        dest_id = movement.get('destination_location_id')
+
+        warehouse_id = movement.get('warehouse_id')
+        warehouse_name = movement.get('warehouse_name')
+
+        if not warehouse_id or not warehouse_name:
+            warehouse_id, warehouse_name = self._resolve_primary_location(
+                direction,
+                source_id,
+                source_name,
+                dest_id,
+                dest_name,
+            )
+
+        quantity_value = movement.get('quantity')
+        quantity = float(quantity_value) if quantity_value is not None else 0
+
+        total_value = movement.get('total_value')
+        if isinstance(total_value, Decimal):
+            total_value = str(total_value)
+
+        unit_cost = movement.get('unit_cost')
+        if isinstance(unit_cost, Decimal):
+            unit_cost = str(unit_cost)
+
+        created_at = movement.get('date')
+        if isinstance(created_at, datetime):
+            created_at_iso = created_at.isoformat()
+        elif isinstance(created_at, date):
+            created_at_iso = datetime.combine(created_at, datetime.min.time()).isoformat()
+        else:
+            created_at_iso = str(created_at) if created_at else None
+
+        reference_type_map = {
+            MovementTracker.MOVEMENT_TYPE_SALE: 'sale',
+            MovementTracker.MOVEMENT_TYPE_TRANSFER: 'transfer',
+            MovementTracker.MOVEMENT_TYPE_ADJUSTMENT: 'adjustment',
+            MovementTracker.MOVEMENT_TYPE_SHRINKAGE: 'adjustment',
+        }
+
+        movement_type = movement.get('type') or ''
+        reference_id = self._resolve_reference_id(movement_type, movement)
+
+        performer_name = movement.get('created_by')
+        performer_id = movement.get('performed_by_id')
+        performer_via = movement.get('performed_via')
+        if not performer_via:
+            performer_via = 'manual' if performer_name else 'system'
+
+        formatted = {
+            'movement_id': movement.get('id'),
+            'product_id': movement.get('product_id'),
+            'product_name': movement.get('product_name'),
+            'sku': movement.get('product_sku'),
+            'category_id': movement.get('category_id'),
+            'category_name': movement.get('category'),
+            'warehouse_id': warehouse_id,
+            'warehouse_name': warehouse_name,
+            'movement_type': movement_type,
+            'direction': direction or movement.get('direction'),
+            'quantity': quantity,
+            'quantity_before': None,
+            'quantity_after': None,
+            'reference_type': reference_type_map.get(movement_type, movement_type),
+            'reference_id': reference_id,
+            'reference_number': movement.get('reference_number'),
+            'performed_by': performer_name,
+            'performed_by_id': performer_id,
+            'performed_via': performer_via,
+            'performed_by_role': movement.get('performed_by_role'),
+            'notes': movement.get('reason'),
+            'created_at': created_at_iso,
+            'movement_source_type': movement.get('source_type'),
+            'from_location_id': source_id,
+            'from_location_name': source_name,
+            'to_location_id': dest_id,
+            'to_location_name': dest_name,
+            'adjustment_type': movement.get('adjustment_type'),
+            'sale_type': movement.get('sale_type'),
+            'transfer_type': movement.get('transfer_type'),
+            'status': movement.get('status'),
+            'unit_cost': unit_cost,
+            'total_value': total_value,
+        }
+
+        return formatted
+
+    @staticmethod
+    def _resolve_primary_location(
+        direction: Optional[str],
+        source_id: Optional[str],
+        source_name: Optional[str],
+        dest_id: Optional[str],
+        dest_name: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str]]:
+        resolved_direction = (direction or '').lower()
+
+        if resolved_direction == 'out':
+            return source_id or dest_id, source_name or dest_name
+        if resolved_direction == 'in':
+            return dest_id or source_id, dest_name or source_name
+        return source_id or dest_id, source_name or dest_name
+
+    @staticmethod
+    def _resolve_reference_id(movement_type: str, movement: Dict[str, Any]) -> Optional[str]:
+        if movement_type == MovementTracker.MOVEMENT_TYPE_SALE and movement.get('sale_id'):
+            return movement.get('sale_id')
+        if movement_type == MovementTracker.MOVEMENT_TYPE_TRANSFER and movement.get('transfer_id'):
+            return movement.get('transfer_id')
+        if movement_type in (MovementTracker.MOVEMENT_TYPE_ADJUSTMENT, MovementTracker.MOVEMENT_TYPE_SHRINKAGE):
+            return movement.get('adjustment_id') or movement.get('reference_id')
+        return movement.get('reference_id')
+    
+    def _build_warehouse_grouping(self, aggregations: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Return warehouse aggregation payload."""
+        return aggregations
+
+    def _build_category_grouping(self, aggregations: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """Return category aggregation payload."""
+        return aggregations
     
     def _get_period_end(self, period_start: date, grouping: str) -> date:
         """Calculate period end date based on grouping"""
@@ -1086,6 +1286,182 @@ class StockMovementHistoryReportView(BaseReportView):
                 return date(period_start.year + 1, 1, 1)
             else:
                 return date(period_start.year, period_start.month + 1, 1)
+
+
+class StockMovementHistoryExportView(BaseReportView):
+    """Stream stock movement history exports in CSV or XLSX formats."""
+
+    permission_classes = [IsAuthenticated]
+
+    CSV_HEADERS = [
+        'Date',
+        'Product',
+        'SKU',
+        'Warehouse',
+        'From Location',
+        'To Location',
+        'Movement Type',
+        'Direction',
+        'Quantity',
+        'Reference Number',
+        'Reference ID',
+        'Performed By',
+        'Performed By ID',
+        'Performed Via',
+        'Notes',
+    ]
+
+    def get(self, request):
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+
+        start_date, end_date, error = self.get_date_range(request, default_days=30)
+        if error:
+            return ReportResponse.error(error)
+
+        warehouse_id = request.GET.get('warehouse_id') or None
+        category_id = request.GET.get('category_id') or None
+        product_id = request.GET.get('product_id') or None
+        movement_type = request.GET.get('movement_type', 'all')
+        adjustment_type = request.GET.get('adjustment_type') or None
+        search_term = request.GET.get('search', '').strip() or None
+        include_cancelled = request.GET.get('include_cancelled', 'false').lower() == 'true'
+        sort_by = request.GET.get('sort_by', 'date_desc')
+        export_format = request.GET.get('format', 'csv').lower()
+        requested_timezone = request.GET.get('timezone') or settings.TIME_ZONE
+
+        try:
+            timezone_obj = ZoneInfo(requested_timezone)
+        except Exception:
+            timezone_obj = ZoneInfo(settings.TIME_ZONE)
+            requested_timezone = settings.TIME_ZONE
+
+        movement_types_filter = StockMovementHistoryReportView._resolve_movement_types_filter(movement_type)
+
+        if export_format not in ('csv', 'xlsx'):
+            return ReportResponse.error(
+                ReportError(message='Unsupported export format. Use csv or xlsx.'),
+                status=400
+            )
+
+        base_kwargs = dict(
+            business_id=business_id,
+            warehouse_id=warehouse_id,
+            product_id=product_id,
+            category_id=category_id,
+            start_date=start_date,
+            end_date=end_date,
+            movement_types=movement_types_filter,
+            adjustment_type=adjustment_type,
+            search=search_term,
+            include_cancelled=include_cancelled,
+            sort=sort_by,
+        )
+
+        if export_format == 'csv':
+            streaming_content = self._stream_csv_rows(base_kwargs, timezone_obj)
+            filename = f"stock_movements_{end_date.isoformat()}.csv"
+            response = StreamingHttpResponse(streaming_content, content_type='text/csv')
+        else:
+            streaming_content, filename = self._build_xlsx_stream(base_kwargs, timezone_obj, end_date)
+            response = StreamingHttpResponse(
+                streaming_content,
+                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+            )
+
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        response['X-Export-Timezone'] = requested_timezone
+        return response
+
+    def _stream_csv_rows(self, movement_kwargs: Dict[str, Any], timezone_obj: ZoneInfo):
+        formatter = StockMovementHistoryReportView()
+
+        def row_iter():
+            buffer = StringIO()
+            writer = csv.writer(buffer)
+            writer.writerow(self.CSV_HEADERS)
+            yield buffer.getvalue()
+            buffer.seek(0)
+            buffer.truncate(0)
+
+            for row in self._build_rows(formatter, timezone_obj, movement_kwargs):
+                writer.writerow(row)
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate(0)
+
+        return row_iter()
+
+    def _build_xlsx_stream(self, movement_kwargs: Dict[str, Any], timezone_obj: ZoneInfo, end_date: date):
+        from openpyxl import Workbook
+
+        formatter = StockMovementHistoryReportView()
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = 'Stock Movements'
+        worksheet.append(self.CSV_HEADERS)
+
+        for row in self._build_rows(formatter, timezone_obj, movement_kwargs):
+            worksheet.append(row)
+
+        stream = BytesIO()
+        workbook.save(stream)
+        stream.seek(0)
+
+        return self._stream_binary(stream), f"stock_movements_{end_date.isoformat()}.xlsx"
+
+    def _build_rows(
+        self,
+        formatter: 'StockMovementHistoryReportView',
+        timezone_obj: ZoneInfo,
+        movement_kwargs: Dict[str, Any]
+    ):
+        for movement in MovementTracker.iter_movements(**movement_kwargs):
+            formatted = formatter._format_movement_record(movement)
+            created_at = self._format_timestamp(formatted.get('created_at'), timezone_obj)
+            quantity = formatted.get('quantity')
+            quantity_str = f"{quantity}" if quantity is not None else ''
+
+            yield [
+                created_at,
+                formatted.get('product_name', ''),
+                formatted.get('sku', ''),
+                formatted.get('warehouse_name', ''),
+                formatted.get('from_location_name', ''),
+                formatted.get('to_location_name', ''),
+                formatted.get('movement_type', ''),
+                formatted.get('direction', ''),
+                quantity_str,
+                formatted.get('reference_number', ''),
+                formatted.get('reference_id', ''),
+                formatted.get('performed_by', ''),
+                formatted.get('performed_by_id', ''),
+                formatted.get('performed_via', ''),
+                formatted.get('notes', ''),
+            ]
+
+    def _format_timestamp(self, created_at: Optional[str], timezone_obj: ZoneInfo) -> str:
+        if not created_at:
+            return ''
+
+        try:
+            dt = datetime.fromisoformat(created_at.replace('Z', '+00:00'))
+        except ValueError:
+            return created_at
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo('UTC'))
+
+        localized = dt.astimezone(timezone_obj)
+        return localized.strftime('%Y-%m-%d %H:%M:%S %Z')
+
+    def _stream_binary(self, buffer: BytesIO, chunk_size: int = 65536):
+        while True:
+            chunk = buffer.read(chunk_size)
+            if not chunk:
+                break
+            yield chunk
 
 
 class WarehouseAnalyticsReportView(BaseReportView):

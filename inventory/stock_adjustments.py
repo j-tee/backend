@@ -16,6 +16,7 @@ from django.db import models
 from django.core.validators import MinValueValidator
 from django.contrib.auth import get_user_model
 from decimal import Decimal
+from typing import Any, Dict, List
 import uuid
 
 from accounts.models import Business
@@ -50,8 +51,8 @@ class StockAdjustment(models.Model):
         # Can be either
         ('CORRECTION', 'Inventory Count Correction'),
         ('RECOUNT', 'Physical Count Adjustment'),
-        ('TRANSFER_OUT', 'Transfer Out'),
-        ('TRANSFER_IN', 'Transfer In'),
+        # NOTE: TRANSFER_OUT and TRANSFER_IN are deprecated and removed from choices
+        # Historical records still exist but new adjustments should use Transfer model
         ('OTHER', 'Other'),
     ]
     
@@ -196,6 +197,43 @@ class StockAdjustment(models.Model):
         if self.quantity < 0:
             return -self.total_cost  # Loss
         return self.total_cost  # Gain (unusual but possible)
+
+    def get_items_detail(self) -> List[Dict[str, Any]]:
+        """Return detail payload for frontend movement view consumption."""
+        stock_product = getattr(self, 'stock_product', None)
+        if not stock_product:
+            return []
+
+        product = getattr(stock_product, 'product', None)
+        warehouse = getattr(stock_product, 'warehouse', None)
+
+        quantity_before = self.quantity_before
+        if quantity_before is None:
+            try:
+                quantity_before = int(getattr(stock_product, 'calculated_quantity', stock_product.quantity))
+            except Exception:
+                quantity_before = stock_product.quantity if stock_product.quantity is not None else None
+
+        quantity_after = None
+        if quantity_before is not None and self.quantity is not None:
+            quantity_after = int(quantity_before) + int(self.quantity)
+
+        return [{
+            'stock_product_id': str(stock_product.id),
+            'product_id': str(product.id) if product else None,
+            'product_name': getattr(product, 'name', None),
+            'product_sku': getattr(product, 'sku', None),
+            'warehouse_id': str(warehouse.id) if warehouse else None,
+            'warehouse_name': getattr(warehouse, 'name', None),
+            'quantity_before': quantity_before,
+            'quantity_change': int(self.quantity) if self.quantity is not None else None,
+            'quantity_after': quantity_after,
+            'unit_cost': str(self.unit_cost) if self.unit_cost is not None else None,
+            'total_cost': str(self.total_cost) if self.total_cost is not None else None,
+            'direction': 'increase' if self.quantity and self.quantity > 0 else ('decrease' if self.quantity and self.quantity < 0 else 'neutral'),
+            'adjustment_type': self.adjustment_type,
+        }]
+    
     
     def approve(self, user):
         """Approve the adjustment"""

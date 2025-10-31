@@ -594,6 +594,45 @@ class Sale(models.Model):
             self.amount_due = Decimal('0.00')
         
         return self.total_amount
+    
+    def get_items_detail(self):
+        """Return detail payload for frontend movement view consumption."""
+        from typing import List, Dict, Any
+        
+        sale_items_qs = self.sale_items.select_related(
+            'product',
+            'product__category',
+            'stock_product',
+            'stock_product__warehouse'
+        ).all()
+        
+        payload: List[Dict[str, Any]] = []
+        for item in sale_items_qs:
+            product = item.product
+            stock_product = item.stock_product
+            warehouse = stock_product.warehouse if stock_product else None
+            
+            payload.append({
+                'sale_item_id': str(item.id),
+                'product_id': str(product.id) if product else None,
+                'product_name': getattr(product, 'name', None),
+                'product_sku': getattr(product, 'sku', None),
+                'stock_product_id': str(stock_product.id) if stock_product else None,
+                'warehouse_id': str(warehouse.id) if warehouse else None,
+                'warehouse_name': getattr(warehouse, 'name', None),
+                'quantity': float(item.quantity) if item.quantity is not None else None,
+                'unit_price': str(item.unit_price) if item.unit_price is not None else None,
+                'discount_percentage': str(item.discount_percentage) if item.discount_percentage is not None else None,
+                'discount_amount': str(item.discount_amount) if item.discount_amount is not None else None,
+                'tax_rate': str(item.tax_rate) if item.tax_rate is not None else None,
+                'tax_amount': str(item.tax_amount) if item.tax_amount is not None else None,
+                'total_price': str(item.total_price) if item.total_price is not None else None,
+                'cost_price': str(stock_product.unit_cost) if stock_product and stock_product.unit_cost is not None else None,
+                'profit_margin': str(item.profit_margin) if item.profit_margin is not None else None,
+            })
+        
+        return payload
+    
 
     def process_refund(self, *, user, items: list[dict], reason: str, refund_type: str = 'PARTIAL') -> 'Refund':
         """Process a refund for the sale and restock inventory where appropriate."""
@@ -657,8 +696,9 @@ class Sale(models.Model):
                     storefront_inventory.save(update_fields=['quantity', 'updated_at'])
                 elif sale_item.stock_product_id:
                     stock_product = StockProduct.objects.select_for_update().get(id=sale_item.stock_product_id)
-                    stock_product.quantity += quantity
-                    stock_product.save(update_fields=['quantity', 'updated_at'])
+                    current_calc = int(stock_product.calculated_quantity if stock_product.calculated_quantity is not None else stock_product.quantity or 0)
+                    stock_product.calculated_quantity = current_calc + quantity
+                    stock_product.save(update_fields=['calculated_quantity', 'updated_at'])
 
             refund.amount = total_refund
             refund.save(update_fields=['amount', 'updated_at'])
@@ -805,17 +845,19 @@ class Sale(models.Model):
                 quantity_required = int(quantity_decimal)
 
                 if item.stock_product and not self.storefront_id:
-                    # Reduce stock quantity at the warehouse level
+                    # Reduce calculated quantity at the warehouse level (intake quantity stays immutable)
                     stock_product = StockProduct.objects.select_for_update().get(id=item.stock_product.id)
-                    if stock_product.quantity < quantity_required:
+                    current_calc = int(stock_product.calculated_quantity if stock_product.calculated_quantity is not None else stock_product.quantity or 0)
+                    if current_calc < quantity_required:
                         raise ValidationError(
                             f"Insufficient stock for {item.product.name}. "
-                            f"Available: {stock_product.quantity}, Required: {quantity_required}"
+                            f"Available: {current_calc}, Required: {quantity_required}"
                         )
-                    stock_product.quantity = stock_product.quantity - quantity_required
-                    if stock_product.quantity < 0:
+                    new_calc = current_calc - quantity_required
+                    if new_calc < 0:
                         raise ValidationError(f"Stock level for {item.product.name} would become negative.")
-                    stock_product.save(update_fields=['quantity', 'updated_at'])
+                    stock_product.calculated_quantity = new_calc
+                    stock_product.save(update_fields=['calculated_quantity', 'updated_at'])
 
                 if self.storefront_id:
                     storefront_inventory, _ = StoreFrontInventory.objects.select_for_update().get_or_create(

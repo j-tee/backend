@@ -385,6 +385,47 @@ class Transfer(models.Model):
         return self.items.aggregate(
             total=models.Sum('total_cost')
         )['total'] or Decimal('0.00')
+    
+    def get_items_detail(self):
+        """Return detail payload for frontend movement view consumption."""
+        from typing import List, Dict, Any
+        
+        transfer_items_qs = self.items.select_related(
+            'product',
+            'product__category',
+            'supplier'
+        ).all()
+        
+        payload: List[Dict[str, Any]] = []
+        for item in transfer_items_qs:
+            product = item.product
+            supplier = item.supplier
+            source_warehouse = self.source_warehouse
+            destination_warehouse = self.destination_warehouse
+            destination_storefront = self.destination_storefront
+            
+            payload.append({
+                'transfer_item_id': str(item.id),
+                'product_id': str(product.id) if product else None,
+                'product_name': getattr(product, 'name', None),
+                'product_sku': getattr(product, 'sku', None),
+                'supplier_id': str(supplier.id) if supplier else None,
+                'supplier_name': getattr(supplier, 'name', None),
+                'source_warehouse_id': str(source_warehouse.id) if source_warehouse else None,
+                'source_warehouse_name': getattr(source_warehouse, 'name', None),
+                'destination_warehouse_id': str(destination_warehouse.id) if destination_warehouse else None,
+                'destination_warehouse_name': getattr(destination_warehouse, 'name', None),
+                'destination_storefront_id': str(destination_storefront.id) if destination_storefront else None,
+                'destination_storefront_name': getattr(destination_storefront, 'name', None),
+                'quantity': int(item.quantity) if item.quantity is not None else None,
+                'unit_cost': str(item.unit_cost) if item.unit_cost is not None else None,
+                'total_cost': str(item.total_cost) if item.total_cost is not None else None,
+                'expiry_date': item.expiry_date.isoformat() if item.expiry_date else None,
+                'retail_price': str(item.retail_price) if item.retail_price is not None else None,
+                'wholesale_price': str(item.wholesale_price) if item.wholesale_price is not None else None,
+            })
+        
+        return payload
 
 
 class TransferItem(models.Model):

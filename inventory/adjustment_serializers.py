@@ -59,8 +59,15 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
     
     # Related objects
     stock_product_details = serializers.SerializerMethodField()
+    items_detail = serializers.SerializerMethodField()
     created_by_name = serializers.SerializerMethodField()
     approved_by_name = serializers.SerializerMethodField()
+    
+    # ✅ CRITICAL FIX: Add adjustment_number (alias for reference_number)
+    adjustment_number = serializers.CharField(source='reference_number', read_only=True)
+    
+    # ✅ CRITICAL FIX: Add warehouse_name for frontend display
+    warehouse_name = serializers.SerializerMethodField()
     
     # Display fields
     adjustment_type_display = serializers.CharField(source='get_adjustment_type_display', read_only=True)
@@ -78,10 +85,10 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = StockAdjustment
         fields = [
-            'id', 'business', 'stock_product', 'stock_product_details',
+            'id', 'business', 'stock_product', 'stock_product_details', 'items_detail',
             'adjustment_type', 'adjustment_type_display',
             'quantity', 'unit_cost', 'total_cost',
-            'reason', 'reference_number',
+            'reason', 'reference_number', 'adjustment_number', 'warehouse_name',
             'status', 'status_display', 'requires_approval',
             'created_by', 'created_by_name',
             'approved_by', 'approved_by_name',
@@ -111,6 +118,16 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
             'unit_cost': str(sp.landed_unit_cost),
             'retail_price': str(sp.retail_price)
         }
+    
+    def get_items_detail(self, obj):
+        """Get detailed items payload for movement detail view"""
+        return obj.get_items_detail()
+    
+    def get_warehouse_name(self, obj):
+        """Get warehouse name from stock product"""
+        if obj.stock_product and obj.stock_product.warehouse:
+            return obj.stock_product.warehouse.name
+        return None
     
     def get_created_by_name(self, obj):
         return obj.created_by.name if obj.created_by else None
@@ -174,13 +191,20 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
         quantity = data.get('quantity')
         adjustment_type = data.get('adjustment_type')
         
+        # Reject legacy transfer types
+        if adjustment_type in ['TRANSFER_IN', 'TRANSFER_OUT']:
+            raise serializers.ValidationError({
+                'adjustment_type': 'TRANSFER_IN and TRANSFER_OUT are deprecated. Use the Transfer API instead: POST /inventory/api/transfers/'
+            })
+        
         if quantity == 0:
             raise serializers.ValidationError("Quantity cannot be zero")
         
         # Validate negative quantity for decrease types
         decrease_types = [
             'THEFT', 'DAMAGE', 'EXPIRED', 'SPOILAGE', 'LOSS',
-            'SAMPLE', 'WRITE_OFF', 'SUPPLIER_RETURN', 'TRANSFER_OUT'
+            'SAMPLE', 'WRITE_OFF', 'SUPPLIER_RETURN'
+            # NOTE: TRANSFER_OUT removed - use Transfer model instead
         ]
         
         if adjustment_type in decrease_types and quantity > 0:
@@ -189,7 +213,8 @@ class StockAdjustmentSerializer(serializers.ModelSerializer):
         
         # Validate positive quantity for increase types
         increase_types = [
-            'CUSTOMER_RETURN', 'FOUND', 'CORRECTION_INCREASE', 'TRANSFER_IN'
+            'CUSTOMER_RETURN', 'FOUND', 'CORRECTION_INCREASE'
+            # NOTE: TRANSFER_IN removed - use Transfer model instead
         ]
         
         if adjustment_type in increase_types and quantity < 0:
