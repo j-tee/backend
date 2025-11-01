@@ -627,6 +627,7 @@ class Sale(models.Model):
                 'tax_rate': str(item.tax_rate) if item.tax_rate is not None else None,
                 'tax_amount': str(item.tax_amount) if item.tax_amount is not None else None,
                 'total_price': str(item.total_price) if item.total_price is not None else None,
+                'total': str(item.total_price) if item.total_price is not None else None,  # Alias for backward compatibility
                 'cost_price': str(stock_product.unit_cost) if stock_product and stock_product.unit_cost is not None else None,
                 'profit_margin': str(item.profit_margin) if item.profit_margin is not None else None,
             })

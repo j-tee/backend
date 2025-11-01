@@ -951,6 +951,10 @@ class StockMovementHistoryReportView(BaseReportView):
 
         return {
             'total_movements': summary['total_movements'],
+            'total_in': summary['total_in'],  # Count of inbound movements
+            'total_out': summary['total_out'],  # Count of outbound movements
+            'total_adjustments': summary['adjustments_count'],  # Count of adjustment movements
+            'total_transfers': summary['transfers_count'],  # Count of transfer movements
             'total_units_in': total_in,
             'total_units_out': total_out,
             'net_change': net_quantity,

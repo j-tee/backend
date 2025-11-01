@@ -113,6 +113,14 @@ class SaleItemSerializer(serializers.ModelSerializer):
         decimal_places=2,
         coerce_to_string=False
     )
+    # Alias for backward compatibility (frontend expects 'total')
+    total = serializers.DecimalField(
+        source='total_price',
+        max_digits=12,
+        decimal_places=2,
+        read_only=True,
+        coerce_to_string=False
+    )
     profit_margin = serializers.DecimalField(
         max_digits=5,
         decimal_places=2,
@@ -129,12 +137,12 @@ class SaleItemSerializer(serializers.ModelSerializer):
             'id', 'sale', 'product', 'stock', 'stock_product',
             'product_name', 'product_sku', 'product_category',
             'quantity', 'unit_price', 'discount_percentage', 'discount_amount',
-            'subtotal', 'tax_rate', 'tax_amount', 'total_price',
+            'subtotal', 'tax_rate', 'tax_amount', 'total_price', 'total',
             'cost_price', 'profit_margin', 'notes',
             'created_at', 'updated_at'
         ]
         read_only_fields = [
-            'id', 'total_price', 'product_name', 'product_sku',
+            'id', 'total_price', 'total', 'product_name', 'product_sku',
             'tax_amount', 'created_at', 'updated_at'
         ]
     

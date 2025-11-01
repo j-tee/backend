@@ -9,7 +9,8 @@ Note: Legacy TRANSFER_IN/TRANSFER_OUT StockAdjustment tests are deprecated.
 
 from decimal import Decimal
 from datetime import datetime, timedelta
-from django.test import TestCase, skip
+from django.test import TestCase
+from unittest import skip
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 

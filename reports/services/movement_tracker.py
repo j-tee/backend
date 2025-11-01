@@ -232,6 +232,8 @@ class MovementTracker:
             WITH movements AS ({base_sql})
             SELECT
                 COUNT(*) AS total_movements,
+                SUM(CASE WHEN direction = 'in' THEN 1 ELSE 0 END) AS total_in,
+                SUM(CASE WHEN direction = 'out' THEN 1 ELSE 0 END) AS total_out,
                 SUM(CASE WHEN movement_type = 'transfer' THEN 1 ELSE 0 END) AS transfers_count,
                 SUM(CASE WHEN movement_type = 'sale' THEN 1 ELSE 0 END) AS sales_count,
                 SUM(CASE WHEN movement_type = 'adjustment' THEN 1 ELSE 0 END) AS adjustments_count,
@@ -254,6 +256,8 @@ class MovementTracker:
         if not row:
             return {
                 'total_movements': 0,
+                'total_in': 0,
+                'total_out': 0,
                 'transfers_count': 0,
                 'sales_count': 0,
                 'adjustments_count': 0,
@@ -274,6 +278,8 @@ class MovementTracker:
 
         (
             total_movements,
+            total_in,
+            total_out,
             transfers_count,
             sales_count,
             adjustments_count,
@@ -302,6 +308,8 @@ class MovementTracker:
 
         return {
             'total_movements': int(total_movements or 0),
+            'total_in': int(total_in or 0),
+            'total_out': int(total_out or 0),
             'transfers_count': int(transfers_count or 0),
             'sales_count': int(sales_count or 0),
             'adjustments_count': int(adjustments_count or 0),

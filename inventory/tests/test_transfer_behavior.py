@@ -6,7 +6,8 @@ transfer system has been replaced with the Transfer model.
 
 For current transfer testing, see tests for the Transfer model in transfer_tests.py
 """
-from django.test import TestCase, skip
+from django.test import TestCase
+from unittest import skip
 from accounts.models import Business
 from django.contrib.auth import get_user_model
 from inventory.models import Stock, StockProduct, Product, Warehouse
