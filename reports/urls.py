@@ -58,6 +58,11 @@ from .views.movement_analytics import (
     MovementAnalyticsAPIView,
 )
 
+# Warehouse Analytics views (NEW - Warehouse Analytics Feature)
+from .views.warehouse_analytics import (
+    WarehouseAnalyticsAPIView,
+)
+
 # Customer Report views (NEW - Phase 5)
 from .views.customer_reports import (
     CustomerLifetimeValueReportView,
@@ -109,7 +114,7 @@ urlpatterns = [
     path('api/inventory/movements/export/', StockMovementHistoryExportView.as_view(), name='stock-movements-export'),
     path('api/inventory/movements/quick-filters/', QuickFiltersAPIView.as_view(), name='stock-movements-quick-filters'),
     path('api/inventory/movements/analytics/', MovementAnalyticsAPIView.as_view(), name='stock-movements-analytics'),
-    path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
+    path('api/inventory/warehouse-analytics/', WarehouseAnalyticsAPIView.as_view(), name='warehouse-analytics'),
     path('api/inventory/products/search/', ProductSearchAPIView.as_view(), name='product-search'),
     path('api/inventory/products/<str:product_id>/movement-summary/', ProductMovementSummaryAPIView.as_view(), name='product-movement-summary'),
     
