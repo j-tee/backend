@@ -766,7 +766,8 @@ class StockMovementHistoryReportView(BaseReportView):
     - start_date: YYYY-MM-DD (default: 30 days ago)
     - end_date: YYYY-MM-DD (default: today)
     - warehouse_id: UUID (optional - filter by warehouse)
-    - product_id: UUID (optional - filter by product)
+    - product_id: UUID (optional - filter by single product)
+    - product_ids: String (optional - comma-separated UUIDs for multiple products)
     - movement_type: all|sales|adjustments|returns (default: all)
     - adjustment_type: THEFT|DAMAGE|EXPIRED|... (optional - specific type)
     - grouping: daily|weekly|monthly (default: daily)
@@ -810,11 +811,19 @@ class StockMovementHistoryReportView(BaseReportView):
         warehouse_id = request.GET.get('warehouse_id')
         category_id = request.GET.get('category_id')
         product_id = request.GET.get('product_id')
+        product_ids_param = request.GET.get('product_ids')  # NEW: comma-separated UUIDs
         movement_type = request.GET.get('movement_type', 'all')
         adjustment_type = request.GET.get('adjustment_type')
         include_cancelled = request.GET.get('include_cancelled', 'false').lower() == 'true'
         sort_by = request.GET.get('sort_by', 'date_desc')  # date_desc|date_asc|quantity|product
         grouping = request.GET.get('grouping', 'daily')
+        
+        # NEW: Resolve product filter (product_ids takes precedence)
+        product_ids_filter = None
+        if product_ids_param:
+            product_ids_filter = [p.strip() for p in product_ids_param.split(',') if p.strip()]
+        elif product_id:
+            product_ids_filter = [product_id]
         
         movement_types_filter = self._resolve_movement_types_filter(movement_type)
 
@@ -824,6 +833,7 @@ class StockMovementHistoryReportView(BaseReportView):
             end_date=end_date,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids_filter,  # NEW
             category_id=category_id,
             movement_types=movement_types_filter,
             adjustment_type=adjustment_type,
@@ -837,6 +847,7 @@ class StockMovementHistoryReportView(BaseReportView):
             end_date=end_date,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids_filter,  # NEW
             category_id=category_id,
             movement_types=movement_types_filter,
             grouping=grouping,
@@ -850,6 +861,7 @@ class StockMovementHistoryReportView(BaseReportView):
             end_date=end_date,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids_filter,  # NEW
             movement_types=movement_types_filter,
             adjustment_type=adjustment_type,
             request=request,
@@ -863,6 +875,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids_filter,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -876,6 +889,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids_filter,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -918,6 +932,7 @@ class StockMovementHistoryReportView(BaseReportView):
         end_date: date,
         warehouse_id: Optional[str],
         product_id: Optional[str],
+        product_ids: Optional[List[str]],  # NEW
         category_id: Optional[str],
         movement_types: Optional[List[str]],
         adjustment_type: Optional[str],
@@ -930,6 +945,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -982,6 +998,7 @@ class StockMovementHistoryReportView(BaseReportView):
         end_date: date,
         warehouse_id: Optional[str],
         product_id: Optional[str],
+        product_ids: Optional[List[str]],  # NEW
         category_id: Optional[str],
         movement_types: Optional[List[str]],
         grouping: str,
@@ -997,6 +1014,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -1076,6 +1094,7 @@ class StockMovementHistoryReportView(BaseReportView):
         end_date: date,
         warehouse_id: Optional[str],
         product_id: Optional[str],
+        product_ids: Optional[List[str]],  # NEW
         movement_types: Optional[List[str]],
         adjustment_type: Optional[str],
         request,
@@ -1095,6 +1114,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -1108,6 +1128,7 @@ class StockMovementHistoryReportView(BaseReportView):
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
