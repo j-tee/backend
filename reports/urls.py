@@ -42,6 +42,12 @@ from .views.inventory_reports import (
     WarehouseAnalyticsReportView,
 )
 
+# Product Search views (NEW - Stock Movements Enhancement)
+from .views.product_search import (
+    ProductSearchAPIView,
+    QuickFiltersAPIView,
+)
+
 # Customer Report views (NEW - Phase 5)
 from .views.customer_reports import (
     CustomerLifetimeValueReportView,
@@ -91,7 +97,9 @@ urlpatterns = [
     path('api/inventory/low-stock-alerts/', LowStockAlertsReportView.as_view(), name='low-stock-alerts-report'),
     path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
     path('api/inventory/movements/export/', StockMovementHistoryExportView.as_view(), name='stock-movements-export'),
+    path('api/inventory/movements/quick-filters/', QuickFiltersAPIView.as_view(), name='stock-movements-quick-filters'),
     path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
+    path('api/inventory/products/search/', ProductSearchAPIView.as_view(), name='product-search'),
     
     # Customer Reports (Phase 5) - Complete
     path('api/customer/lifetime-value/', CustomerLifetimeValueReportView.as_view(), name='customer-lifetime-value-report'),
