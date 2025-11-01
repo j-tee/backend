@@ -63,6 +63,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -76,7 +77,8 @@ class MovementTracker:
         Args:
             business_id: UUID of the business
             warehouse_id: Optional UUID of warehouse to filter by
-            product_id: Optional UUID of product to filter by
+            product_id: Optional UUID of single product to filter by
+            product_ids: Optional list of product UUIDs to filter by (takes precedence over product_id)
             start_date: Optional start date for filtering
             end_date: Optional end date for filtering
             movement_types: Optional list of movement types to include
@@ -106,6 +108,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -126,6 +129,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -142,6 +146,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -162,6 +167,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -175,6 +181,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -200,6 +207,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -335,6 +343,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,  # NEW
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -349,6 +358,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -443,6 +453,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,  # NEW
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -457,6 +468,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -514,6 +526,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str] = None,
         product_id: Optional[str] = None,
+        product_ids: Optional[List[str]] = None,  # NEW
         category_id: Optional[str] = None,
         start_date: Optional[date] = None,
         end_date: Optional[date] = None,
@@ -530,6 +543,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,  # NEW
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -562,6 +576,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str],
         product_id: Optional[str],
+        product_ids: Optional[List[str]],
         category_id: Optional[str],
         start_date: Optional[date],
         end_date: Optional[date],
@@ -577,6 +592,7 @@ class MovementTracker:
             business_id=business_id,
             warehouse_id=warehouse_id,
             product_id=product_id,
+            product_ids=product_ids,
             category_id=category_id,
             start_date=start_date,
             end_date=end_date,
@@ -678,6 +694,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str],
         product_id: Optional[str],
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str],
         start_date: Optional[date],
         end_date: Optional[date],
@@ -699,10 +716,17 @@ class MovementTracker:
         include_transfers = cls._should_include_new_transfers(movement_types_set)
         include_sales = cls._should_include_sales(movement_types_set)
 
+        # Resolve product filter: product_ids takes precedence over product_id
+        resolved_product_ids = None
+        if product_ids:
+            resolved_product_ids = product_ids
+        elif product_id:
+            resolved_product_ids = [product_id]
+
         params: Dict[str, Any] = {
             'business_id': business_id,
             'warehouse_id': warehouse_id,
-            'product_id': product_id,
+            'product_ids': resolved_product_ids,  # Changed from product_id to product_ids (list)
             'category_id': category_id,
             'start_date': start_date,
             'end_date': end_date,
@@ -836,7 +860,7 @@ class MovementTracker:
             WHERE sa.business_id = %(business_id)s
               AND sa.adjustment_type NOT IN ('TRANSFER_IN', 'TRANSFER_OUT')
               AND (%(warehouse_id)s IS NULL OR w.id = %(warehouse_id)s)
-              AND (%(product_id)s IS NULL OR p.id = %(product_id)s)
+              AND (%(product_ids)s IS NULL OR p.id = ANY(%(product_ids)s))
               AND (%(category_id)s IS NULL OR p.category_id = %(category_id)s)
               AND (%(start_date)s IS NULL OR sa.created_at::date >= %(start_date)s)
               AND (%(end_date)s IS NULL OR sa.created_at::date <= %(end_date)s)
@@ -886,7 +910,7 @@ class MovementTracker:
             LEFT JOIN storefronts ds ON t.destination_storefront_id = ds.id
             LEFT JOIN users uc ON t.created_by_id = uc.id
             WHERE t.business_id = %(business_id)s
-              AND (%(product_id)s IS NULL OR ti.product_id = %(product_id)s)
+              AND (%(product_ids)s IS NULL OR ti.product_id = ANY(%(product_ids)s))
               AND (%(category_id)s IS NULL OR p.category_id = %(category_id)s)
               AND (%(warehouse_id)s IS NULL
                    OR t.source_warehouse_id = %(warehouse_id)s
@@ -940,7 +964,7 @@ class MovementTracker:
             LEFT JOIN users u ON s.user_id = u.id
             WHERE s.business_id = %(business_id)s
               AND (%(warehouse_id)s IS NULL OR s.storefront_id = %(warehouse_id)s)
-              AND (%(product_id)s IS NULL OR si.product_id = %(product_id)s)
+              AND (%(product_ids)s IS NULL OR si.product_id = ANY(%(product_ids)s))
               AND (%(category_id)s IS NULL OR p.category_id = %(category_id)s)
               AND (%(start_date)s IS NULL OR s.created_at::date >= %(start_date)s)
               AND (%(end_date)s IS NULL OR s.created_at::date <= %(end_date)s)

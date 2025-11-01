@@ -14,6 +14,7 @@ import django
 import csv
 from io import StringIO
 from datetime import datetime, timedelta
+from django.utils import timezone
 
 # Setup Django
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')
@@ -61,8 +62,8 @@ def test_sales_csv_export():
     exporter = SalesExporter(user=user)
     
     filters = {
-        'start_date': (datetime.now() - timedelta(days=30)).date(),
-        'end_date': datetime.now().date(),
+        'start_date': (timezone.now() - timedelta(days=30)).date(),
+        'end_date': timezone.now().date(),
         'include_items': True,
     }
     
@@ -275,8 +276,8 @@ def test_audit_log_csv_export():
     exporter = AuditLogExporter(user=user)
     
     filters = {
-        'start_date': (datetime.now() - timedelta(days=30)).date(),
-        'end_date': datetime.now().date(),
+        'start_date': (timezone.now() - timedelta(days=30)).date(),
+        'end_date': timezone.now().date(),
     }
     
     try:

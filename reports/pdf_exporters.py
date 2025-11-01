@@ -9,6 +9,7 @@ from io import BytesIO
 from typing import Any, Dict, List
 from decimal import Decimal
 from datetime import datetime
+from django.utils import timezone
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, letter, landscape
@@ -161,7 +162,7 @@ class SalesPDFExporter(BasePDFExporter):
         story = []
         
         # Header
-        generated_at = data.get('generated_at', datetime.now()).strftime('%Y-%m-%d %H:%M:%S')
+        generated_at = data.get('generated_at', timezone.now()).strftime('%Y-%m-%d %H:%M:%S')
         story.append(self._create_header_table('Sales Export Report', generated_at))
         story.append(Spacer(1, 20))
         
@@ -246,7 +247,7 @@ class CustomerPDFExporter(BasePDFExporter):
         story = []
         
         # Header
-        generated_at = data.get('generated_at', datetime.now()).strftime('%Y-%m-%d %H:%M:%S')
+        generated_at = data.get('generated_at', timezone.now()).strftime('%Y-%m-%d %H:%M:%S')
         story.append(self._create_header_table('Customer Export Report', generated_at))
         story.append(Spacer(1, 20))
         
@@ -338,7 +339,7 @@ class InventoryPDFExporter(BasePDFExporter):
         story = []
         
         # Header
-        generated_at = data['summary'].get('export_date', datetime.now().strftime('%Y-%m-%d'))
+        generated_at = data['summary'].get('export_date', timezone.now().strftime('%Y-%m-%d'))
         story.append(self._create_header_table('Inventory Export Report', generated_at))
         story.append(Spacer(1, 20))
         
@@ -421,7 +422,7 @@ class AuditLogPDFExporter(BasePDFExporter):
         story = []
         
         # Header
-        generated_at = data['summary'].get('export_date', datetime.now().strftime('%Y-%m-%d'))
+        generated_at = data['summary'].get('export_date', timezone.now().strftime('%Y-%m-%d'))
         story.append(self._create_header_table('Audit Log Export Report', generated_at))
         story.append(Spacer(1, 20))
         

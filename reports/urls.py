@@ -42,10 +42,33 @@ from .views.inventory_reports import (
     WarehouseAnalyticsReportView,
 )
 
+# Product Search views (NEW - Stock Movements Enhancement)
+from .views.product_search import (
+    ProductSearchAPIView,
+    QuickFiltersAPIView,
+)
+
+# Product Movement Summary views (NEW - Stock Movements Enhancement Phase 3)
+from .views.product_movement_summary import (
+    ProductMovementSummaryAPIView,
+)
+
+# Movement Analytics views (NEW - Stock Movements Enhancement Phase 4)
+from .views.movement_analytics import (
+    MovementAnalyticsAPIView,
+)
+
+# Warehouse Analytics views (NEW - Warehouse Analytics Feature)
+from .views.warehouse_analytics import (
+    WarehouseAnalyticsAPIView,
+)
+
 # Customer Report views (NEW - Phase 5)
 from .views.customer_reports import (
+    TopCustomersReportView,
     CustomerLifetimeValueReportView,
     CustomerSegmentationReportView,
+    CreditUtilizationReportView,
     PurchasePatternAnalysisReportView,
     CustomerRetentionMetricsReportView,
 )
@@ -91,12 +114,17 @@ urlpatterns = [
     path('api/inventory/low-stock-alerts/', LowStockAlertsReportView.as_view(), name='low-stock-alerts-report'),
     path('api/inventory/movements/', StockMovementHistoryReportView.as_view(), name='stock-movements-report'),
     path('api/inventory/movements/export/', StockMovementHistoryExportView.as_view(), name='stock-movements-export'),
-    path('api/inventory/warehouse-analytics/', WarehouseAnalyticsReportView.as_view(), name='warehouse-analytics-report'),
+    path('api/inventory/movements/quick-filters/', QuickFiltersAPIView.as_view(), name='stock-movements-quick-filters'),
+    path('api/inventory/movements/analytics/', MovementAnalyticsAPIView.as_view(), name='stock-movements-analytics'),
+    path('api/inventory/warehouse-analytics/', WarehouseAnalyticsAPIView.as_view(), name='warehouse-analytics'),
+    path('api/inventory/products/search/', ProductSearchAPIView.as_view(), name='product-search'),
+    path('api/inventory/products/<str:product_id>/movement-summary/', ProductMovementSummaryAPIView.as_view(), name='product-movement-summary'),
     
     # Customer Reports (Phase 5) - Complete
     path('api/customer/lifetime-value/', CustomerLifetimeValueReportView.as_view(), name='customer-lifetime-value-report'),
-    path('api/customer/top-customers/', CustomerLifetimeValueReportView.as_view(), name='customer-top-customers-alt'),  # Alternative URL
+    path('api/customer/top-customers/', TopCustomersReportView.as_view(), name='customer-top-customers'),
     path('api/customer/segmentation/', CustomerSegmentationReportView.as_view(), name='customer-segmentation-report'),
+    path('api/customer/credit-utilization/', CreditUtilizationReportView.as_view(), name='customer-credit-utilization-report'),
     path('api/customer/purchase-patterns/', PurchasePatternAnalysisReportView.as_view(), name='purchase-patterns-report'),
     path('api/customer/retention/', CustomerRetentionMetricsReportView.as_view(), name='customer-retention-report'),
 ]
