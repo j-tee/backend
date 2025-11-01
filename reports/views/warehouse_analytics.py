@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 import logging
 
-from inventory.models import Warehouse, Product, StockProduct
+from inventory.models import Warehouse, Product, StockProduct, StoreFront
 from sales.models import Sale, SaleItem
 from accounts.models import Business
 
@@ -107,25 +107,65 @@ class WarehouseAnalyticsAPIView(APIView):
                     'data': cached_data
                 })
             
-            # Query warehouses
-            warehouses_query = Warehouse.objects.filter(
-                business=business,
-                is_active=True
+            # Query warehouses and storefronts
+            # Note: In this system, Warehouse and StoreFront are separate models
+            # We need to query both and combine them
+            
+            warehouses_list = []
+            storefronts_list = []
+            
+            # Get warehouses
+            warehouses = Warehouse.objects.filter(
+                business_link__business=business,
+                business_link__is_active=True
             )
             
-            if warehouse_id:
-                warehouses_query = warehouses_query.filter(id=warehouse_id)
+            # Get storefronts
+            storefronts = StoreFront.objects.filter(
+                business_link__business=business,
+                business_link__is_active=True
+            )
             
+            # Filter by warehouse_id if provided
+            if warehouse_id:
+                warehouses = warehouses.filter(id=warehouse_id)
+                storefronts = storefronts.filter(id=warehouse_id)
+            
+            # Filter by warehouse_type if provided
             if warehouse_type:
-                warehouses_query = warehouses_query.filter(warehouse_type=warehouse_type)
+                if warehouse_type == 'warehouse':
+                    storefronts = StoreFront.objects.none()  # Exclude storefronts
+                elif warehouse_type == 'storefront':
+                    warehouses = Warehouse.objects.none()  # Exclude warehouses
+            
+            # Build warehouse data list
+            all_locations = []
+            
+            # Add warehouses
+            for warehouse in warehouses:
+                all_locations.append({
+                    'obj': warehouse,
+                    'type': 'warehouse'
+                })
+            
+            # Add storefronts
+            for storefront in storefronts:
+                all_locations.append({
+                    'obj': storefront,
+                    'type': 'storefront'
+                })
             
             # Build analytics data
             warehouse_data = []
             
-            for warehouse in warehouses_query:
+            for location_data in all_locations:
+                location = location_data['obj']
+                location_type = location_data['type']
+                
                 # Calculate metrics
                 metrics = self._calculate_warehouse_metrics(
-                    warehouse=warehouse,
+                    warehouse=location,
+                    warehouse_type=location_type,
                     business=business,
                     start_date=start_date_obj,
                     end_date=end_date_obj
@@ -133,7 +173,8 @@ class WarehouseAnalyticsAPIView(APIView):
                 
                 # Get top products
                 top_products = self._get_top_products(
-                    warehouse=warehouse,
+                    warehouse=location,
+                    warehouse_type=location_type,
                     business=business,
                     start_date=start_date_obj,
                     end_date=end_date_obj,
@@ -142,16 +183,17 @@ class WarehouseAnalyticsAPIView(APIView):
                 
                 # Get slow movers
                 slow_movers = self._get_slow_movers(
-                    warehouse=warehouse,
+                    warehouse=location,
+                    warehouse_type=location_type,
                     business=business,
                     days_threshold=90,
                     limit=10
                 )
                 
                 warehouse_data.append({
-                    'warehouse_id': str(warehouse.id),
-                    'warehouse_name': warehouse.name,
-                    'warehouse_type': warehouse.warehouse_type,
+                    'warehouse_id': str(location.id),
+                    'warehouse_name': location.name,
+                    'warehouse_type': location_type,
                     'metrics': metrics,
                     'top_products': top_products,
                     'slow_movers': slow_movers
@@ -184,9 +226,11 @@ class WarehouseAnalyticsAPIView(APIView):
                 'message': str(e)
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
-    def _calculate_warehouse_metrics(self, warehouse, business, start_date, end_date):
+    def _calculate_warehouse_metrics(self, warehouse, warehouse_type, business, start_date, end_date):
         """
-        Calculate comprehensive metrics for a warehouse.
+        Calculate comprehensive metrics for a warehouse or storefront.
+        
+        warehouse_type: 'warehouse' or 'storefront'
         
         Returns dict with:
         - total_products
@@ -218,15 +262,22 @@ class WarehouseAnalyticsAPIView(APIView):
         
         # Stock turnover ratio = COGS / Average Inventory Value
         # COGS = total cost of items sold in period
-        cogs_data = SaleItem.objects.filter(
-            sale__storefront=warehouse,
-            sale__sale_date__range=[start_date, end_date],
-            sale__status__in=['COMPLETED', 'PARTIAL']
-        ).annotate(
-            item_cost=F('quantity') * F('product__cost_price')
-        ).aggregate(
-            total=Coalesce(Sum('item_cost'), Value(0), output_field=DecimalField())
-        )
+        # For storefronts, sales happen there; for warehouses, track outbound movements
+        if warehouse_type == 'storefront':
+            cogs_data = SaleItem.objects.filter(
+                sale__storefront=warehouse,
+                sale__sale_date__range=[start_date, end_date],
+                sale__status__in=['COMPLETED', 'PARTIAL']
+            ).annotate(
+                item_cost=F('quantity') * F('product__cost_price')
+            ).aggregate(
+                total=Coalesce(Sum('item_cost'), Value(0), output_field=DecimalField())
+            )
+        else:
+            # For warehouses, COGS would be from transfers out or adjustments
+            # Since we don't track direct sales from warehouses, use zero
+            cogs_data = {'total': Decimal('0.00')}
+        
         cogs = float(cogs_data['total'])
         
         # Average inventory value (beginning + ending) / 2
@@ -259,7 +310,7 @@ class WarehouseAnalyticsAPIView(APIView):
             quantity__gt=0
         ).filter(
             Q(product__id__in=self._get_products_with_no_recent_sales(
-                warehouse, dead_stock_threshold
+                warehouse, warehouse_type, dead_stock_threshold
             ))
         )
         
@@ -287,6 +338,7 @@ class WarehouseAnalyticsAPIView(APIView):
         # Movement counts
         movements = self._calculate_movements(
             warehouse=warehouse,
+            warehouse_type=warehouse_type,
             start_date=start_date,
             end_date=end_date
         )
@@ -303,15 +355,20 @@ class WarehouseAnalyticsAPIView(APIView):
             'movements': movements
         }
     
-    def _get_products_with_no_recent_sales(self, warehouse, threshold_date):
+    def _get_products_with_no_recent_sales(self, warehouse, warehouse_type, threshold_date):
         """Get product IDs that haven't sold since threshold_date"""
         
-        # Get products that have recent sales
-        products_with_recent_sales = SaleItem.objects.filter(
-            sale__storefront=warehouse,
-            sale__sale_date__gte=threshold_date,
-            sale__status__in=['COMPLETED', 'PARTIAL']
-        ).values_list('product_id', flat=True).distinct()
+        # Only check sales for storefronts
+        if warehouse_type == 'storefront':
+            # Get products that have recent sales
+            products_with_recent_sales = SaleItem.objects.filter(
+                sale__storefront=warehouse,
+                sale__sale_date__gte=threshold_date,
+                sale__status__in=['COMPLETED', 'PARTIAL']
+            ).values_list('product_id', flat=True).distinct()
+        else:
+            # For warehouses, no direct sales, so all are "dead stock" by this metric
+            products_with_recent_sales = []
         
         # Get all products in warehouse
         all_products = StockProduct.objects.filter(
@@ -322,7 +379,7 @@ class WarehouseAnalyticsAPIView(APIView):
         # Return products without recent sales
         return set(all_products) - set(products_with_recent_sales)
     
-    def _calculate_movements(self, warehouse, start_date, end_date):
+    def _calculate_movements(self, warehouse, warehouse_type, start_date, end_date):
         """
         Calculate movement counts by type.
         
@@ -333,14 +390,20 @@ class WarehouseAnalyticsAPIView(APIView):
         - transfers_out: Specific transfers out
         """
         
-        # Inbound: Sales (to this storefront)
-        inbound = SaleItem.objects.filter(
-            sale__storefront=warehouse,
-            sale__sale_date__range=[start_date, end_date]
-        ).aggregate(count=Count('id'))['count'] or 0
-        
-        # Outbound: Same as inbound for storefronts (sales are outbound to customers)
-        outbound = inbound
+        # For storefronts: inbound/outbound are sales
+        if warehouse_type == 'storefront':
+            # Inbound: Sales (to this storefront)
+            inbound = SaleItem.objects.filter(
+                sale__storefront=warehouse,
+                sale__sale_date__range=[start_date, end_date]
+            ).aggregate(count=Count('id'))['count'] or 0
+            
+            # Outbound: Same as inbound for storefronts (sales are outbound to customers)
+            outbound = inbound
+        else:
+            # For warehouses: no direct sales
+            inbound = 0
+            outbound = 0
         
         # Transfers in: Check InventoryTransfer where destination is this warehouse
         from inventory.models import InventoryTransfer
@@ -364,12 +427,16 @@ class WarehouseAnalyticsAPIView(APIView):
             'transfers_out': transfers_out
         }
     
-    def _get_top_products(self, warehouse, business, start_date, end_date, limit=10):
+    def _get_top_products(self, warehouse, warehouse_type, business, start_date, end_date, limit=10):
         """
         Get top performing products by turnover rate.
         
         Turnover rate = total_sales / current_quantity
         """
+        
+        # Only calculate for storefronts where sales happen
+        if warehouse_type != 'storefront':
+            return []
         
         # Get products with sales in the period
         top_products = StockProduct.objects.filter(
@@ -409,15 +476,19 @@ class WarehouseAnalyticsAPIView(APIView):
             for sp in top_products
         ]
     
-    def _get_slow_movers(self, warehouse, business, days_threshold=90, limit=10):
+    def _get_slow_movers(self, warehouse, warehouse_type, business, days_threshold=90, limit=10):
         """
         Get slow moving products (no sales in days_threshold days).
         """
         
+        # Only calculate for storefronts where sales happen
+        if warehouse_type != 'storefront':
+            return []
+        
         threshold_date = timezone.now().date() - timedelta(days=days_threshold)
         
         # Get products with no recent sales
-        slow_product_ids = self._get_products_with_no_recent_sales(warehouse, threshold_date)
+        slow_product_ids = self._get_products_with_no_recent_sales(warehouse, warehouse_type, threshold_date)
         
         # Get stock products for these items
         slow_movers = StockProduct.objects.filter(
