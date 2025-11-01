@@ -261,7 +261,7 @@ class QuickFiltersAPIView(APIView):
                     p.name AS product_name,
                     p.sku AS product_sku,
                     SUM(si.quantity) AS total_sold
-                FROM sales_sale s
+                FROM sales s
                 JOIN sales_saleitem si ON si.sale_id = s.id
                 JOIN inventory_product p ON si.product_id = p.id
                 WHERE {where_clause}
@@ -321,7 +321,7 @@ class QuickFiltersAPIView(APIView):
                     p.name AS product_name,
                     p.sku AS product_sku,
                     COUNT(sa.id) AS adjustment_count
-                FROM inventory_stockadjustment sa
+                FROM stock_adjustments sa
                 JOIN inventory_stockproduct sp ON sa.stock_product_id = sp.id
                 JOIN inventory_product p ON sp.product_id = p.id
                 JOIN inventory_warehouse w ON sp.warehouse_id = w.id
@@ -383,7 +383,7 @@ class QuickFiltersAPIView(APIView):
                     p.sku AS product_sku,
                     COUNT(DISTINCT t.id) AS transfer_count
                 FROM inventory_transfer t
-                JOIN inventory_transferitem ti ON ti.transfer_id = t.id
+                JOIN inventory_transfer_item ti ON ti.transfer_id = t.id
                 JOIN inventory_product p ON ti.product_id = p.id
                 WHERE {where_clause}
                 GROUP BY p.id, p.name, p.sku
@@ -446,7 +446,7 @@ class QuickFiltersAPIView(APIView):
                     p.sku AS product_sku,
                     SUM(ABS(sa.quantity)) AS shrinkage_quantity,
                     SUM(ABS(sa.total_cost)) AS shrinkage_value
-                FROM inventory_stockadjustment sa
+                FROM stock_adjustments sa
                 JOIN inventory_stockproduct sp ON sa.stock_product_id = sp.id
                 JOIN inventory_product p ON sp.product_id = p.id
                 JOIN inventory_warehouse w ON sp.warehouse_id = w.id
