@@ -694,7 +694,7 @@ class MovementTracker:
         business_id: str,
         warehouse_id: Optional[str],
         product_id: Optional[str],
-        product_ids: Optional[List[str]],
+        product_ids: Optional[List[str]] = None,
         category_id: Optional[str],
         start_date: Optional[date],
         end_date: Optional[date],
