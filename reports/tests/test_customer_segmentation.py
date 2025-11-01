@@ -12,7 +12,7 @@ from rest_framework.test import APIClient
 from rest_framework import status
 
 from sales.models import Customer, Sale, SaleItem, Payment
-from inventory.models import Product, StockMovement, Storefront, Catalog
+from inventory.models import Product, Storefront, Catalog
 from settings.models import Business
 
 User = get_user_model()

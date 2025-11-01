@@ -40,9 +40,8 @@ class Priority1VerificationTestCase(TestCase):
         self.factory = RequestFactory()
         self.user = User.objects.filter(is_superuser=True).first()
         if not self.user:
-            # Create a superuser for testing
+            # Create a superuser for testing (User model uses email, not username)
             self.user = User.objects.create_superuser(
-                username='testadmin',
                 email='admin@test.com',
                 password='testpass123'
             )
