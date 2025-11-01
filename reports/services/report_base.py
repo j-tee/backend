@@ -282,6 +282,70 @@ class BaseReportView(APIView, BusinessFilterMixin, DateRangeFilterMixin, Paginat
             additional=kwargs
         )
 
+    def parse_filters(
+        self,
+        request,
+        *,
+        start_param: str = 'start_date',
+        end_param: str = 'end_date',
+        default_days: Optional[int] = None,
+        max_days: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Parse common filters (business + optional date range) from request.
+
+        Returns a dictionary containing:
+        - business_id: The scoped business identifier
+        - start_date / end_date: Optional date range (when provided or defaulted)
+        - error_response: DRF Response to return immediately if validation fails
+        """
+
+        filters: Dict[str, Any] = {}
+
+        # Resolve business scope first
+        business_id, business_error = self.get_business_or_error(request)
+        if business_error:
+            filters['error_response'] = ReportResponse.error(business_error)
+            return filters
+        filters['business_id'] = business_id
+
+        # Determine date handling preferences
+        effective_default_days = default_days
+        if effective_default_days is None:
+            effective_default_days = getattr(self, 'default_date_range_days', None)
+
+        effective_max_days = max_days
+        if effective_max_days is None:
+            effective_max_days = getattr(self, 'max_date_range_days', 365)
+
+        start_str = request.query_params.get(start_param)
+        end_str = request.query_params.get(end_param)
+
+        if start_str and end_str:
+            start_date, end_date, date_error = self.get_date_range(
+                request,
+                start_param=start_param,
+                end_param=end_param,
+                default_days=effective_default_days or 0,
+                max_days=effective_max_days or 365
+            )
+            if date_error:
+                filters['error_response'] = ReportResponse.error(date_error)
+                return filters
+            filters['start_date'] = start_date
+            filters['end_date'] = end_date
+        elif start_str or end_str:
+            missing_param = start_param if not start_str else end_param
+            filters['error_response'] = ReportResponse.error(
+                ReportError.missing_param(missing_param)
+            )
+            return filters
+        elif effective_default_days:
+            start_date, end_date = DateRangeValidator.get_default_range(effective_default_days)
+            filters['start_date'] = start_date
+            filters['end_date'] = end_date
+
+        return filters
+
 
 class BaseReportBuilder:
     """

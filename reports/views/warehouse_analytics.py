@@ -14,15 +14,30 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework import status
-from django.db.models import Sum, Avg, Count, F, Q, Case, When, Value, DecimalField, IntegerField, Max
-from django.db.models.functions import Coalesce
+from django.db.models import (
+    Sum,
+    Count,
+    F,
+    Q,
+    Case,
+    When,
+    Value,
+    DecimalField,
+    IntegerField,
+    DateTimeField,
+    ExpressionWrapper,
+    OuterRef,
+    Subquery,
+)
+from django.db.models.functions import Coalesce, Cast
 from django.core.cache import cache
 from django.utils import timezone
 from datetime import datetime, timedelta
 from decimal import Decimal
 import logging
 
-from inventory.models import Warehouse, Product, StockProduct, StoreFront
+from inventory.models import Warehouse, StockProduct, StoreFront, StoreFrontInventory
+from inventory.transfer_models import Transfer
 from sales.models import Sale, SaleItem
 from accounts.models import Business
 
@@ -244,19 +259,61 @@ class WarehouseAnalyticsAPIView(APIView):
         - movements (inbound, outbound, transfers_in, transfers_out)
         """
         
-        # Total unique products with stock
-        total_products = StockProduct.objects.filter(
-            warehouse=warehouse,
-            quantity__gt=0
-        ).values('product').distinct().count()
-        
-        # Total stock value (quantity × cost_price)
-        stock_value_data = StockProduct.objects.filter(
-            warehouse=warehouse
-        ).annotate(
-            item_value=F('quantity') * F('product__cost_price')
-        ).aggregate(
-            total=Coalesce(Sum('item_value'), Value(0), output_field=DecimalField())
+        if warehouse_type == 'storefront':
+            inventory_qs = StoreFrontInventory.objects.filter(
+                storefront=warehouse,
+                quantity__gt=0
+            )
+            unit_cost_subquery = StockProduct.objects.filter(
+                product_id=OuterRef('product_id'),
+                stock__business=business
+            ).order_by('-created_at').values('unit_cost')[:1]
+            annotated_inventory = inventory_qs.annotate(
+                effective_unit_cost=Coalesce(
+                    Subquery(
+                        unit_cost_subquery,
+                        output_field=DecimalField(max_digits=12, decimal_places=2)
+                    ),
+                    Value(Decimal('0.00')),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                ),
+                quantity_decimal=Cast(
+                    F('quantity'),
+                    DecimalField(max_digits=18, decimal_places=4)
+                )
+            )
+        else:
+            inventory_qs = StockProduct.objects.filter(
+                warehouse=warehouse,
+                calculated_quantity__gt=0
+            )
+            annotated_inventory = inventory_qs.annotate(
+                effective_unit_cost=Coalesce(
+                    F('unit_cost'),
+                    Value(Decimal('0.00')),
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                ),
+                quantity_decimal=Cast(
+                    F('calculated_quantity'),
+                    DecimalField(max_digits=18, decimal_places=4)
+                )
+            )
+
+        annotated_inventory = annotated_inventory.annotate(
+            item_value=ExpressionWrapper(
+                F('quantity_decimal') * F('effective_unit_cost'),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            )
+        )
+
+        total_products = annotated_inventory.values('product_id').distinct().count()
+
+        stock_value_data = annotated_inventory.aggregate(
+            total=Coalesce(
+                Sum('item_value'),
+                Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            )
         )
         total_stock_value = float(stock_value_data['total'])
         
@@ -266,12 +323,20 @@ class WarehouseAnalyticsAPIView(APIView):
         if warehouse_type == 'storefront':
             cogs_data = SaleItem.objects.filter(
                 sale__storefront=warehouse,
-                sale__sale_date__range=[start_date, end_date],
+                sale__created_at__date__range=[start_date, end_date],
                 sale__status__in=['COMPLETED', 'PARTIAL']
             ).annotate(
-                item_cost=F('quantity') * F('product__cost_price')
+                item_cost=ExpressionWrapper(
+                    Cast(F('quantity'), DecimalField(max_digits=18, decimal_places=4)) *
+                    Coalesce(F('stock_product__unit_cost'), Value(Decimal('0.00'))),
+                    output_field=DecimalField(max_digits=18, decimal_places=4)
+                )
             ).aggregate(
-                total=Coalesce(Sum('item_cost'), Value(0), output_field=DecimalField())
+                total=Coalesce(
+                    Sum('item_cost'),
+                    Value(Decimal('0.00')),
+                    output_field=DecimalField(max_digits=18, decimal_places=4)
+                )
             )
         else:
             # For warehouses, COGS would be from transfers out or adjustments
@@ -289,37 +354,52 @@ class WarehouseAnalyticsAPIView(APIView):
             2
         )
         
-        # Average days in stock (approximate from last_restocked_date)
-        avg_days_data = StockProduct.objects.filter(
-            warehouse=warehouse,
-            quantity__gt=0,
-            last_restocked_date__isnull=False
-        ).aggregate(
-            avg_days=Avg(
-                (timezone.now().date() - F('last_restocked_date')).total_seconds() / 86400
-            )
-        )
-        average_days_in_stock = int(avg_days_data['avg_days'] or 0)
+        # Average days in stock (approximate from stock arrival or inventory updates)
+        days_in_stock: list[int] = []
+        today = timezone.now().date()
+
+        if warehouse_type == 'storefront':
+            inventory_dates = StoreFrontInventory.objects.filter(
+                storefront=warehouse,
+                quantity__gt=0
+            ).values_list('created_at', 'updated_at')
+
+            for created_at, updated_at in inventory_dates:
+                restock_dt = (updated_at or created_at)
+                if not restock_dt:
+                    continue
+                restock_date = restock_dt.date() if hasattr(restock_dt, 'date') else restock_dt
+                days_in_stock.append(max((today - restock_date).days, 0))
+        else:
+            stock_dates = StockProduct.objects.filter(
+                warehouse=warehouse,
+                calculated_quantity__gt=0
+            ).values_list('stock__arrival_date', 'created_at')
+
+            for arrival_date, created_at in stock_dates:
+                restock_date = arrival_date or (created_at.date() if created_at else None)
+                if not restock_date:
+                    continue
+                days_in_stock.append(max((today - restock_date).days, 0))
+
+        average_days_in_stock = int(sum(days_in_stock) / len(days_in_stock)) if days_in_stock else 0
         
         # Dead stock: products with no sales in 180+ days
         dead_stock_threshold = timezone.now().date() - timedelta(days=180)
         
         # Find products with last sale before threshold or never sold
-        dead_stock = StockProduct.objects.filter(
-            warehouse=warehouse,
-            quantity__gt=0
-        ).filter(
-            Q(product__id__in=self._get_products_with_no_recent_sales(
-                warehouse, warehouse_type, dead_stock_threshold
-            ))
+        dead_stock_ids = self._get_products_with_no_recent_sales(
+            warehouse, warehouse_type, dead_stock_threshold
         )
-        
+        dead_stock = annotated_inventory.filter(product_id__in=dead_stock_ids)
         dead_stock_count = dead_stock.count()
-        
-        dead_stock_value_data = dead_stock.annotate(
-            item_value=F('quantity') * F('product__cost_price')
-        ).aggregate(
-            total=Coalesce(Sum('item_value'), Value(0), output_field=DecimalField())
+
+        dead_stock_value_data = dead_stock.aggregate(
+            total=Coalesce(
+                Sum('item_value'),
+                Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            )
         )
         dead_stock_value = float(dead_stock_value_data['total'])
         
@@ -363,18 +443,20 @@ class WarehouseAnalyticsAPIView(APIView):
             # Get products that have recent sales
             products_with_recent_sales = SaleItem.objects.filter(
                 sale__storefront=warehouse,
-                sale__sale_date__gte=threshold_date,
+                sale__created_at__date__gte=threshold_date,
                 sale__status__in=['COMPLETED', 'PARTIAL']
             ).values_list('product_id', flat=True).distinct()
+            all_products = StoreFrontInventory.objects.filter(
+                storefront=warehouse,
+                quantity__gt=0
+            ).values_list('product_id', flat=True)
         else:
             # For warehouses, no direct sales, so all are "dead stock" by this metric
             products_with_recent_sales = []
-        
-        # Get all products in warehouse
-        all_products = StockProduct.objects.filter(
-            warehouse=warehouse,
-            quantity__gt=0
-        ).values_list('product_id', flat=True)
+            all_products = StockProduct.objects.filter(
+                warehouse=warehouse,
+                calculated_quantity__gt=0
+            ).values_list('product_id', flat=True)
         
         # Return products without recent sales
         return set(all_products) - set(products_with_recent_sales)
@@ -393,32 +475,37 @@ class WarehouseAnalyticsAPIView(APIView):
         # For storefronts: inbound/outbound are sales
         if warehouse_type == 'storefront':
             # Inbound: Sales (to this storefront)
-            inbound = SaleItem.objects.filter(
+            sales_count = SaleItem.objects.filter(
                 sale__storefront=warehouse,
-                sale__sale_date__range=[start_date, end_date]
+                sale__created_at__date__range=[start_date, end_date]
             ).aggregate(count=Count('id'))['count'] or 0
-            
-            # Outbound: Same as inbound for storefronts (sales are outbound to customers)
-            outbound = inbound
+            inbound = sales_count
+            outbound = sales_count
+
+            transfers_in = Transfer.objects.filter(
+                destination_storefront=warehouse,
+                status=Transfer.STATUS_COMPLETED,
+                completed_at__date__range=[start_date, end_date]
+            ).count()
+            transfers_out = 0  # Storefronts do not initiate transfers in current workflow
+            inbound += transfers_in
         else:
-            # For warehouses: no direct sales
+            # For warehouses: no direct sales, initialize counts
             inbound = 0
             outbound = 0
-        
-        # Transfers in: Check InventoryTransfer where destination is this warehouse
-        from inventory.models import InventoryTransfer
-        transfers_in = InventoryTransfer.objects.filter(
-            destination_warehouse=warehouse,
-            transfer_date__range=[start_date, end_date],
-            status='COMPLETED'
-        ).aggregate(count=Count('id'))['count'] or 0
-        
-        # Transfers out: Check InventoryTransfer where source is this warehouse
-        transfers_out = InventoryTransfer.objects.filter(
-            source_warehouse=warehouse,
-            transfer_date__range=[start_date, end_date],
-            status='COMPLETED'
-        ).aggregate(count=Count('id'))['count'] or 0
+
+            transfers_in = Transfer.objects.filter(
+                destination_warehouse=warehouse,
+                status=Transfer.STATUS_COMPLETED,
+                completed_at__date__range=[start_date, end_date]
+            ).count()
+            transfers_out = Transfer.objects.filter(
+                source_warehouse=warehouse,
+                status=Transfer.STATUS_COMPLETED,
+                completed_at__date__range=[start_date, end_date]
+            ).count()
+            inbound += transfers_in
+            outbound += transfers_out
         
         return {
             'inbound': inbound,
@@ -438,42 +525,78 @@ class WarehouseAnalyticsAPIView(APIView):
         if warehouse_type != 'storefront':
             return []
         
-        # Get products with sales in the period
-        top_products = StockProduct.objects.filter(
-            warehouse=warehouse,
-            quantity__gt=0
+        inventory_quantity_subquery = StoreFrontInventory.objects.filter(
+            storefront=warehouse,
+            product_id=OuterRef('product_id')
+        ).values('quantity')[:1]
+
+        unit_cost_subquery = StockProduct.objects.filter(
+            product_id=OuterRef('product_id'),
+            stock__business=business
+        ).order_by('-created_at').values('unit_cost')[:1]
+
+        top_products = SaleItem.objects.filter(
+            sale__storefront=warehouse,
+            sale__created_at__date__range=[start_date, end_date],
+            sale__status__in=['COMPLETED', 'PARTIAL']
+        ).values(
+            'product_id',
+            'product__name'
         ).annotate(
             total_sales=Coalesce(
-                Sum(
-                    'product__saleitem__quantity',
-                    filter=Q(
-                        product__saleitem__sale__storefront=warehouse,
-                        product__saleitem__sale__sale_date__range=[start_date, end_date],
-                        product__saleitem__sale__status__in=['COMPLETED', 'PARTIAL']
-                    )
+                Sum('quantity'),
+                Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            ),
+            inventory_quantity=Coalesce(
+                Subquery(
+                    inventory_quantity_subquery,
+                    output_field=IntegerField()
                 ),
                 Value(0),
-                output_field=DecimalField()
+                output_field=IntegerField()
             ),
-            item_value=F('quantity') * F('product__cost_price'),
+            unit_cost=Coalesce(
+                Subquery(
+                    unit_cost_subquery,
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
+                ),
+                Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=12, decimal_places=2)
+            )
+        ).annotate(
+            quantity_decimal=Cast(F('inventory_quantity'), DecimalField(max_digits=18, decimal_places=4)),
+            total_sales_decimal=Cast(F('total_sales'), DecimalField(max_digits=18, decimal_places=4))
+        ).annotate(
+            item_value=ExpressionWrapper(
+                F('quantity_decimal') * F('unit_cost'),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            ),
             turnover_calc=Case(
-                When(quantity__gt=0, then=F('total_sales') * 1.0 / F('quantity')),
-                default=Value(0),
-                output_field=DecimalField()
+                When(
+                    inventory_quantity__gt=0,
+                    then=ExpressionWrapper(
+                        F('total_sales_decimal') / F('quantity_decimal'),
+                        output_field=DecimalField(max_digits=18, decimal_places=4)
+                    )
+                ),
+                default=Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
             )
         ).filter(
-            total_sales__gt=0
+            total_sales__gt=0,
+            inventory_quantity__gt=0
         ).order_by('-turnover_calc')[:limit]
-        
+
         return [
             {
-                'product_id': str(sp.product.id),
-                'product_name': sp.product.name,
-                'quantity': sp.quantity,
-                'value': round(float(sp.item_value), 2),
-                'turnover_rate': round(float(sp.turnover_calc), 2)
+                'product_id': str(item['product_id']),
+                'product_name': item['product__name'],
+                'quantity': int(item['inventory_quantity'] or 0),
+                'value': round(float(item['item_value'] or Decimal('0.00')), 2),
+                'turnover_rate': round(float(item['turnover_calc'] or Decimal('0.00')), 2)
             }
-            for sp in top_products
+            for item in top_products
         ]
     
     def _get_slow_movers(self, warehouse, warehouse_type, business, days_threshold=90, limit=10):
@@ -488,59 +611,72 @@ class WarehouseAnalyticsAPIView(APIView):
         threshold_date = timezone.now().date() - timedelta(days=days_threshold)
         
         # Get products with no recent sales
-        slow_product_ids = self._get_products_with_no_recent_sales(warehouse, warehouse_type, threshold_date)
-        
-        # Get stock products for these items
-        slow_movers = StockProduct.objects.filter(
-            warehouse=warehouse,
-            product_id__in=slow_product_ids,
-            quantity__gt=0
-        ).annotate(
-            item_value=F('quantity') * F('product__cost_price')
-        ).annotate(
-            # Get last sale date for this product at this warehouse
-            last_sale_date_calc=Coalesce(
-                Max(
-                    'product__saleitem__sale__sale_date',
-                    filter=Q(
-                        product__saleitem__sale__storefront=warehouse,
-                        product__saleitem__sale__status__in=['COMPLETED', 'PARTIAL']
-                    )
-                ),
-                Value(timezone.now().date() - timedelta(days=999))
+        slow_product_ids = list(
+            self._get_products_with_no_recent_sales(warehouse, warehouse_type, threshold_date)
+        )
+
+        if not slow_product_ids:
+            return []
+
+        last_sale_subquery = SaleItem.objects.filter(
+            sale__storefront=warehouse,
+            sale__status__in=['COMPLETED', 'PARTIAL'],
+            product_id=OuterRef('product_id')
+        ).order_by('-sale__created_at').values('sale__created_at')[:1]
+
+        unit_cost_subquery = StockProduct.objects.filter(
+            product_id=OuterRef('product_id'),
+            stock__business=business
+        ).order_by('-created_at').values('unit_cost')[:1]
+
+        slow_inventory = StoreFrontInventory.objects.filter(
+            storefront=warehouse,
+            quantity__gt=0,
+            product_id__in=slow_product_ids
+        ).select_related('product').annotate(
+            last_sale_date=Subquery(
+                last_sale_subquery,
+                output_field=DateTimeField()
             ),
-            days_since_sale_calc=Case(
-                When(
-                    last_sale_date_calc__isnull=False,
-                    then=(timezone.now().date() - F('last_sale_date_calc')).total_seconds() / 86400
+            unit_cost=Coalesce(
+                Subquery(
+                    unit_cost_subquery,
+                    output_field=DecimalField(max_digits=12, decimal_places=2)
                 ),
-                default=Value(999),
-                output_field=IntegerField()
+                Value(Decimal('0.00')),
+                output_field=DecimalField(max_digits=12, decimal_places=2)
+            ),
+            quantity_decimal=Cast(
+                F('quantity'),
+                DecimalField(max_digits=18, decimal_places=4)
             )
-        ).order_by('-days_since_sale_calc')[:limit]
-        
+        ).annotate(
+            item_value=ExpressionWrapper(
+                F('quantity_decimal') * F('unit_cost'),
+                output_field=DecimalField(max_digits=18, decimal_places=4)
+            )
+        ).order_by('last_sale_date', 'product__name')[:limit]
+
+        today = timezone.now().date()
         result = []
-        for sp in slow_movers:
-            # Calculate days since last sale manually for accuracy
-            last_sale = SaleItem.objects.filter(
-                product=sp.product,
-                sale__storefront=warehouse,
-                sale__status__in=['COMPLETED', 'PARTIAL']
-            ).order_by('-sale__sale_date').first()
-            
-            if last_sale:
-                days_since = (timezone.now().date() - last_sale.sale.sale_date).days
+
+        for entry in slow_inventory:
+            last_sale_date = entry.last_sale_date
+            if last_sale_date:
+                if isinstance(last_sale_date, datetime):
+                    last_sale_date = last_sale_date.date()
+                days_since = max((today - last_sale_date).days, 0)
             else:
                 days_since = 999  # Never sold
-            
+
             result.append({
-                'product_id': str(sp.product.id),
-                'product_name': sp.product.name,
-                'quantity': sp.quantity,
-                'value': round(float(sp.item_value), 2),
+                'product_id': str(entry.product.id),
+                'product_name': entry.product.name,
+                'quantity': int(entry.quantity or 0),
+                'value': round(float(entry.item_value or Decimal('0.00')), 2),
                 'days_since_last_sale': days_since
             })
-        
+
         return result
     
     def _export_csv(self, warehouse_data, start_date, end_date):

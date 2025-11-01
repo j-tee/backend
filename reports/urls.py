@@ -65,8 +65,10 @@ from .views.warehouse_analytics import (
 
 # Customer Report views (NEW - Phase 5)
 from .views.customer_reports import (
+    TopCustomersReportView,
     CustomerLifetimeValueReportView,
     CustomerSegmentationReportView,
+    CreditUtilizationReportView,
     PurchasePatternAnalysisReportView,
     CustomerRetentionMetricsReportView,
 )
@@ -120,8 +122,9 @@ urlpatterns = [
     
     # Customer Reports (Phase 5) - Complete
     path('api/customer/lifetime-value/', CustomerLifetimeValueReportView.as_view(), name='customer-lifetime-value-report'),
-    path('api/customer/top-customers/', CustomerLifetimeValueReportView.as_view(), name='customer-top-customers-alt'),  # Alternative URL
+    path('api/customer/top-customers/', TopCustomersReportView.as_view(), name='customer-top-customers'),
     path('api/customer/segmentation/', CustomerSegmentationReportView.as_view(), name='customer-segmentation-report'),
+    path('api/customer/credit-utilization/', CreditUtilizationReportView.as_view(), name='customer-credit-utilization-report'),
     path('api/customer/purchase-patterns/', PurchasePatternAnalysisReportView.as_view(), name='purchase-patterns-report'),
     path('api/customer/retention/', CustomerRetentionMetricsReportView.as_view(), name='customer-retention-report'),
 ]
