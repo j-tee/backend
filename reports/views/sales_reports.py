@@ -11,6 +11,7 @@ import csv
 import io
 from django.http import HttpResponse
 from django.db.models import Sum, Count, Avg, Q, F
+from django.utils import timezone
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter, A4, landscape
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -506,7 +507,7 @@ class SalesSummaryReportView(BaseReportView):
         # Header
         writer.writerow(['Sales Summary Report'])
         writer.writerow([f'Period: {start_date} to {end_date}'])
-        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
         writer.writerow([])
         
         # Summary section
@@ -620,7 +621,7 @@ class SalesSummaryReportView(BaseReportView):
         elements.append(title)
         
         # Period and date
-        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
         period_para = Paragraph(period_text, styles['Normal'])
         elements.append(period_para)
         elements.append(Spacer(1, 0.3*inch))
@@ -1034,7 +1035,7 @@ class ProductPerformanceReportView(BaseReportView):
         # Header
         writer.writerow(['Product Performance Report'])
         writer.writerow([f'Period: {start_date} to {end_date}'])
-        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
         writer.writerow([])
         
         # Summary section
@@ -1159,7 +1160,7 @@ class ProductPerformanceReportView(BaseReportView):
         elements.append(title)
         
         # Period and date
-        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
         period_para = Paragraph(period_text, styles['Normal'])
         elements.append(period_para)
         elements.append(Spacer(1, 0.2*inch))

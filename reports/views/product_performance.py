@@ -11,6 +11,7 @@ from typing import Dict, Any, List
 from django.db.models import Sum, Count, Q, F, Avg
 from django.http import HttpResponse
 from django.utils.dateparse import parse_date
+from django.utils import timezone
 from rest_framework import status as http_status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -317,7 +318,7 @@ class ProductPerformanceView(APIView):
         # Header
         writer.writerow(['Product Performance Report'])
         writer.writerow([f'Period: {start_date} to {end_date}'])
-        writer.writerow([f'Generated: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
         writer.writerow([])
         
         # Summary section
@@ -435,7 +436,7 @@ class ProductPerformanceView(APIView):
         elements.append(title)
         
         # Period and date
-        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
         period_para = Paragraph(period_text, styles['Normal'])
         elements.append(period_para)
         elements.append(Spacer(1, 0.2*inch))

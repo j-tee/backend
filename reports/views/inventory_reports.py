@@ -407,7 +407,7 @@ class StockLevelsSummaryReportView(BaseReportView):
             if product_data['total_available'] > 0:
                 try:
                     from sales.models import SaleItem
-                    thirty_days_ago = datetime.now() - timedelta(days=30)
+                    thirty_days_ago = timezone.now() - timedelta(days=30)
                     
                     # Get total quantity sold in last 30 days for this product
                     sales_volume = SaleItem.objects.filter(
