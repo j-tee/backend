@@ -8,7 +8,12 @@ from subscriptions.models import (
     SubscriptionPricingTier,
     TaxConfiguration,
     ServiceCharge,
+    SubscriptionPlan,
+    Subscription,
 )
+from accounts.models import Business
+from django.utils import timezone
+from datetime import timedelta
 from decimal import Decimal
 from datetime import date
 
@@ -350,6 +355,86 @@ class ServiceChargeAPITestCase(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         # Should return 2: the PAYSTACK-specific one and the ALL one
         self.assertEqual(len(response.data['results']), 2)
+
+
+class SubscriptionListResponseTestCase(APITestCase):
+    """Regression tests for /subscriptions/api/subscriptions/ endpoint."""
+
+    def setUp(self):
+        self.admin_user = User.objects.create_user(
+            email='platform-admin@example.com',
+            password='testpass123',
+            first_name='Platform',
+            last_name='Admin',
+        )
+        self.admin_user.is_staff = True
+        self.admin_user.save()
+
+        self.business_owner = User.objects.create_user(
+            email='owner@example.com',
+            password='testpass123',
+            first_name='Owner',
+            last_name='User',
+        )
+
+        self.business = Business.objects.create(
+            owner=self.business_owner,
+            name='DataLogique Systems QA',
+            tin='TIN-QA-001',
+            email='qa@datologique.com',
+            address='123 QA Street',
+        )
+
+        self.plan = SubscriptionPlan.objects.create(
+            name='Professional Plan',
+            description='QA plan',
+            price='50.00',
+            currency='GHS',
+            billing_cycle='MONTHLY',
+            sort_order=1,
+        )
+
+        now = timezone.now()
+        self.subscription = Subscription.objects.create(
+            business=self.business,
+            created_by=self.admin_user,
+            plan=self.plan,
+            amount=self.plan.price,
+            payment_method='PAYSTACK',
+            payment_status='PAID',
+            status='ACTIVE',
+            start_date=now.date(),
+            end_date=(now + timedelta(days=30)).date(),
+            current_period_start=now,
+            current_period_end=now + timedelta(days=30),
+            auto_renew=True,
+            cancel_at_period_end=False,
+            next_billing_date=(now + timedelta(days=30)).date(),
+            is_trial=False,
+        )
+
+    def test_subscription_list_includes_plan_metadata(self):
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.get('/subscriptions/api/subscriptions/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        payload = response.data
+        results = payload['results'] if isinstance(payload, dict) and 'results' in payload else payload
+        self.assertGreaterEqual(len(results), 1)
+
+        sub_data = next(
+            (item for item in results if item['id'] == str(self.subscription.id)),
+            results[0],
+        )
+
+        self.assertIsNotNone(sub_data['plan'])
+        self.assertEqual(sub_data['plan']['name'], self.plan.name)
+        self.assertIsNotNone(sub_data['plan_details'])
+        self.assertEqual(sub_data['plan_details']['price'], str(self.plan.price))
+        self.assertEqual(sub_data['plan_details']['billing_cycle'], self.plan.billing_cycle)
+        self.assertIsNotNone(sub_data['current_period_start'])
+        self.assertIsNotNone(sub_data['current_period_end'])
 
 
 class IntegratedPricingAPITestCase(APITestCase):

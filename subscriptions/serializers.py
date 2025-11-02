@@ -60,25 +60,48 @@ class SubscriptionPlanSerializer(serializers.ModelSerializer):
 
 
 class SubscriptionListSerializer(serializers.ModelSerializer):
-    """Lightweight serializer for subscription lists"""
+    """Serializer for subscription listings shown to platform admins."""
+    plan = SubscriptionPlanSerializer(read_only=True)
     plan_name = serializers.CharField(source='plan.name', read_only=True)
+    plan_details = serializers.SerializerMethodField()
+    business_id = serializers.UUIDField(source='business.id', read_only=True)
     business_name = serializers.CharField(source='business.name', read_only=True)
+    business_email = serializers.EmailField(source='business.email', read_only=True)
+    business_owner = serializers.CharField(source='business.owner.name', read_only=True)
     days_until_expiry = serializers.SerializerMethodField()
     is_active = serializers.SerializerMethodField()
     
     class Meta:
         model = Subscription
         fields = [
-            'id', 'plan_name', 'business_name', 'status', 'payment_status',
-            'start_date', 'end_date', 'is_trial', 'days_until_expiry',
-            'is_active', 'auto_renew', 'created_at'
+            'id', 'business_id', 'business_name', 'business_email',
+            'business_owner', 'plan', 'plan_name', 'plan_details',
+            'status', 'payment_status', 'start_date', 'end_date',
+            'current_period_start', 'current_period_end',
+            'next_billing_date', 'is_trial', 'days_until_expiry',
+            'is_active', 'auto_renew', 'cancel_at_period_end',
+            'created_at', 'updated_at'
         ]
+        read_only_fields = fields
     
     def get_days_until_expiry(self, obj):
         return obj.days_until_expiry()
     
     def get_is_active(self, obj):
         return obj.is_active()
+
+    def get_plan_details(self, obj):
+        plan = obj.plan
+        if not plan:
+            return None
+        return {
+            'id': str(plan.id),
+            'name': plan.name,
+            'price': str(plan.price),
+            'currency': plan.currency,
+            'billing_cycle': plan.billing_cycle,
+            'interval': plan.get_billing_cycle_display(),
+        }
 
 
 class SubscriptionDetailSerializer(serializers.ModelSerializer):
