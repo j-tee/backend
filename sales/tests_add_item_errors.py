@@ -37,16 +37,19 @@ class AddSaleItemErrorPayloadTestCase(APITestCase):
             email="limited@example.com",
             address="456 Example Street",
         )
-        
-        # Create business membership for permission access
-        BusinessMembership.objects.create(
+
+        # Ensure business membership exists and is active for permission checks
+        BusinessMembership.objects.update_or_create(
             business=self.business,
             user=self.user,
-            role=BusinessMembership.OWNER,
-            is_admin=True,
-            is_active=True
+            defaults={
+                "role": BusinessMembership.OWNER,
+                "is_admin": True,
+                "is_active": True,
+            },
         )
-        
+        self.user.business = self.business
+
         self.storefront = StoreFront.objects.create(
             user=self.user,
             name="City Store",

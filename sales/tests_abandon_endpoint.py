@@ -36,16 +36,20 @@ class SaleAbandonEndpointTestCase(APITestCase):
             email="reservation@example.com",
             address="123 Reservation Ave",
         )
-        
-        # Create business membership for permission access
-        BusinessMembership.objects.create(
+
+        # Ensure business membership exists and is active for permission checks
+        BusinessMembership.objects.update_or_create(
             business=self.business,
             user=self.user,
-            role=BusinessMembership.OWNER,
-            is_admin=True,
-            is_active=True
+            defaults={
+                "role": BusinessMembership.OWNER,
+                "is_admin": True,
+                "is_active": True,
+            },
         )
-        
+        # Attach primary business attribute expected by subscription permission
+        self.user.business = self.business
+
         self.storefront = StoreFront.objects.create(
             user=self.user,
             name="Reservation Store",

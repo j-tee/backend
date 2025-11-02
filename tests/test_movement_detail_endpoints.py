@@ -50,6 +50,7 @@ class MovementDetailEndpointsTests(TestCase):
                 'is_active': True
             }
         )
+        self.user.business = self.business
 
         # Create test data
         self.category = Category.objects.create(name='Test Category')
