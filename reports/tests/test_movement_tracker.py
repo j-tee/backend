@@ -208,10 +208,10 @@ class MovementTrackerTestCase(TestCase):
         today = timezone.now().date()
         yesterday = today - timedelta(days=1)
         
-        # Create adjustment today
+        # Create adjustment today (use THEFT instead of TRANSFER_OUT which is now excluded)
         StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
-            adjustment_type='TRANSFER_OUT',
+            adjustment_type='THEFT',
             quantity=-10,
             unit_cost=Decimal('10.00'),
             created_by=self.user,
@@ -240,23 +240,25 @@ class MovementTrackerTestCase(TestCase):
     
     def test_get_movements_with_warehouse_filter(self):
         """Test filtering movements by warehouse."""
-        # Create transfers for both warehouses
+        # Create adjustments for both warehouses (use DAMAGE instead of TRANSFER types)
         StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
-            adjustment_type='TRANSFER_OUT',
+            adjustment_type='DAMAGE',
             quantity=-10,
             unit_cost=Decimal('10.00'),
             created_by=self.user,
-            business=self.business
+            business=self.business,
+            status='COMPLETED'
         )
         
         StockAdjustment.objects.create(
             stock_product=self.stock_product_b,
-            adjustment_type='TRANSFER_IN',
-            quantity=10,
+            adjustment_type='DAMAGE',
+            quantity=-10,
             unit_cost=Decimal('10.00'),
             created_by=self.user,
-            business=self.business
+            business=self.business,
+            status='COMPLETED'
         )
         
         # Get movements for warehouse A only
@@ -271,11 +273,11 @@ class MovementTrackerTestCase(TestCase):
     
     def test_get_summary(self):
         """Test getting movement summary statistics."""
-        # Create various movements
-        # Transfer OUT
+        # Create various movements (excluding TRANSFER_IN/OUT which are now handled by Transfer model)
+        # Use DAMAGE for warehouse A
         StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
-            adjustment_type='TRANSFER_OUT',
+            adjustment_type='DAMAGE',
             quantity=-10,
             unit_cost=Decimal('10.00'),
             created_by=self.user,
@@ -283,18 +285,7 @@ class MovementTrackerTestCase(TestCase):
             status='COMPLETED'
         )
         
-        # Transfer IN
-        StockAdjustment.objects.create(
-            stock_product=self.stock_product_b,
-            adjustment_type='TRANSFER_IN',
-            quantity=10,
-            unit_cost=Decimal('10.00'),
-            created_by=self.user,
-            business=self.business,
-            status='COMPLETED'
-        )
-        
-        # Shrinkage
+        # Shrinkage (THEFT)
         StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
             adjustment_type='THEFT',
@@ -310,24 +301,25 @@ class MovementTrackerTestCase(TestCase):
             business_id=str(self.business.id)
         )
         
-        # Verify summary
-        self.assertEqual(summary['total_movements'], 3)
-        self.assertEqual(summary['transfers_count'], 2)  # OUT and IN
-        self.assertEqual(summary['shrinkage_count'], 1)
-        self.assertEqual(summary['total_quantity_transferred'], 20)  # 10 out + 10 in
-        self.assertEqual(summary['total_shrinkage_quantity'], 5)
-        self.assertEqual(summary['total_value_transferred'], Decimal('200.00'))
-        self.assertEqual(summary['total_shrinkage_value'], Decimal('50.00'))
+        # Verify summary - now we only have 2 adjustments (DAMAGE and THEFT)
+        # Both are shrinkage types, no transfers since TRANSFER_IN/OUT are excluded
+        self.assertEqual(summary['total_movements'], 2)
+        self.assertEqual(summary['transfers_count'], 0)  # No TRANSFER_IN/OUT anymore
+        self.assertEqual(summary['shrinkage_count'], 2)  # Both DAMAGE and THEFT
+        self.assertEqual(summary['total_quantity_transferred'], 0)  # No transfers
+        self.assertEqual(summary['total_shrinkage_quantity'], 15)  # 10 + 5
+        self.assertEqual(summary['total_value_transferred'], Decimal('0.00'))
+        self.assertEqual(summary['total_shrinkage_value'], Decimal('150.00'))  # (10*10) + (5*10)
     
     def test_movement_sorting(self):
         """Test that movements are sorted by date (most recent first)."""
         # Create movements at different times
         now = timezone.now()
         
-        # Older movement
+        # Older movement - using DAMAGE instead of excluded TRANSFER_OUT
         adj1 = StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
-            adjustment_type='TRANSFER_OUT',
+            adjustment_type='DAMAGE',
             quantity=-10,
             unit_cost=Decimal('10.00'),
             created_by=self.user,
@@ -359,9 +351,10 @@ class MovementTrackerTestCase(TestCase):
 
     def test_paginated_movements_reference_and_location(self):
         """Verify paginated movements expose correct reference and warehouse identifiers."""
+        # Use DAMAGE instead of excluded TRANSFER_OUT
         adjustment = StockAdjustment.objects.create(
             stock_product=self.stock_product_a,
-            adjustment_type='TRANSFER_OUT',
+            adjustment_type='DAMAGE',
             quantity=-8,
             unit_cost=Decimal('12.50'),
             created_by=self.user,
