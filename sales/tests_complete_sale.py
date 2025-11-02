@@ -36,16 +36,19 @@ class CompleteSaleEndpointTest(APITestCase):
             email="biz@example.com",
             address="123 Test Lane"
         )
-        
-        # Create business membership for permission access
-        BusinessMembership.objects.create(
+
+        # Ensure business membership exists and is active for permission checks
+        BusinessMembership.objects.update_or_create(
             business=self.business,
             user=self.user,
-            role=BusinessMembership.OWNER,
-            is_admin=True,
-            is_active=True
+            defaults={
+                "role": BusinessMembership.OWNER,
+                "is_admin": True,
+                "is_active": True,
+            },
         )
-        
+        self.user.business = self.business
+
         self.category = Category.objects.create(name="Beverages")
         self.customer = Customer.objects.create(
             business=self.business,

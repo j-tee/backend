@@ -76,6 +76,8 @@ class StockAdjustmentSearchBugFixTest(TestCase):
                 'is_active': True
             }
         )
+        self.user1.business = self.business1
+        self.user2.business = self.business2
         
         # Create warehouses
         self.warehouse1 = Warehouse.objects.create(
