@@ -8,6 +8,9 @@ from rest_framework.views import APIView
 from rest_framework import status
 from rest_framework.response import Response
 
+# Subscription enforcement
+from subscriptions.permissions import RequiresSubscriptionForExports
+
 from reports.exporters import EXPORTER_MAP
 from reports.serializers import (
     InventoryValuationReportRequestSerializer,
@@ -25,7 +28,7 @@ from reports.services.audit import AuditLogExporter
 class InventoryValuationReportView(APIView):
     """Generate printable/downloadable inventory valuation reports."""
 
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForExports]
 
     def get(self, request, *args, **kwargs):
         serializer = InventoryValuationReportRequestSerializer(data=request.query_params)
@@ -54,7 +57,7 @@ class InventoryValuationReportView(APIView):
 class SalesExportView(APIView):
     """Export sales data to Excel/CSV/PDF"""
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForExports]
     
     def post(self, request, *args, **kwargs):
         """
@@ -133,7 +136,7 @@ class SalesExportView(APIView):
 class CustomerExportView(APIView):
     """Export customer data with credit aging analysis"""
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForExports]
     
     def post(self, request, *args, **kwargs):
         """
@@ -207,7 +210,7 @@ class CustomerExportView(APIView):
 class InventoryExportView(APIView):
     """Export inventory snapshot with stock levels and valuation"""
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForExports]
     
     def post(self, request, *args, **kwargs):
         """Generate inventory export"""
@@ -266,7 +269,7 @@ class InventoryExportView(APIView):
 class AuditLogExportView(APIView):
     """Export audit logs for compliance and security tracking"""
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForExports]
     
     def post(self, request, *args, **kwargs):
         """Generate audit log export"""

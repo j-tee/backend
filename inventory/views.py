@@ -17,6 +17,10 @@ from django.contrib.auth import get_user_model
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from decimal import Decimal
+
+# Subscription enforcement
+from subscriptions.permissions import RequiresSubscriptionForInventoryModification
+
 from accounts.models import Business, BusinessMembership, BusinessInvitation
 from accounts.serializers import (
     BusinessInvitationSerializer,
@@ -762,7 +766,7 @@ class ProductViewSet(viewsets.ModelViewSet):
     """ViewSet for managing products with pagination, filtering, and ordering."""
     queryset = Product.objects.select_related('category', 'business').all()
     serializer_class = ProductSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, RequiresSubscriptionForInventoryModification]
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ProductFilter
@@ -1397,7 +1401,7 @@ class StockProductViewSet(viewsets.ModelViewSet):
 
     queryset = StockProduct.objects.select_related('product', 'supplier', 'warehouse', 'stock').all()
     serializer_class = StockProductSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, RequiresSubscriptionForInventoryModification]
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = StockProductFilter

@@ -4,6 +4,8 @@ Handles serialization/deserialization of subscription data
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+import logging
+
 from .models import (
     SubscriptionPlan,
     Subscription,
@@ -12,10 +14,14 @@ from .models import (
     WebhookEvent,
     UsageTracking,
     Invoice,
-    Alert
+    Alert,
+    SubscriptionPricingTier,
+    TaxConfiguration,
+    ServiceCharge,
 )
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
@@ -133,15 +139,17 @@ class SubscriptionDetailSerializer(serializers.ModelSerializer):
 
 class SubscriptionCreateSerializer(serializers.ModelSerializer):
     """Serializer for creating new subscriptions"""
-    plan_id = serializers.UUIDField(required=True)
-    business_id = serializers.UUIDField(required=True)  # Business is required
+    plan_id = serializers.UUIDField(required=True, write_only=True)
+    business_id = serializers.UUIDField(required=True, write_only=True)  # Business is required
     
     class Meta:
         model = Subscription
         fields = [
-            'plan_id', 'business_id', 'payment_method',
-            'is_trial', 'trial_end_date'
+            'id', 'plan_id', 'business_id', 'payment_method',
+            'is_trial', 'trial_end_date', 'status', 'payment_status',
+            'amount', 'start_date', 'end_date'
         ]
+        read_only_fields = ['id', 'status', 'payment_status', 'amount', 'start_date', 'end_date']
     
     def validate_plan_id(self, value):
         """Validate that plan exists and is active"""
@@ -165,6 +173,38 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
             request = self.context.get('request')
             if request and not business.memberships.filter(user=request.user).exists():
                 raise serializers.ValidationError("You don't have permission to subscribe for this business")
+            
+            # Check if business already has an ACTIVE or PAID subscription
+            # Allow creating new subscription if existing one is INACTIVE/PENDING (failed payment)
+            if hasattr(business, 'subscription') and business.subscription:
+                existing_sub = business.subscription
+                
+                # If subscription is ACTIVE and PAID, don't allow duplicate
+                if existing_sub.status == 'ACTIVE' and existing_sub.payment_status == 'PAID':
+                    raise serializers.ValidationError({
+                        'business_id': "This business already has an active subscription.",
+                        'detail': "You already have an active subscription. Please go to 'My Subscriptions' to manage or upgrade your plan.",
+                        'existing_subscription_id': str(existing_sub.id),
+                        'plan_name': existing_sub.plan.name if existing_sub.plan else 'Unknown'
+                    })
+                
+                # If subscription exists but is not ACTIVE+PAID, delete it to allow new attempt
+                # This handles cases where previous payment failed or was never completed
+                # Payment status can be: PAID, PENDING, FAILED, OVERDUE, CANCELLED
+                # Status can be: TRIAL, ACTIVE, PAST_DUE, INACTIVE, CANCELLED, SUSPENDED, EXPIRED
+                if existing_sub.payment_status in ['PENDING', 'FAILED', 'OVERDUE', 'CANCELLED']:
+                    logger.warning(
+                        f"Deleting incomplete subscription {existing_sub.id} for business {business.id} "
+                        f"(status: {existing_sub.status}, payment: {existing_sub.payment_status})"
+                    )
+                    existing_sub.delete()
+                elif existing_sub.status in ['INACTIVE', 'CANCELLED', 'SUSPENDED', 'EXPIRED', 'PAST_DUE']:
+                    logger.warning(
+                        f"Deleting non-active subscription {existing_sub.id} for business {business.id} "
+                        f"(status: {existing_sub.status}, payment: {existing_sub.payment_status})"
+                    )
+                    existing_sub.delete()
+            
             return value
         except Business.DoesNotExist:
             raise serializers.ValidationError("Invalid business selected")
@@ -357,3 +397,72 @@ class SubscriptionStatsSerializer(serializers.Serializer):
     monthly_recurring_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
     average_subscription_value = serializers.DecimalField(max_digits=10, decimal_places=2)
     churn_rate = serializers.FloatField()
+
+
+# New Serializers for Flexible Pricing System
+
+class SubscriptionPricingTierSerializer(serializers.ModelSerializer):
+    """Serializer for subscription pricing tiers"""
+    
+    class Meta:
+        model = SubscriptionPricingTier
+        fields = [
+            'id', 'min_storefronts', 'max_storefronts',
+            'base_price', 'price_per_additional_storefront', 'currency',
+            'is_active', 'description', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class TaxConfigurationSerializer(serializers.ModelSerializer):
+    """Serializer for tax configurations"""
+    is_effective_now = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = TaxConfiguration
+        fields = [
+            'id', 'name', 'code', 'description', 'rate', 'country',
+            'applies_to_subscriptions', 'is_mandatory', 'calculation_order',
+            'applies_to', 'is_active', 'effective_from', 'effective_until',
+            'is_effective_now', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+    
+    def get_is_effective_now(self, obj):
+        return obj.is_effective()
+
+
+class ServiceChargeSerializer(serializers.ModelSerializer):
+    """Serializer for service charges"""
+    
+    class Meta:
+        model = ServiceCharge
+        fields = [
+            'id', 'name', 'code', 'description', 'charge_type', 'amount',
+            'currency', 'applies_to', 'payment_gateway', 'is_active',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']
+
+
+class EnhancedSubscriptionPaymentSerializer(serializers.ModelSerializer):
+    """Enhanced serializer with full pricing breakdown"""
+    subscription_plan_name = serializers.CharField(source='subscription.plan.name', read_only=True)
+    subscription_business_name = serializers.CharField(source='subscription.business.name', read_only=True)
+    
+    class Meta:
+        model = SubscriptionPayment
+        fields = [
+            'id', 'subscription', 'subscription_plan_name', 'subscription_business_name',
+            'amount', 'currency', 'payment_method', 'status',
+            'transaction_id', 'transaction_reference', 'gateway_reference', 'gateway_response',
+            'payment_date', 'billing_period_start', 'billing_period_end',
+            # Enhanced fields
+            'base_amount', 'storefront_count', 'pricing_tier_snapshot',
+            'tax_breakdown', 'total_tax_amount',
+            'service_charges_breakdown', 'total_service_charges',
+            'attempt_number', 'previous_attempt', 'failure_reason',
+            'gateway_error_code', 'gateway_error_message', 'status_history',
+            'notes', 'created_at', 'updated_at'
+        ]
+        read_only_fields = ['id', 'created_at', 'updated_at']

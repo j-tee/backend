@@ -15,6 +15,9 @@ from django.utils.dateparse import parse_date
 import csv
 from django.core.exceptions import ValidationError
 
+# Subscription enforcement
+from subscriptions.permissions import RequiresActiveSubscription, RequiresSubscriptionForExports
+
 from .models import (
     Customer, Sale, SaleItem, Payment, Refund, RefundItem,
     CreditTransaction, StockReservation, AuditLog,
@@ -123,9 +126,17 @@ class CustomerViewSet(viewsets.ModelViewSet):
 class SaleViewSet(viewsets.ModelViewSet):
     """ViewSet for Sale CRUD operations with cart functionality"""
     serializer_class = SaleSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, RequiresActiveSubscription]
     filterset_class = SaleFilter
     filter_backends = [DjangoFilterBackend]
+    
+    def get_permissions(self):
+        """
+        Use different permissions for export action.
+        """
+        if self.action == 'export':
+            return [permissions.IsAuthenticated(), RequiresSubscriptionForExports()]
+        return super().get_permissions()
     
     def perform_create(self, serializer):
         """
@@ -1972,7 +1983,7 @@ class SaleItemViewSet(viewsets.ModelViewSet):
 class PaymentViewSet(viewsets.ModelViewSet):
     """ViewSet for Payment operations"""
     serializer_class = PaymentSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, RequiresActiveSubscription]
     
     def get_queryset(self):
         """Filter payments"""
