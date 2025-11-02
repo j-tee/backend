@@ -1,12 +1,14 @@
 """
 Payment Gateway Integrations
 Handles Paystack and Stripe payment processing with environment variable configuration
+Enhanced for flexible subscription pricing system
 """
 import requests
 import stripe
 import logging
 import os
 from decimal import Decimal
+from typing import Dict, Any
 from django.conf import settings
 from django.utils import timezone
 from .models import PaymentGatewayConfig, SubscriptionPayment, WebhookEvent
@@ -25,37 +27,36 @@ def get_payment_mode():
 
 
 class PaystackGateway:
-    """Paystack payment gateway integration (Mobile Money for Ghana)"""
+    """
+    Paystack payment gateway integration (Mobile Money for Ghana).
+    Enhanced for flexible subscription pricing with app_name routing.
+    """
     
     BASE_URL = "https://api.paystack.co"
     
     def __init__(self):
-        """Initialize Paystack with keys from environment variables"""
-        self.mode = get_payment_mode()
-        
-        # Get keys based on mode
-        if self.mode == 'live':
-            self.public_key = os.getenv('PAYSTACK_PUBLIC_KEY_LIVE')
-            self.secret_key = os.getenv('PAYSTACK_SECRET_KEY_LIVE')
-            self.webhook_secret = os.getenv('PAYSTACK_WEBHOOK_SECRET_LIVE')
-        else:
-            self.public_key = os.getenv('PAYSTACK_PUBLIC_KEY_TEST')
-            self.secret_key = os.getenv('PAYSTACK_SECRET_KEY_TEST')
-            self.webhook_secret = os.getenv('PAYSTACK_WEBHOOK_SECRET_TEST')
+        """Initialize Paystack with keys from settings"""
+        # Use settings.py configuration (supports both test and env vars)
+        self.secret_key = settings.PAYSTACK_SECRET_KEY
+        self.public_key = settings.PAYSTACK_PUBLIC_KEY
+        self.app_name = getattr(settings, 'PAYSTACK_APP_NAME', 'pos')
         
         # Validate that keys are present
         if not self.secret_key:
             raise PaymentGatewayError(
-                f"Paystack {self.mode} secret key not found in environment variables. "
-                f"Please set PAYSTACK_SECRET_KEY_{self.mode.upper()} in your .env file"
+                "Paystack secret key not found. "
+                "Please set PAYSTACK_SECRET_KEY in settings or environment"
             )
         
         if not self.public_key:
-            logger.warning(f"Paystack {self.mode} public key not found in environment variables")
+            logger.warning("Paystack public key not found")
         
-        self.test_mode = (self.mode == 'test')
+        self.headers = {
+            "Authorization": f"Bearer {self.secret_key}",
+            "Content-Type": "application/json"
+        }
         
-        logger.info(f"Paystack gateway initialized in {self.mode.upper()} mode")
+        logger.info(f"Paystack gateway initialized for app: {self.app_name}")
     
     def _make_request(self, method, endpoint, data=None):
         """Make API request to Paystack"""
@@ -160,6 +161,108 @@ class PaystackGateway:
         subscription.save()
         
         return payment
+    
+    def initialize_transaction(
+        self,
+        email: str,
+        amount: Decimal,
+        currency: str = "GHS",
+        reference: str = None,
+        callback_url: str = None,
+        metadata: Dict = None
+    ) -> Dict[str, Any]:
+        """
+        Initialize a payment transaction (New flexible pricing API).
+        
+        Args:
+            email: Customer email
+            amount: Amount in main currency unit (e.g., 100.00 GHS)
+            currency: Currency code (default: GHS)
+            reference: Unique transaction reference
+            callback_url: URL to redirect after payment
+            metadata: Additional data (will include app_name automatically)
+        
+        Returns:
+            {
+                "status": true,
+                "message": "Authorization URL created",
+                "data": {
+                    "authorization_url": "https://checkout.paystack.com/...",
+                    "access_code": "...",
+                    "reference": "..."
+                }
+            }
+        """
+        # Convert to pesewas (multiply by 100)
+        amount_in_pesewas = int(amount * 100)
+        
+        # Ensure metadata includes app_name for webhook routing
+        if metadata is None:
+            metadata = {}
+        
+        metadata['app_name'] = self.app_name  # Critical for multi-app routing
+        
+        payload = {
+            "email": email,
+            "amount": amount_in_pesewas,
+            "currency": currency,
+            "reference": reference,
+            "callback_url": callback_url,
+            "metadata": metadata
+        }
+        
+        try:
+            response = requests.post(
+                f"{self.BASE_URL}/transaction/initialize",
+                json=payload,
+                headers=self.headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            logger.info(f"Paystack transaction initialized: {reference}")
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack initialization failed: {str(e)}")
+            raise PaymentGatewayError(f"Payment initialization failed: {str(e)}")
+    
+    def verify_transaction(self, reference: str) -> Dict[str, Any]:
+        """
+        Verify a transaction (New flexible pricing API).
+        
+        Args:
+            reference: Transaction reference
+        
+        Returns:
+            {
+                "status": true,
+                "message": "Verification successful",
+                "data": {
+                    "status": "success",
+                    "amount": 10000,
+                    "currency": "GHS",
+                    "customer": {...},
+                    "metadata": {...}
+                }
+            }
+        """
+        try:
+            response = requests.get(
+                f"{self.BASE_URL}/transaction/verify/{reference}",
+                headers=self.headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            logger.info(f"Paystack transaction verified: {reference}")
+            return data
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Paystack verification failed: {str(e)}")
+            raise PaymentGatewayError(f"Payment verification failed: {str(e)}")
     
     def process_webhook(self, event_data, signature):
         """Process Paystack webhook event"""

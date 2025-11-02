@@ -11,6 +11,9 @@ from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
 from django.db.models import QuerySet
 
+# Subscription enforcement
+from subscriptions.permissions import RequiresSubscriptionForReports
+
 from reports.utils.response import ReportResponse, ReportError, ReportMetadata
 from reports.utils.date_utils import DateRangeValidator
 
@@ -193,9 +196,10 @@ class BaseReportView(APIView, BusinessFilterMixin, DateRangeFilterMixin, Paginat
     - Date range handling
     - Pagination
     - Standard response formatting
+    - Subscription enforcement (requires active subscription with grace period for read-only)
     """
     
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, RequiresSubscriptionForReports]
     
     def build_summary(self, queryset: QuerySet, **kwargs) -> Dict[str, Any]:
         """

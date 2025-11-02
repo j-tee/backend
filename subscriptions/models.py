@@ -1,7 +1,7 @@
 import uuid
 from django.db import models
 from django.contrib.auth import get_user_model
-from django.core.validators import MinValueValidator
+from django.core.validators import MinValueValidator, MaxValueValidator
 from decimal import Decimal
 from datetime import timedelta
 from django.utils import timezone
@@ -163,7 +163,8 @@ class Subscription(models.Model):
         
         # Check users limit
         if self.business:
-            current_users = self.business.members.count()
+            # Count unique users via business memberships
+            current_users = self.business.memberships.filter(is_active=True).values('user').distinct().count()
             limits['users'] = {
                 'current': current_users,
                 'limit': self.plan.max_users,
@@ -171,7 +172,7 @@ class Subscription(models.Model):
             }
             
             # Check storefronts limit
-            current_storefronts = self.business.storefronts.count()
+            current_storefronts = self.business.business_storefronts.filter(is_active=True).count()
             limits['storefronts'] = {
                 'current': current_storefronts,
                 'limit': self.plan.max_storefronts,
@@ -291,14 +292,104 @@ class SubscriptionPayment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     subscription = models.ForeignKey(Subscription, on_delete=models.CASCADE, related_name='payments')
     amount = models.DecimalField(max_digits=10, decimal_places=2, validators=[MinValueValidator(Decimal('0.01'))])
+    currency = models.CharField(max_length=3, default='GHS')
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
     transaction_id = models.CharField(max_length=255, blank=True, null=True)
+    transaction_reference = models.CharField(max_length=255, blank=True, null=True)
     gateway_reference = models.CharField(max_length=255, blank=True, null=True)
     gateway_response = models.JSONField(default=dict, blank=True)
     payment_date = models.DateTimeField(null=True, blank=True)
     billing_period_start = models.DateField()
     billing_period_end = models.DateField()
+    
+    # NEW FIELDS - Pricing breakdown
+    base_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Base subscription price before taxes and charges"
+    )
+    storefront_count = models.IntegerField(
+        default=1,
+        help_text="Number of storefronts at time of payment"
+    )
+    pricing_tier_snapshot = models.JSONField(
+        default=dict,
+        help_text="Snapshot of pricing tier configuration used for this payment"
+    )
+    
+    # Tax breakdown
+    tax_breakdown = models.JSONField(
+        default=dict,
+        help_text="""
+        Tax breakdown: {
+            "VAT": {"rate": 15.00, "amount": "27.00"},
+            "NHIL": {"rate": 2.50, "amount": "4.50"}
+        }
+        """
+    )
+    total_tax_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    # Service charges
+    service_charges_breakdown = models.JSONField(
+        default=dict,
+        help_text="""
+        Service charges: {
+            "payment_gateway": {"type": "PERCENTAGE", "rate": 2.00, "amount": "3.60"}
+        }
+        """
+    )
+    total_service_charges = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00')
+    )
+    
+    # Payment attempt tracking
+    attempt_number = models.IntegerField(
+        default=1,
+        help_text="Number of this payment attempt (1 for first attempt)"
+    )
+    previous_attempt = models.ForeignKey(
+        'self',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='retry_attempts',
+        help_text="Link to previous failed attempt if this is a retry"
+    )
+    
+    # Failure tracking
+    failure_reason = models.TextField(
+        blank=True,
+        help_text="Human-readable failure reason"
+    )
+    gateway_error_code = models.CharField(
+        max_length=50,
+        blank=True,
+        help_text="Error code from payment gateway"
+    )
+    gateway_error_message = models.TextField(
+        blank=True,
+        help_text="Error message from payment gateway"
+    )
+    
+    # Status history
+    status_history = models.JSONField(
+        default=list,
+        help_text="""
+        Payment status history: [
+            {"status": "PENDING", "timestamp": "2024-01-01T10:00:00Z"},
+            {"status": "FAILED", "timestamp": "2024-01-01T10:05:00Z", "reason": "..."}
+        ]
+        """
+    )
+    
     notes = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -314,6 +405,21 @@ class SubscriptionPayment(models.Model):
     
     def __str__(self):
         return f"{self.subscription.business.name} - {self.amount} - {self.status}"
+    
+    def save(self, *args, **kwargs):
+        # Add current status to history
+        if not self.status_history:
+            self.status_history = []
+        
+        # Only append if status changed or it's a new record
+        if not self.pk or (self.pk and self.status_history and self.status_history[-1].get('status') != self.status):
+            self.status_history.append({
+                'status': self.status,
+                'timestamp': timezone.now().isoformat(),
+                'reason': self.failure_reason or self.notes or ''
+            })
+        
+        super().save(*args, **kwargs)
 
 
 class PaymentGatewayConfig(models.Model):
@@ -566,3 +672,277 @@ class Alert(models.Model):
         self.action_taken = True
         self.action_taken_at = timezone.now()
         self.save()
+
+
+class SubscriptionPricingTier(models.Model):
+    """
+    Dynamic pricing tiers based on storefront count.
+    Allows platform admins to configure flexible pricing.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Tier definition
+    min_storefronts = models.IntegerField(
+        help_text="Minimum number of storefronts for this tier (inclusive)"
+    )
+    max_storefronts = models.IntegerField(
+        null=True,
+        blank=True,
+        help_text="Maximum number of storefronts (inclusive). NULL means unlimited."
+    )
+    
+    # Pricing
+    base_price = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="Base price for this tier in the specified currency"
+    )
+    price_per_additional_storefront = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        default=Decimal('0.00'),
+        help_text="Price per storefront beyond min_storefronts. Used for open-ended tiers."
+    )
+    currency = models.CharField(max_length=3, default='GHS')
+    
+    # Metadata
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Only active tiers are used for pricing calculation"
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Internal notes about this tier"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_pricing_tiers'
+    )
+    
+    class Meta:
+        ordering = ['min_storefronts']
+        db_table = 'subscription_pricing_tier'
+        verbose_name = 'Subscription Pricing Tier'
+        verbose_name_plural = 'Subscription Pricing Tiers'
+        indexes = [
+            models.Index(fields=['is_active', 'min_storefronts']),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                check=models.Q(max_storefronts__gte=models.F('min_storefronts')) | models.Q(max_storefronts__isnull=True),
+                name='max_storefronts_gte_min_storefronts'
+            ),
+        ]
+    
+    def __str__(self):
+        if self.max_storefronts:
+            return f"{self.min_storefronts}-{self.max_storefronts} storefronts: {self.currency} {self.base_price}"
+        else:
+            return f"{self.min_storefronts}+ storefronts: {self.currency} {self.base_price} + {self.price_per_additional_storefront}/extra"
+    
+    def applies_to_storefront_count(self, count: int) -> bool:
+        """Check if this tier applies to the given storefront count"""
+        if count < self.min_storefronts:
+            return False
+        if self.max_storefronts is None:
+            return True
+        return count <= self.max_storefronts
+    
+    def calculate_price(self, storefront_count: int) -> Decimal:
+        """Calculate the total price for the given storefront count"""
+        if not self.applies_to_storefront_count(storefront_count):
+            raise ValueError(f"This tier does not apply to {storefront_count} storefronts")
+        
+        if storefront_count <= self.min_storefronts:
+            return self.base_price
+        
+        additional_storefronts = storefront_count - self.min_storefronts
+        additional_cost = additional_storefronts * self.price_per_additional_storefront
+        
+        return self.base_price + additional_cost
+
+
+class TaxConfiguration(models.Model):
+    """
+    Configurable tax rates for different jurisdictions.
+    Supports Ghana-specific taxes (VAT, NHIL, GETFund, COVID-19 Levy, etc.)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Tax identification
+    name = models.CharField(
+        max_length=100,
+        help_text="Tax name (e.g., 'VAT', 'NHIL', 'GETFund Levy')"
+    )
+    code = models.CharField(
+        max_length=20,
+        unique=True,
+        help_text="Unique code (e.g., 'VAT_GH', 'NHIL_GH')"
+    )
+    description = models.TextField(blank=True)
+    
+    # Tax details
+    rate = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Tax rate as percentage (e.g., 15.00 for 15%)"
+    )
+    country = models.CharField(
+        max_length=2,
+        default='GH',
+        help_text="ISO 3166-1 alpha-2 country code"
+    )
+    
+    # Application rules
+    applies_to_subscriptions = models.BooleanField(
+        default=True,
+        help_text="Whether this tax applies to subscription payments"
+    )
+    is_mandatory = models.BooleanField(
+        default=True,
+        help_text="Whether this tax must be applied (cannot be opted out)"
+    )
+    calculation_order = models.IntegerField(
+        default=0,
+        help_text="Order in which tax is calculated (lower numbers first)"
+    )
+    applies_to = models.CharField(
+        max_length=20,
+        choices=[
+            ('SUBTOTAL', 'Subtotal (before other taxes)'),
+            ('CUMULATIVE', 'Cumulative (including previous taxes)'),
+        ],
+        default='SUBTOTAL',
+        help_text="What amount to apply the tax to"
+    )
+    
+    # Status and validity
+    is_active = models.BooleanField(default=True)
+    effective_from = models.DateField(
+        help_text="Date from which this tax rate is effective"
+    )
+    effective_until = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Date until which this tax rate is effective (NULL = indefinite)"
+    )
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_tax_configs'
+    )
+    
+    class Meta:
+        ordering = ['calculation_order', 'name']
+        db_table = 'tax_configuration'
+        verbose_name = 'Tax Configuration'
+        verbose_name_plural = 'Tax Configurations'
+        indexes = [
+            models.Index(fields=['is_active', 'effective_from', 'effective_until']),
+            models.Index(fields=['country', 'is_active']),
+        ]
+    
+    def __str__(self):
+        return f"{self.name} ({self.rate}%) - {self.country}"
+    
+    def is_effective(self, date=None) -> bool:
+        """Check if this tax is effective on the given date"""
+        from datetime import date as date_module
+        check_date = date or date_module.today()
+        
+        if check_date < self.effective_from:
+            return False
+        
+        if self.effective_until and check_date > self.effective_until:
+            return False
+        
+        return True
+    
+    def calculate_amount(self, base_amount: Decimal) -> Decimal:
+        """Calculate tax amount for given base amount"""
+        return (base_amount * self.rate) / Decimal('100')
+
+
+class ServiceCharge(models.Model):
+    """
+    Configurable service charges (e.g., payment gateway fees, processing fees)
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Charge identification
+    name = models.CharField(max_length=100)
+    code = models.CharField(max_length=20, unique=True)
+    description = models.TextField(blank=True)
+    
+    # Charge details
+    charge_type = models.CharField(
+        max_length=20,
+        choices=[
+            ('PERCENTAGE', 'Percentage of amount'),
+            ('FIXED', 'Fixed amount'),
+        ]
+    )
+    amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        help_text="For PERCENTAGE: rate as percentage (e.g., 2.00 for 2%). For FIXED: absolute amount."
+    )
+    currency = models.CharField(max_length=3, default='GHS')
+    
+    # Application
+    applies_to = models.CharField(
+        max_length=20,
+        choices=[
+            ('SUBTOTAL', 'Subtotal (before tax)'),
+            ('TOTAL', 'Total (after tax)'),
+        ],
+        default='SUBTOTAL'
+    )
+    payment_gateway = models.CharField(
+        max_length=20,
+        choices=[
+            ('ALL', 'All gateways'),
+            ('PAYSTACK', 'Paystack only'),
+            ('STRIPE', 'Stripe only'),
+            ('MOMO', 'Mobile Money only'),
+        ],
+        default='ALL',
+        help_text="Which payment gateways this charge applies to"
+    )
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='created_service_charges'
+    )
+    
+    class Meta:
+        db_table = 'service_charge'
+        ordering = ['name']
+    
+    def __str__(self):
+        if self.charge_type == 'PERCENTAGE':
+            return f"{self.name}: {self.amount}%"
+        return f"{self.name}: {self.currency} {self.amount}"
+    
+    def calculate_amount(self, base_amount: Decimal) -> Decimal:
+        """Calculate service charge amount"""
+        if self.charge_type == 'PERCENTAGE':
+            return (base_amount * self.amount) / Decimal('100')
+        return self.amount

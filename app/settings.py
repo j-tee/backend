@@ -217,8 +217,15 @@ CELERY_TIMEZONE = 'UTC'
 # Payment Gateway Settings
 STRIPE_PUBLIC_KEY = ''
 STRIPE_SECRET_KEY = ''
-PAYSTACK_PUBLIC_KEY = ''
-PAYSTACK_SECRET_KEY = ''
+
+# Paystack Configuration (Shared ALPHALOGIQUE account with app_name routing)
+# Keys must be set in environment variables (.env file)
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY')
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY')
+PAYSTACK_APP_NAME = config('PAYSTACK_APP_NAME', default='pos')
+
+# Frontend URL (for payment callbacks)
+FRONTEND_URL = config('FRONTEND_URL', default='http://localhost:5173')
 
 # Custom user model
 AUTH_USER_MODEL = 'accounts.User'
