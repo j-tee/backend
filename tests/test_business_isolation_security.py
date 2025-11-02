@@ -21,6 +21,7 @@ from inventory.models import (
     StoreFront, Warehouse, Product, Stock, StockProduct,
     BusinessStoreFront, BusinessWarehouse, Category, Supplier
 )
+from tests.utils import ensure_active_subscription
 
 
 class BusinessIsolationSecurityTest(TestCase):
@@ -163,6 +164,10 @@ class BusinessIsolationSecurityTest(TestCase):
             business=self.business2,
             name='Supplier B'
         )
+        
+        # Ensure both businesses have active subscriptions for tests
+        ensure_active_subscription(self.business1)
+        ensure_active_subscription(self.business2)
         
         # API clients
         self.client1 = APIClient()
@@ -391,6 +396,10 @@ class BusinessIsolationStockTest(TestCase):
             quantity=200,
             retail_price=200.00
         )
+        
+        # Ensure both businesses have active subscriptions for tests
+        ensure_active_subscription(self.business1)
+        ensure_active_subscription(self.business2)
         
         self.client1 = APIClient()
         self.client1.force_authenticate(user=self.user1)

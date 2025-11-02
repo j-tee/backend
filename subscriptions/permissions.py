@@ -356,11 +356,19 @@ class RequiresSubscriptionForInventoryModification(permissions.BasePermission):
         if not request.user or not request.user.is_authenticated:
             return False
         
-        # Must have a business
-        business = getattr(request.user, 'business', None)
-        if not business:
+        # Get business from user's active membership
+        from accounts.models import BusinessMembership
+        
+        membership = BusinessMembership.objects.filter(
+            user=request.user,
+            is_active=True
+        ).first()
+        
+        if not membership:
             self.message = "User must be associated with a business."
             return False
+        
+        business = membership.business
         
         # Allow read-only access without subscription
         if request.method in permissions.SAFE_METHODS:
