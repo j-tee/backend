@@ -23,7 +23,8 @@ from subscriptions.models import (
     SubscriptionPricingTier, TaxConfiguration, ServiceCharge
 )
 from subscriptions.views import SubscriptionViewSet
-from accounts.models import Business, BusinessMembership, StoreFront
+from accounts.models import Business, BusinessMembership
+from inventory.models import StoreFront
 
 User = get_user_model()
 
