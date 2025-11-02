@@ -6,6 +6,7 @@ Tests Task 1 (Reference IDs) and Task 2 (Warehouse UUIDs)
 import os
 import django
 import re
+import uuid
 from decimal import Decimal
 
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'app.settings')
@@ -43,19 +44,27 @@ class Priority1VerificationTestCase(TestCase):
             # Create a superuser for testing (User model uses email, not username)
             self.user = User.objects.create_superuser(
                 email='admin@test.com',
-                password='testpass123'
+                password='testpass123',
+                name='Admin User'
             )
-        
-        self.business = self.user.businesses.first() if hasattr(self.user, 'businesses') else Business.objects.first()
-        if not self.business:
-            # Create a test business
+
+        membership = getattr(self.user, 'business_memberships', None)
+        membership = membership.filter(is_active=True).select_related('business').first() if membership else None
+        owned_business = self.user.owned_businesses.first() if hasattr(self.user, 'owned_businesses') else None
+
+        if membership:
+            self.business = membership.business
+        elif owned_business:
+            self.business = owned_business
+        else:
+            # Create a test business with the superuser as owner
             self.business = Business.objects.create(
+                owner=self.user,
                 name='Test Business',
-                business_type='retail',
-                currency='USD'
+                tin=f'TIN-{uuid.uuid4().hex[:12]}',
+                email='admin@test.com',
+                address='123 Admin Street'
             )
-            self.user.business = self.business
-            self.user.save()
         
         print(f"\n✓ Using business: {self.business.name} ({self.business.id})")
         print(f"✓ Using user: {self.user.email}")
@@ -67,7 +76,7 @@ class Priority1VerificationTestCase(TestCase):
         uuid_pattern = re.compile(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I)
         return bool(uuid_pattern.match(str(value)))
     
-    def test_result(self, test_name, passed, details=""):
+    def _record_result(self, test_name, passed, details=""):
         """Print test result"""
         status = "✅" if passed else "❌"
         print(f"\n{status} {test_name}")
@@ -106,13 +115,13 @@ class Priority1VerificationTestCase(TestCase):
         # Test Sale Movements
         sale_movements = [m for m in movements if m.get('type') == 'sale']
         if sale_movements:
-            self.test_result(
+            self._record_result(
                 "Test 1a: Sale Movement Reference IDs",
                 all(m.get('sale_id') and self.is_uuid(m['sale_id']) for m in sale_movements),
                 f"Found {len(sale_movements)} sale movements with sale_id field"
             )
             
-            self.test_result(
+            self._record_result(
                 "Test 1b: Sale Warehouse UUIDs",
                 all(m.get('warehouse_id') and self.is_uuid(m['warehouse_id']) for m in sale_movements),
                 f"All sale movements have warehouse_id as UUID"
@@ -130,13 +139,13 @@ class Priority1VerificationTestCase(TestCase):
         # Test Adjustment Movements
         adjustment_movements = [m for m in movements if m.get('type') in ('adjustment', 'shrinkage')]
         if adjustment_movements:
-            self.test_result(
+            self._record_result(
                 "Test 1c: Adjustment Movement Reference IDs",
                 all(m.get('adjustment_id') and self.is_uuid(m['adjustment_id']) for m in adjustment_movements),
                 f"Found {len(adjustment_movements)} adjustment movements with adjustment_id field"
             )
             
-            self.test_result(
+            self._record_result(
                 "Test 1d: Adjustment Warehouse UUIDs",
                 all(m.get('warehouse_id') and self.is_uuid(m['warehouse_id']) for m in adjustment_movements),
                 f"All adjustment movements have warehouse_id as UUID"
@@ -154,13 +163,13 @@ class Priority1VerificationTestCase(TestCase):
         # Test Transfer Movements
         transfer_movements = [m for m in movements if m.get('type') == 'transfer']
         if transfer_movements:
-            self.test_result(
+            self._record_result(
                 "Test 1e: Transfer Movement Reference IDs",
                 all(m.get('transfer_id') and self.is_uuid(m['transfer_id']) for m in transfer_movements),
                 f"Found {len(transfer_movements)} transfer movements with transfer_id field"
             )
             
-            self.test_result(
+            self._record_result(
                 "Test 1f: Transfer Warehouse UUIDs",
                 all(m.get('warehouse_id') and self.is_uuid(m['warehouse_id']) for m in transfer_movements),
                 f"All transfer movements have warehouse_id as UUID"
@@ -202,7 +211,7 @@ class Priority1VerificationTestCase(TestCase):
             if movements_data:
                 # Test 2a: All reference_ids are UUIDs
                 all_ref_ids_uuid = all(self.is_uuid(m.get('reference_id')) for m in movements_data)
-                self.test_result(
+                self._record_result(
                     "Test 2a: All reference_id values are UUIDs",
                     all_ref_ids_uuid,
                     f"Checked {len(movements_data)} movements"
@@ -210,7 +219,7 @@ class Priority1VerificationTestCase(TestCase):
                 
                 # Test 2b: All warehouse_ids are UUIDs
                 all_wh_ids_uuid = all(self.is_uuid(m.get('warehouse_id')) for m in movements_data)
-                self.test_result(
+                self._record_result(
                     "Test 2b: All warehouse_id values are UUIDs",
                     all_wh_ids_uuid,
                     f"Checked {len(movements_data)} movements"
@@ -218,7 +227,7 @@ class Priority1VerificationTestCase(TestCase):
                 
                 # Test 2c: warehouse_id != warehouse_name
                 no_name_as_id = all(m.get('warehouse_id') != m.get('warehouse_name') for m in movements_data if m.get('warehouse_id'))
-                self.test_result(
+                self._record_result(
                     "Test 2c: warehouse_id ≠ warehouse_name (old bug fixed)",
                     no_name_as_id,
                     "No longer using warehouse name as ID"
@@ -226,7 +235,7 @@ class Priority1VerificationTestCase(TestCase):
                 
                 # Test 2d: reference_id != movement_id
                 ref_not_movement = all(m.get('reference_id') != m.get('movement_id') for m in movements_data if m.get('reference_id'))
-                self.test_result(
+                self._record_result(
                     "Test 2d: reference_id ≠ movement_id (points to source)",
                     ref_not_movement,
                     "References point to actual source records"
