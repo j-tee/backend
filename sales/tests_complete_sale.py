@@ -17,6 +17,7 @@ from inventory.models import (
     StoreFrontInventory,
 )
 from sales.models import Sale, SaleItem, Customer, StockReservation
+from tests.utils import ensure_active_subscription
 
 
 User = get_user_model()
@@ -48,6 +49,7 @@ class CompleteSaleEndpointTest(APITestCase):
             },
         )
         self.user.business = self.business
+        ensure_active_subscription(self.business)
 
         self.category = Category.objects.create(name="Beverages")
         self.customer = Customer.objects.create(

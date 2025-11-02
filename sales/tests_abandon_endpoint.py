@@ -17,6 +17,7 @@ from inventory.models import (
 )
 from sales.models import Sale, SaleItem, StockReservation
 from django.contrib.auth import get_user_model
+from tests.utils import ensure_active_subscription
 
 
 User = get_user_model()
@@ -49,6 +50,7 @@ class SaleAbandonEndpointTestCase(APITestCase):
         )
         # Attach primary business attribute expected by subscription permission
         self.user.business = self.business
+        ensure_active_subscription(self.business)
 
         self.storefront = StoreFront.objects.create(
             user=self.user,
