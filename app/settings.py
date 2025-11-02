@@ -220,8 +220,8 @@ STRIPE_SECRET_KEY = ''
 
 # Paystack Configuration (Shared ALPHALOGIQUE account with app_name routing)
 # Keys must be set in environment variables (.env file)
-PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY')
-PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY')
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
 PAYSTACK_APP_NAME = config('PAYSTACK_APP_NAME', default='pos')
 
 # Frontend URL (for payment callbacks)
