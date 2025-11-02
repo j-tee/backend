@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Business
+from accounts.models import Business, BusinessMembership
 from inventory.models import (
     BusinessStoreFront,
     Category,
@@ -36,6 +36,16 @@ class SaleAbandonEndpointTestCase(APITestCase):
             email="reservation@example.com",
             address="123 Reservation Ave",
         )
+        
+        # Create business membership for permission access
+        BusinessMembership.objects.create(
+            business=self.business,
+            user=self.user,
+            role=BusinessMembership.OWNER,
+            is_admin=True,
+            is_active=True
+        )
+        
         self.storefront = StoreFront.objects.create(
             user=self.user,
             name="Reservation Store",

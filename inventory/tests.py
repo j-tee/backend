@@ -1107,7 +1107,7 @@ class StockReconciliationAPITest(BusinessTestMixin, APITestCase):
 		BusinessMembership.objects.get_or_create(
 			business=self.business,
 			user=self.owner,
-			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True, 'is_active': True}
 		)
 
 		self.category = Category.objects.create(name='Reconciliation Gadgets')
