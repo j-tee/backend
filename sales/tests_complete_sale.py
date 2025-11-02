@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Business
+from accounts.models import Business, BusinessMembership
 from inventory.models import (
     Category,
     Product,
@@ -36,6 +36,16 @@ class CompleteSaleEndpointTest(APITestCase):
             email="biz@example.com",
             address="123 Test Lane"
         )
+        
+        # Create business membership for permission access
+        BusinessMembership.objects.create(
+            business=self.business,
+            user=self.user,
+            role=BusinessMembership.OWNER,
+            is_admin=True,
+            is_active=True
+        )
+        
         self.category = Category.objects.create(name="Beverages")
         self.customer = Customer.objects.create(
             business=self.business,
