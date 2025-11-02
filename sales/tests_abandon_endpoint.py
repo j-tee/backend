@@ -5,7 +5,7 @@ from django.utils import timezone
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Business
+from accounts.models import Business, BusinessMembership
 from inventory.models import (
     BusinessStoreFront,
     Category,
@@ -17,6 +17,7 @@ from inventory.models import (
 )
 from sales.models import Sale, SaleItem, StockReservation
 from django.contrib.auth import get_user_model
+from tests.utils import ensure_active_subscription
 
 
 User = get_user_model()
@@ -36,6 +37,21 @@ class SaleAbandonEndpointTestCase(APITestCase):
             email="reservation@example.com",
             address="123 Reservation Ave",
         )
+
+        # Ensure business membership exists and is active for permission checks
+        BusinessMembership.objects.update_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={
+                "role": BusinessMembership.OWNER,
+                "is_admin": True,
+                "is_active": True,
+            },
+        )
+        # Attach primary business attribute expected by subscription permission
+        self.user.business = self.business
+        ensure_active_subscription(self.business)
+
         self.storefront = StoreFront.objects.create(
             user=self.user,
             name="Reservation Store",

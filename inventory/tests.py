@@ -1104,11 +1104,12 @@ class StockReconciliationAPITest(BusinessTestMixin, APITestCase):
 		self.owner.is_active = True
 		self.owner.save(update_fields=['account_type', 'is_active'])
 
-		BusinessMembership.objects.get_or_create(
+		BusinessMembership.objects.update_or_create(
 			business=self.business,
 			user=self.owner,
-			defaults={'role': BusinessMembership.OWNER, 'is_admin': True}
+			defaults={'role': BusinessMembership.OWNER, 'is_admin': True, 'is_active': True}
 		)
+		self.owner.business = self.business
 
 		self.category = Category.objects.create(name='Reconciliation Gadgets')
 		self.product = Product.objects.create(

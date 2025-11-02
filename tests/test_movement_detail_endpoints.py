@@ -17,6 +17,7 @@ from inventory.stock_adjustments import StockAdjustment
 from inventory.transfer_models import Transfer, TransferItem
 from inventory.models import StoreFront, BusinessStoreFront
 from sales.models import Customer, Sale, SaleItem
+from tests.utils import ensure_active_subscription
 
 
 User = get_user_model()
@@ -40,7 +41,18 @@ class MovementDetailEndpointsTests(TestCase):
             owner=self.user,
             is_active=True
         )
-        # Membership is automatically created by Business.save() signal
+        # Ensure membership is active (create if signal didn't or update if needed)
+        BusinessMembership.objects.update_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={
+                'role': BusinessMembership.OWNER,
+                'is_admin': True,
+                'is_active': True
+            }
+        )
+        self.user.business = self.business
+        ensure_active_subscription(self.business)
 
         # Create test data
         self.category = Category.objects.create(name='Test Category')

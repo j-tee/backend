@@ -5,7 +5,7 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase
 
-from accounts.models import Business
+from accounts.models import Business, BusinessMembership
 from inventory.models import (
     Category,
     Product,
@@ -17,6 +17,7 @@ from inventory.models import (
     StoreFrontInventory,
 )
 from sales.models import Sale, SaleItem, Customer, StockReservation
+from tests.utils import ensure_active_subscription
 
 
 User = get_user_model()
@@ -36,6 +37,20 @@ class CompleteSaleEndpointTest(APITestCase):
             email="biz@example.com",
             address="123 Test Lane"
         )
+
+        # Ensure business membership exists and is active for permission checks
+        BusinessMembership.objects.update_or_create(
+            business=self.business,
+            user=self.user,
+            defaults={
+                "role": BusinessMembership.OWNER,
+                "is_admin": True,
+                "is_active": True,
+            },
+        )
+        self.user.business = self.business
+        ensure_active_subscription(self.business)
+
         self.category = Category.objects.create(name="Beverages")
         self.customer = Customer.objects.create(
             business=self.business,
