@@ -4,21 +4,99 @@ from django.utils.html import format_html
 from .models import (
     Role,
     User,
+    UserRole,
     UserProfile,
     AuditLog,
     Business,
     BusinessMembership,
     BusinessInvitation,
     EmailVerificationToken,
+    Permission,
+    RoleTemplate,
 )
 
 
 @admin.register(Role)
 class RoleAdmin(admin.ModelAdmin):
-    list_display = ['name', 'description', 'created_at']
+    list_display = ['name', 'level', 'description', 'is_system_role', 'is_active', 'created_at']
+    list_filter = ['level', 'is_system_role', 'is_active']
+    search_fields = ['name', 'description']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    filter_horizontal = ['permissions']
+    ordering = ['level', 'name']
+    
+    fieldsets = (
+        (None, {'fields': ('name', 'description', 'level')}),
+        ('Permissions', {'fields': ('permissions',)}),
+        ('Status', {'fields': ('is_system_role', 'is_active')}),
+        ('Metadata', {'fields': ('id', 'created_at', 'updated_at')}),
+    )
+
+
+@admin.register(Permission)
+class PermissionAdmin(admin.ModelAdmin):
+    list_display = ['name', 'codename', 'category', 'action', 'resource', 'is_active']
+    list_filter = ['category', 'action', 'is_active']
+    search_fields = ['name', 'codename', 'description']
+    readonly_fields = ['id', 'created_at', 'updated_at']
+    ordering = ['category', 'resource', 'action']
+    
+    fieldsets = (
+        (None, {'fields': ('name', 'codename', 'description')}),
+        ('Classification', {'fields': ('category', 'action', 'resource')}),
+        ('Status', {'fields': ('is_active',)}),
+        ('Metadata', {'fields': ('id', 'created_at', 'updated_at')}),
+    )
+
+
+@admin.register(UserRole)
+class UserRoleAdmin(admin.ModelAdmin):
+    list_display = ['user', 'role', 'scope', 'business', 'storefront', 'is_active', 'assigned_at', 'expires_at']
+    list_filter = ['scope', 'is_active', 'role__name', 'assigned_at']
+    search_fields = ['user__email', 'user__name', 'role__name', 'business__name']
+    readonly_fields = ['id', 'assigned_at', 'is_expired']
+    autocomplete_fields = ['user', 'role', 'business', 'storefront', 'assigned_by']
+    ordering = ['-assigned_at']
+    
+    fieldsets = (
+        (None, {'fields': ('user', 'role')}),
+        ('Scope', {'fields': ('scope', 'business', 'storefront')}),
+        ('Status', {'fields': ('is_active', 'assigned_at', 'expires_at', 'is_expired')}),
+        ('Assignment', {'fields': ('assigned_by',)}),
+        ('Metadata', {'fields': ('id',)}),
+    )
+    
+    def is_expired(self, obj):
+        return obj.is_expired
+    is_expired.boolean = True
+    is_expired.short_description = 'Expired'
+
+
+@admin.register(RoleTemplate)
+class RoleTemplateAdmin(admin.ModelAdmin):
+    list_display = ['name', 'level', 'is_active', 'created_at']
+    list_filter = ['level', 'is_active']
     search_fields = ['name', 'description']
     readonly_fields = ['id', 'created_at', 'updated_at']
     ordering = ['name']
+    
+    fieldsets = (
+        (None, {'fields': ('name', 'description', 'level')}),
+        ('Permissions', {'fields': ('permission_codenames',)}),
+        ('Status', {'fields': ('is_active',)}),
+        ('Metadata', {'fields': ('id', 'created_at', 'updated_at')}),
+    )
+    
+    actions = ['create_roles_from_templates']
+    
+    def create_roles_from_templates(self, request, queryset):
+        """Action to create roles from selected templates"""
+        created = 0
+        for template in queryset:
+            role = template.create_role()
+            created += 1
+        self.message_user(request, f"Successfully created {created} roles from templates.")
+    create_roles_from_templates.short_description = "Create roles from selected templates"
 
 
 class UserProfileInline(admin.StackedInline):
