@@ -143,15 +143,9 @@ class SubscriptionChecker:
             # Use plan's max_storefronts
             max_storefronts = getattr(subscription.plan, 'max_storefronts', 1)
         
-        # Count current storefronts for users in this business
-        from inventory.models import StoreFront
-        from accounts.models import BusinessMembership
-        
-        # Get all users who are members of this business
-        business_users = BusinessMembership.objects.filter(business=business).values_list('user_id', flat=True)
-        
-        # Count storefronts owned by business members
-        current_count = StoreFront.objects.filter(user_id__in=business_users).count()
+        # Count current storefronts for this business
+        # Count storefronts linked to this business via business_storefronts table
+        current_count = business.business_storefronts.filter(is_active=True).count()
         
         result = {
             'max_storefronts': max_storefronts,
