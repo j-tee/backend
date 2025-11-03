@@ -4,10 +4,11 @@ Handles serialization/deserialization of subscription data
 """
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
+from decimal import Decimal
 import logging
 
 from .models import (
-    SubscriptionPlan,
+    SubscriptionPlan,  # DEPRECATED - kept for backward compatibility
     Subscription,
     SubscriptionPayment,
     PaymentGatewayConfig,
@@ -25,7 +26,11 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
-    """Serializer for subscription plans"""
+    """
+    DEPRECATED: This serializer is deprecated.
+    Use SubscriptionPricingTier for dynamic pricing instead.
+    Kept only for backward compatibility.
+    """
     billing_cycle_display = serializers.SerializerMethodField()
     features_display = serializers.SerializerMethodField()
     is_popular = serializers.BooleanField(read_only=True)
@@ -161,9 +166,20 @@ class SubscriptionDetailSerializer(serializers.ModelSerializer):
 
 
 class SubscriptionCreateSerializer(serializers.ModelSerializer):
-    """Serializer for creating new subscriptions"""
-    plan_id = serializers.UUIDField(required=True, write_only=True)
-    business_id = serializers.UUIDField(required=True, write_only=True)  # Business is required
+    """
+    Serializer for creating new subscriptions with auto-calculated pricing.
+    
+    NEW SECURE SYSTEM:
+    - plan_id is OPTIONAL (deprecated, kept for backward compatibility)
+    - If plan_id is provided, it's IGNORED
+    - System auto-detects storefront count
+    - System auto-calculates price from SubscriptionPricingTier
+    - User CANNOT manipulate pricing
+    
+    Request body can be EMPTY {} - backend does everything.
+    """
+    plan_id = serializers.UUIDField(required=False, write_only=True, allow_null=True)
+    business_id = serializers.UUIDField(required=False, write_only=True, allow_null=True)
     
     class Meta:
         model = Subscription
@@ -175,30 +191,43 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'status', 'payment_status', 'amount', 'start_date', 'end_date']
     
     def validate_plan_id(self, value):
-        """Validate that plan exists and is active"""
-        try:
-            plan = SubscriptionPlan.objects.get(id=value)
-            if not plan.is_active:
-                raise serializers.ValidationError("Selected plan is not active")
-            return value
-        except SubscriptionPlan.DoesNotExist:
-            raise serializers.ValidationError("Invalid plan selected")
+        """
+        DEPRECATED: plan_id is ignored.
+        Kept for backward compatibility but does nothing.
+        """
+        if value:
+            logger.warning(f"plan_id {value} provided but will be ignored - using auto-calculated pricing")
+        return None  # Always return None to ignore plan selection
     
     def validate_business_id(self, value):
-        """Validate that business exists and user is a member"""
-        if not value:
-            raise serializers.ValidationError("business_id is required")
-        
+        """
+        Validate that business exists and user is a member.
+        If not provided, auto-detect from user's memberships.
+        """
         from accounts.models import Business
+        
+        request = self.context.get('request')
+        
+        # If business_id not provided, get from user's memberships
+        if not value:
+            if not request or not request.user:
+                raise serializers.ValidationError("Authentication required")
+            
+            user_business_ids = request.user.business_memberships.values_list('business_id', flat=True)
+            if not user_business_ids:
+                raise serializers.ValidationError("You must be a member of a business to subscribe")
+            
+            # Use first business (users typically belong to one)
+            value = user_business_ids[0]
+        
         try:
             business = Business.objects.get(id=value)
+            
             # Check if user is a member of the business
-            request = self.context.get('request')
-            if request and not business.memberships.filter(user=request.user).exists():
+            if request and not business.memberships.filter(user=request.user).exists() and not request.user.is_staff:
                 raise serializers.ValidationError("You don't have permission to subscribe for this business")
             
             # Check if business already has an ACTIVE or PAID subscription
-            # Allow creating new subscription if existing one is INACTIVE/PENDING (failed payment)
             if hasattr(business, 'subscription') and business.subscription:
                 existing_sub = business.subscription
                 
@@ -208,13 +237,10 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
                         'business_id': "This business already has an active subscription.",
                         'detail': "You already have an active subscription. Please go to 'My Subscriptions' to manage or upgrade your plan.",
                         'existing_subscription_id': str(existing_sub.id),
-                        'plan_name': existing_sub.plan.name if existing_sub.plan else 'Unknown'
+                        'plan_name': existing_sub.plan.name if existing_sub.plan else 'Auto-calculated'
                     })
                 
                 # If subscription exists but is not ACTIVE+PAID, delete it to allow new attempt
-                # This handles cases where previous payment failed or was never completed
-                # Payment status can be: PAID, PENDING, FAILED, OVERDUE, CANCELLED
-                # Status can be: TRIAL, ACTIVE, PAST_DUE, INACTIVE, CANCELLED, SUSPENDED, EXPIRED
                 if existing_sub.payment_status in ['PENDING', 'FAILED', 'OVERDUE', 'CANCELLED']:
                     logger.warning(
                         f"Deleting incomplete subscription {existing_sub.id} for business {business.id} "
@@ -233,61 +259,106 @@ class SubscriptionCreateSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("Invalid business selected")
     
     def create(self, validated_data):
-        """Create subscription with proper initialization"""
+        """
+        Create subscription with AUTO-CALCULATED pricing.
+        
+        NEW SECURE SYSTEM:
+        1. Get user's business (from validated business_id)
+        2. Count active storefronts
+        3. Find matching SubscriptionPricingTier
+        4. Calculate price automatically
+        5. Set plan=None (old system deprecated)
+        6. Create subscription with correct amount
+        
+        User CANNOT manipulate pricing - it's all server-side.
+        """
         from django.utils import timezone
-        from datetime import timedelta
+        from datetime import timedelta, date
         from dateutil.relativedelta import relativedelta
         from accounts.models import Business
+        from django.db.models import Q
         
-        plan_id = validated_data.pop('plan_id')
-        business_id = validated_data.pop('business_id')
+        # Get plan_id and business_id (may be None)
+        plan_id = validated_data.pop('plan_id', None)
+        business_id = validated_data.pop('business_id', None)
         
-        plan = SubscriptionPlan.objects.get(id=plan_id)
         user = self.context['request'].user
+        
+        # If business_id not provided, get from user
+        if not business_id:
+            user_business_ids = user.business_memberships.values_list('business_id', flat=True)
+            if not user_business_ids:
+                raise serializers.ValidationError("You must be a member of a business to subscribe")
+            business_id = user_business_ids[0]
+        
         business = Business.objects.get(id=business_id)
         
-        # Determine trial settings
-        is_trial = validated_data.get('is_trial', True)
-        trial_end_date = None
+        # 1. Count active storefronts
+        storefront_count = business.business_storefronts.filter(is_active=True).count()
+        
+        if storefront_count == 0:
+            raise serializers.ValidationError({
+                'storefront_count': 'You must have at least one active storefront to subscribe'
+            })
+        
+        # 2. Find applicable pricing tier
+        tier = SubscriptionPricingTier.objects.filter(
+            is_active=True,
+            min_storefronts__lte=storefront_count
+        ).filter(
+            Q(max_storefronts__gte=storefront_count) | Q(max_storefronts__isnull=True)
+        ).first()
+        
+        if not tier:
+            raise serializers.ValidationError({
+                'pricing': f'No pricing tier found for {storefront_count} storefronts'
+            })
+        
+        # 3. Calculate price
+        base_price = tier.calculate_price(storefront_count)
+        
+        # 4. Calculate taxes
+        total_tax = Decimal('0.00')
+        active_taxes = TaxConfiguration.objects.filter(
+            is_active=True,
+            applies_to_subscriptions=True,
+            effective_from__lte=date.today()
+        ).filter(
+            Q(effective_until__gte=date.today()) | Q(effective_until__isnull=True)
+        ).order_by('calculation_order')
+        
+        for tax in active_taxes:
+            tax_amount = tax.calculate_amount(base_price)
+            total_tax += tax_amount
+        
+        total_amount = base_price + total_tax
+        
+        # 5. Set subscription dates
         start_date = timezone.now().date()
+        end_date = start_date + relativedelta(months=1)  # Always monthly for now
         
-        if is_trial and plan.trial_period_days > 0:
-            trial_end_date = start_date + timedelta(days=plan.trial_period_days)
-            end_date = trial_end_date
-            status = 'TRIAL'
-            payment_status = 'PENDING'
-        else:
-            is_trial = False
-            # Calculate end date based on billing cycle
-            if plan.billing_cycle == 'MONTHLY':
-                end_date = start_date + relativedelta(months=1)
-            elif plan.billing_cycle == 'QUARTERLY':
-                end_date = start_date + relativedelta(months=3)
-            elif plan.billing_cycle == 'YEARLY':
-                end_date = start_date + relativedelta(years=1)
-            else:
-                end_date = start_date + relativedelta(months=1)
-            
-            status = 'INACTIVE'  # Will be ACTIVE after payment
-            payment_status = 'PENDING'
-        
-        # Create subscription
+        # 6. Create subscription (plan=None - using new pricing tier system)
         subscription = Subscription.objects.create(
             business=business,
-            created_by=user,  # Track who created it
-            plan=plan,
-            amount=plan.price,
+            created_by=user,
+            plan=None,  # DEPRECATED - using SubscriptionPricingTier instead
+            amount=total_amount,
             payment_method=validated_data.get('payment_method', ''),
-            payment_status=payment_status,
-            status=status,
+            payment_status='PENDING',
+            status='INACTIVE',  # Will be ACTIVE after payment
             start_date=start_date,
             end_date=end_date,
             current_period_start=timezone.now(),
-            current_period_end=timezone.now() + timedelta(days=(end_date - start_date).days),
-            is_trial=is_trial,
-            trial_end_date=trial_end_date,
+            current_period_end=timezone.now() + timedelta(days=30),
+            is_trial=False,
+            trial_end_date=None,
             next_billing_date=end_date,
-            notes=validated_data.get('notes', '')
+            notes=f"Auto-calculated: {storefront_count} storefronts @ {tier.currency} {base_price} + taxes {total_tax}"
+        )
+        
+        logger.info(
+            f"Created subscription {subscription.id} for business {business.name}: "
+            f"{storefront_count} storefronts, {tier.currency} {total_amount}"
         )
         
         return subscription
