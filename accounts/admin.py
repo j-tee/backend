@@ -31,6 +31,28 @@ class RoleAdmin(admin.ModelAdmin):
         ('Status', {'fields': ('is_system_role', 'is_active')}),
         ('Metadata', {'fields': ('id', 'created_at', 'updated_at')}),
     )
+    
+    def has_module_permission(self, request):
+        """Only platform SUPER_ADMINs can access roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_view_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can view roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_add_permission(self, request):
+        """Only platform SUPER_ADMINs can add roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_change_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can change roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_delete_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can delete roles (except system roles)"""
+        if obj and obj.is_system_role:
+            return False  # Never allow deletion of system roles
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
 
 
 @admin.register(Permission)
@@ -47,6 +69,26 @@ class PermissionAdmin(admin.ModelAdmin):
         ('Status', {'fields': ('is_active',)}),
         ('Metadata', {'fields': ('id', 'created_at', 'updated_at')}),
     )
+    
+    def has_module_permission(self, request):
+        """Only platform SUPER_ADMINs can access permissions"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_view_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can view permissions"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_add_permission(self, request):
+        """Only platform SUPER_ADMINs can add permissions"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_change_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can change permissions"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_delete_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can delete permissions"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
 
 
 @admin.register(UserRole)
@@ -70,6 +112,26 @@ class UserRoleAdmin(admin.ModelAdmin):
         return obj.is_expired
     is_expired.boolean = True
     is_expired.short_description = 'Expired'
+    
+    def has_module_permission(self, request):
+        """Only platform SUPER_ADMINs can access this module"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_view_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can view user roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_add_permission(self, request):
+        """Only platform SUPER_ADMINs can add user roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_change_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can change user roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_delete_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can delete user roles"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
 
 
 @admin.register(RoleTemplate)
@@ -97,6 +159,26 @@ class RoleTemplateAdmin(admin.ModelAdmin):
             created += 1
         self.message_user(request, f"Successfully created {created} roles from templates.")
     create_roles_from_templates.short_description = "Create roles from selected templates"
+    
+    def has_module_permission(self, request):
+        """Only platform SUPER_ADMINs can access role templates"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_view_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can view role templates"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_add_permission(self, request):
+        """Only platform SUPER_ADMINs can add role templates"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_change_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can change role templates"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
+    
+    def has_delete_permission(self, request, obj=None):
+        """Only platform SUPER_ADMINs can delete role templates"""
+        return request.user.is_superuser or request.user.platform_role == User.PLATFORM_SUPER_ADMIN
 
 
 class UserProfileInline(admin.StackedInline):

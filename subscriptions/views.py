@@ -274,11 +274,10 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         
         try:
             # 1. Count business storefronts
-            from inventory.models import StoreFront
-            from accounts.models import BusinessMembership
+            from accounts.models import Business
             
-            business_users = BusinessMembership.objects.filter(business=subscription.business).values_list('user_id', flat=True)
-            storefront_count = StoreFront.objects.filter(user_id__in=business_users).count()
+            # Count storefronts linked to this business via business_storefronts table
+            storefront_count = subscription.business.business_storefronts.filter(is_active=True).count()
             
             # 2. Find applicable pricing tier
             tier = SubscriptionPricingTier.objects.filter(
