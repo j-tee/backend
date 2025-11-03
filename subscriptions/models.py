@@ -11,7 +11,17 @@ User = get_user_model()
 
 
 class SubscriptionPlan(models.Model):
-    """Subscription plans for the SaaS"""
+    """
+    DEPRECATED: This model is deprecated in favor of SubscriptionPricingTier.
+    
+    The old fixed-plan system allowed users to select plans, creating a security
+    vulnerability where users could choose cheaper plans than their storefront
+    count warranted.
+    
+    Use SubscriptionPricingTier for dynamic storefront-based pricing instead.
+    This model is kept only for backward compatibility with existing subscriptions.
+    Will be removed in a future version.
+    """
     BILLING_CYCLE_CHOICES = [
         ('MONTHLY', 'Monthly'),
         ('QUARTERLY', 'Quarterly'),
@@ -87,7 +97,8 @@ class Subscription(models.Model):
     business = models.OneToOneField('accounts.Business', on_delete=models.CASCADE, related_name='subscription')
     # Audit trail: Who created this subscription
     created_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True, related_name='created_subscriptions', help_text='User who created this subscription')
-    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT, related_name='subscriptions')
+    # DEPRECATED: Old plan system - kept for backward compatibility, will be removed
+    plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT, related_name='subscriptions', null=True, blank=True, help_text='DEPRECATED: Use SubscriptionPricingTier instead')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     payment_method = models.CharField(max_length=20, choices=PAYMENT_METHOD_CHOICES, blank=True)
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default='PENDING')

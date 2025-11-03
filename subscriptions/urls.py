@@ -1,7 +1,7 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from .views import (
-    SubscriptionPlanViewSet,
+    # SubscriptionPlanViewSet - REMOVED, deprecated
     SubscriptionViewSet,
     SubscriptionPaymentViewSet,
     InvoiceViewSet,
@@ -18,7 +18,7 @@ from .views import (
 )
 
 router = DefaultRouter()
-router.register(r'plans', SubscriptionPlanViewSet, basename='subscription-plan')
+# router.register(r'plans', ...) - REMOVED: Old plan system deprecated
 router.register(r'subscriptions', SubscriptionViewSet, basename='subscription')
 router.register(r'payments', SubscriptionPaymentViewSet, basename='subscription-payment')
 router.register(r'invoices', InvoiceViewSet, basename='invoice')

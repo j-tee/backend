@@ -17,7 +17,7 @@ from datetime import timedelta, datetime
 from decimal import Decimal
 
 from .models import (
-    SubscriptionPlan,
+    # SubscriptionPlan - DEPRECATED, removed from API
     Subscription,
     SubscriptionPayment,
     PaymentGatewayConfig,
@@ -30,7 +30,7 @@ from .models import (
     ServiceCharge,
 )
 from .serializers import (
-    SubscriptionPlanSerializer,
+    # SubscriptionPlanSerializer - DEPRECATED, removed from API
     SubscriptionListSerializer,
     SubscriptionDetailSerializer,
     SubscriptionCreateSerializer,
@@ -74,56 +74,8 @@ class IsBusinessOwner(permissions.BasePermission):
         return False
 
 
-class SubscriptionPlanViewSet(viewsets.ModelViewSet):
-    """
-    Viewset for viewing and managing subscription plans
-    - List and detail views are public (anyone can view active plans)
-    - Create, update, delete are platform admin only
-    """
-    queryset = SubscriptionPlan.objects.filter(is_active=True).order_by('sort_order', 'price')
-    serializer_class = SubscriptionPlanSerializer
-    
-    def get_permissions(self):
-        """
-        Public can view plans
-        Only platform admins can create/update/delete
-        """
-        if self.action in ['list', 'retrieve', 'popular', 'features']:
-            permission_classes = [AllowAny]
-        else:
-            permission_classes = [IsPlatformAdmin]
-        return [permission() for permission in permission_classes]
-    
-    def get_queryset(self):
-        """Filter active plans, unless user is admin"""
-        queryset = super().get_queryset()
-        
-        if self.request.user.is_authenticated and self.request.user.is_staff:
-            return SubscriptionPlan.objects.all().order_by('sort_order', 'price')
-        
-        return queryset
-    
-    @action(detail=False, methods=['get'])
-    def popular(self, request):
-        """Get most popular plans"""
-        plans = self.get_queryset().filter(is_popular=True)
-        serializer = self.get_serializer(plans, many=True)
-        return Response(serializer.data)
-    
-    @action(detail=True, methods=['get'])
-    def features(self, request, pk=None):
-        """Get detailed features for a plan"""
-        plan = self.get_object()
-        return Response({
-            'plan_name': plan.name,
-            'features': plan.features,
-            'max_users': plan.max_users,
-            'max_storefronts': plan.max_storefronts,
-            'max_products': plan.max_products,
-            'billing_cycle': plan.get_billing_cycle_display(),
-            'price': str(plan.price),
-            'currency': plan.currency
-        })
+# SubscriptionPlanViewSet REMOVED - Use SubscriptionPricingTier instead
+# Old plan-selection system deprecated due to security vulnerability
 
 
 class SubscriptionViewSet(viewsets.ModelViewSet):
@@ -140,14 +92,14 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         
         if user.is_staff:
             # Platform admins see all subscriptions
-            return Subscription.objects.all().select_related('plan', 'business')
+            return Subscription.objects.all().select_related('business')
         else:
             # Regular users see subscriptions for businesses they're members of
             # Get all business IDs where user is a member
             user_business_ids = user.business_memberships.values_list('business_id', flat=True)
             return Subscription.objects.filter(
                 business_id__in=user_business_ids
-            ).select_related('plan', 'business')
+            ).select_related('business')
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""

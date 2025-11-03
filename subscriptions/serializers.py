@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model
 import logging
 
 from .models import (
-    SubscriptionPlan,
+    SubscriptionPlan,  # DEPRECATED - kept for backward compatibility
     Subscription,
     SubscriptionPayment,
     PaymentGatewayConfig,
@@ -25,7 +25,11 @@ logger = logging.getLogger(__name__)
 
 
 class SubscriptionPlanSerializer(serializers.ModelSerializer):
-    """Serializer for subscription plans"""
+    """
+    DEPRECATED: This serializer is deprecated.
+    Use SubscriptionPricingTier for dynamic pricing instead.
+    Kept only for backward compatibility.
+    """
     billing_cycle_display = serializers.SerializerMethodField()
     features_display = serializers.SerializerMethodField()
     is_popular = serializers.BooleanField(read_only=True)

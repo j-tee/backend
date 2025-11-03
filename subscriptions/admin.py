@@ -6,7 +6,7 @@ from django.utils.html import format_html
 from django.urls import reverse
 from django.utils import timezone
 from .models import (
-    SubscriptionPlan,
+    # SubscriptionPlan - DEPRECATED, removed from admin
     Subscription,
     SubscriptionPayment,
     PaymentGatewayConfig,
@@ -20,46 +20,20 @@ from .models import (
 )
 
 
-@admin.register(SubscriptionPlan)
-class SubscriptionPlanAdmin(admin.ModelAdmin):
-    list_display = ['name', 'price', 'currency', 'billing_cycle', 'is_active', 'is_popular', 'active_count']
-    list_filter = ['is_active', 'is_popular', 'billing_cycle', 'currency']
-    search_fields = ['name', 'description']
-    ordering = ['sort_order', 'price']
-    
-    fieldsets = (
-        ('Basic Information', {
-            'fields': ('name', 'description', 'price', 'currency', 'billing_cycle')
-        }),
-        ('Limits', {
-            'fields': ('max_users', 'max_storefronts', 'max_products')
-        }),
-        ('Features', {
-            'fields': ('features',)
-        }),
-        ('Display Options', {
-            'fields': ('is_active', 'is_popular', 'sort_order', 'trial_period_days')
-        }),
-    )
-    
-    def active_count(self, obj):
-        """Count of active subscriptions"""
-        count = obj.subscriptions.filter(status__in=['ACTIVE', 'TRIAL']).count()
-        return format_html('<strong>{}</strong>', count)
-    active_count.short_description = 'Active Subscriptions'
+# SubscriptionPlan admin removed - use SubscriptionPricingTier instead
 
 
 @admin.register(Subscription)
 class SubscriptionAdmin(admin.ModelAdmin):
-    list_display = ['user_link', 'business_link', 'plan', 'status', 'payment_status', 'amount', 'end_date', 'days_remaining']
-    list_filter = ['status', 'payment_status', 'is_trial', 'auto_renew', 'plan', 'created_at']
-    search_fields = ['user__username', 'user__email', 'business__name', 'plan__name']
+    list_display = ['user_link', 'business_link', 'status', 'payment_status', 'amount', 'end_date', 'days_remaining']
+    list_filter = ['status', 'payment_status', 'is_trial', 'auto_renew', 'created_at']
+    search_fields = ['user__username', 'user__email', 'business__name']
     readonly_fields = ['created_at', 'updated_at', 'current_period_start', 'current_period_end']
     date_hierarchy = 'created_at'
     
     fieldsets = (
         ('Subscription Info', {
-            'fields': ('user', 'business', 'plan', 'amount', 'status', 'payment_status')
+            'fields': ('user', 'business', 'amount', 'status', 'payment_status')
         }),
         ('Billing Period', {
             'fields': ('start_date', 'end_date', 'current_period_start', 'current_period_end', 'next_billing_date')
@@ -141,7 +115,8 @@ class SubscriptionPaymentAdmin(admin.ModelAdmin):
     def subscription_link(self, obj):
         """Link to subscription admin"""
         url = reverse('admin:subscriptions_subscription_change', args=[obj.subscription.id])
-        return format_html('<a href="{}">{}</a>', url, f'{obj.subscription.user.username} - {obj.subscription.plan.name}')
+        business_name = obj.subscription.business.name if obj.subscription.business else obj.subscription.user.username
+        return format_html('<a href="{}">{}</a>', url, f'{obj.subscription.user.username} - {business_name}')
     subscription_link.short_description = 'Subscription'
 
 
@@ -241,7 +216,8 @@ class InvoiceAdmin(admin.ModelAdmin):
     def subscription_link(self, obj):
         """Link to subscription"""
         url = reverse('admin:subscriptions_subscription_change', args=[obj.subscription.id])
-        return format_html('<a href="{}">{}</a>', url, f'{obj.subscription.user.username} - {obj.subscription.plan.name}')
+        business_name = obj.subscription.business.name if obj.subscription.business else obj.subscription.user.username
+        return format_html('<a href="{}">{}</a>', url, business_name)
     subscription_link.short_description = 'Subscription'
     
     def amount_display(self, obj):
