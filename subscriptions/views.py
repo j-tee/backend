@@ -190,6 +190,124 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         serializer = SubscriptionDetailSerializer(subscriptions, many=True)
         return Response(serializer.data)
     
+    @action(detail=False, methods=['get'], url_path='my-pricing')
+    def my_pricing(self, request):
+        """
+        Get subscription pricing for current user's business.
+        
+        This endpoint auto-detects the user's business, counts storefronts,
+        finds the appropriate pricing tier, calculates all taxes and fees,
+        and returns the complete pricing breakdown.
+        
+        Frontend displays this price - user CANNOT select a plan.
+        
+        Returns:
+            - business_name: Name of user's business
+            - business_id: UUID of business
+            - storefront_count: Number of active storefronts
+            - base_price: Price before taxes
+            - taxes: Array of tax breakdowns
+            - total_tax: Sum of all taxes
+            - total_amount: Final amount to charge
+            - currency: GHS, USD, etc.
+            - tier_description: Human-readable tier info
+        """
+        from datetime import date
+        from accounts.models import Business
+        
+        # 1. Get user's business
+        # Check if user has business memberships
+        user_business_ids = request.user.business_memberships.values_list('business_id', flat=True)
+        
+        if not user_business_ids:
+            return Response(
+                {
+                    'error': 'No business found for user',
+                    'code': 'NO_BUSINESS',
+                    'detail': 'You must be a member of a business to subscribe'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # Get first business (users typically belong to one business)
+        business_id = user_business_ids[0]
+        business = Business.objects.get(id=business_id)
+        
+        # 2. Count active storefronts
+        storefront_count = business.business_storefronts.filter(is_active=True).count()
+        
+        if storefront_count == 0:
+            return Response(
+                {
+                    'error': 'No active storefronts found',
+                    'code': 'NO_STOREFRONTS',
+                    'detail': 'You must have at least one active storefront to subscribe',
+                    'storefront_count': 0
+                },
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # 3. Find applicable pricing tier
+        tier = SubscriptionPricingTier.objects.filter(
+            is_active=True,
+            min_storefronts__lte=storefront_count
+        ).filter(
+            Q(max_storefronts__gte=storefront_count) | Q(max_storefronts__isnull=True)
+        ).first()
+        
+        if not tier:
+            return Response(
+                {
+                    'error': f'No pricing tier found for {storefront_count} storefronts',
+                    'code': 'NO_PRICING_TIER',
+                    'storefront_count': storefront_count,
+                    'detail': 'No subscription pricing tier available for your storefront count'
+                },
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        # 4. Calculate base price
+        base_price = tier.calculate_price(storefront_count)
+        
+        # 5. Calculate taxes
+        taxes = []
+        total_tax = Decimal('0.00')
+        
+        active_taxes = TaxConfiguration.objects.filter(
+            is_active=True,
+            applies_to_subscriptions=True,
+            effective_from__lte=date.today()
+        ).filter(
+            Q(effective_until__gte=date.today()) | Q(effective_until__isnull=True)
+        ).order_by('calculation_order')
+        
+        for tax in active_taxes:
+            tax_amount = tax.calculate_amount(base_price)
+            taxes.append({
+                'code': tax.code,
+                'name': tax.name,
+                'rate': float(tax.rate),
+                'amount': str(tax_amount)
+            })
+            total_tax += tax_amount
+        
+        # 6. Calculate total
+        total_amount = base_price + total_tax
+        
+        # 7. Return complete pricing breakdown
+        return Response({
+            'business_name': business.name,
+            'business_id': str(business.id),
+            'storefront_count': storefront_count,
+            'currency': tier.currency,
+            'base_price': str(base_price),
+            'taxes': taxes,
+            'total_tax': str(total_tax),
+            'total_amount': str(total_amount),
+            'billing_cycle': 'MONTHLY',
+            'tier_description': str(tier)
+        }, status=status.HTTP_200_OK)
+    
     @action(detail=True, methods=['post'])
     def initialize_payment(self, request, pk=None):
         """
