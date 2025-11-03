@@ -13,7 +13,10 @@ from .models import (
     WebhookEvent,
     UsageTracking,
     Invoice,
-    Alert
+    Alert,
+    SubscriptionPricingTier,
+    TaxConfiguration,
+    ServiceCharge
 )
 
 
@@ -312,3 +315,100 @@ class AlertAdmin(admin.ModelAdmin):
             alert.dismiss()
         self.message_user(request, f'{queryset.count()} alerts dismissed.')
     dismiss_alerts.short_description = 'Dismiss selected alerts'
+
+
+@admin.register(SubscriptionPricingTier)
+class SubscriptionPricingTierAdmin(admin.ModelAdmin):
+    list_display = ['tier_description', 'base_price', 'price_per_additional', 'currency', 'is_active', 'created_at']
+    list_filter = ['is_active', 'currency', 'created_at']
+    search_fields = ['description']
+    ordering = ['min_storefronts']
+    
+    fieldsets = (
+        ('Tier Configuration', {
+            'fields': ('min_storefronts', 'max_storefronts', 'description')
+        }),
+        ('Pricing', {
+            'fields': ('base_price', 'price_per_additional_storefront', 'currency')
+        }),
+        ('Status', {
+            'fields': ('is_active',)
+        }),
+    )
+    
+    def tier_description(self, obj):
+        """Display tier range"""
+        if obj.max_storefronts:
+            return format_html('<strong>{}-{} storefronts</strong>', obj.min_storefronts, obj.max_storefronts)
+        return format_html('<strong>{}+ storefronts</strong>', obj.min_storefronts)
+    tier_description.short_description = 'Tier Range'
+    
+    def price_per_additional(self, obj):
+        """Display additional storefront price"""
+        if obj.price_per_additional_storefront > 0:
+            return format_html('{} {} per additional', obj.currency, obj.price_per_additional_storefront)
+        return '-'
+    price_per_additional.short_description = 'Additional Price'
+
+
+@admin.register(TaxConfiguration)
+class TaxConfigurationAdmin(admin.ModelAdmin):
+    list_display = ['code', 'name', 'rate_display', 'applies_to_subscriptions', 'is_active', 'effective_from', 'calculation_order']
+    list_filter = ['is_active', 'applies_to_subscriptions', 'is_percentage', 'effective_from']
+    search_fields = ['code', 'name', 'description']
+    ordering = ['calculation_order', 'code']
+    
+    fieldsets = (
+        ('Tax Information', {
+            'fields': ('code', 'name', 'description')
+        }),
+        ('Tax Rate', {
+            'fields': ('rate', 'is_percentage')
+        }),
+        ('Application', {
+            'fields': ('applies_to_subscriptions', 'calculation_order')
+        }),
+        ('Validity Period', {
+            'fields': ('effective_from', 'effective_until')
+        }),
+        ('Status', {
+            'fields': ('is_active',)
+        }),
+    )
+    
+    def rate_display(self, obj):
+        """Display rate with percentage symbol if applicable"""
+        if obj.is_percentage:
+            return format_html('<strong>{}%</strong>', obj.rate)
+        return format_html('<strong>{}</strong>', obj.rate)
+    rate_display.short_description = 'Rate'
+
+
+@admin.register(ServiceCharge)
+class ServiceChargeAdmin(admin.ModelAdmin):
+    list_display = ['code', 'name', 'charge_display', 'applies_to', 'payment_gateway', 'is_active']
+    list_filter = ['is_active', 'charge_type', 'applies_to', 'payment_gateway']
+    search_fields = ['code', 'name', 'description']
+    ordering = ['code']
+    
+    fieldsets = (
+        ('Charge Information', {
+            'fields': ('code', 'name', 'description')
+        }),
+        ('Charge Configuration', {
+            'fields': ('charge_type', 'amount', 'applies_to')
+        }),
+        ('Gateway', {
+            'fields': ('payment_gateway',)
+        }),
+        ('Status', {
+            'fields': ('is_active',)
+        }),
+    )
+    
+    def charge_display(self, obj):
+        """Display charge amount"""
+        if obj.charge_type == 'PERCENTAGE':
+            return format_html('<strong>{}%</strong>', obj.amount)
+        return format_html('<strong>{}</strong>', obj.amount)
+    charge_display.short_description = 'Charge'
