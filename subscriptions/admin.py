@@ -354,19 +354,19 @@ class SubscriptionPricingTierAdmin(admin.ModelAdmin):
 @admin.register(TaxConfiguration)
 class TaxConfigurationAdmin(admin.ModelAdmin):
     list_display = ['code', 'name', 'rate_display', 'applies_to_subscriptions', 'is_active', 'effective_from', 'calculation_order']
-    list_filter = ['is_active', 'applies_to_subscriptions', 'is_percentage', 'effective_from']
+    list_filter = ['is_active', 'applies_to_subscriptions', 'country', 'effective_from']
     search_fields = ['code', 'name', 'description']
     ordering = ['calculation_order', 'code']
     
     fieldsets = (
         ('Tax Information', {
-            'fields': ('code', 'name', 'description')
+            'fields': ('code', 'name', 'description', 'country')
         }),
         ('Tax Rate', {
-            'fields': ('rate', 'is_percentage')
+            'fields': ('rate',)
         }),
         ('Application', {
-            'fields': ('applies_to_subscriptions', 'calculation_order')
+            'fields': ('applies_to_subscriptions', 'applies_to', 'calculation_order', 'is_mandatory')
         }),
         ('Validity Period', {
             'fields': ('effective_from', 'effective_until')
@@ -377,10 +377,8 @@ class TaxConfigurationAdmin(admin.ModelAdmin):
     )
     
     def rate_display(self, obj):
-        """Display rate with percentage symbol if applicable"""
-        if obj.is_percentage:
-            return format_html('<strong>{}%</strong>', obj.rate)
-        return format_html('<strong>{}</strong>', obj.rate)
+        """Display rate with percentage symbol"""
+        return format_html('<strong>{}%</strong>', obj.rate)
     rate_display.short_description = 'Rate'
 
 
