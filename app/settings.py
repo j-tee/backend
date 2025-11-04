@@ -189,6 +189,10 @@ if DEBUG and not _cors_origins:
 else:
     CORS_ALLOWED_ORIGINS = _cors_origins
 
+# Allow credentials (cookies, authorization headers) to be sent with cross-origin requests
+# This is required for SessionAuthentication to work with CORS
+CORS_ALLOW_CREDENTIALS = True
+
 # Password hashers
 PASSWORD_HASHERS = [
     'django.contrib.auth.hashers.Argon2PasswordHasher',
