@@ -826,9 +826,44 @@ class ProductViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['get'], url_path='stock-reconciliation')
     def stock_reconciliation(self, request, pk=None):
-        """Return aggregated stock metrics for banner reconciliation."""
+        """
+        Return aggregated stock metrics for banner reconciliation.
+        
+        Query Parameters:
+            batch_id (UUID, optional): Filter to specific Stock batch
+            warehouse_id (UUID, optional): Filter to specific Warehouse
+        """
 
         product = self.get_object()
+        
+        # Extract and validate filter parameters
+        batch_id = request.query_params.get('batch_id') or None
+        warehouse_id = request.query_params.get('warehouse_id') or None
+        
+        # Handle empty strings as null (frontend sends empty string for "All")
+        if batch_id == '':
+            batch_id = None
+        if warehouse_id == '':
+            warehouse_id = None
+        
+        # Validate UUIDs
+        if batch_id:
+            try:
+                UUID(batch_id)
+            except (ValueError, TypeError):
+                return Response(
+                    {'detail': 'Invalid batch_id format. Must be a valid UUID.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        
+        if warehouse_id:
+            try:
+                UUID(warehouse_id)
+            except (ValueError, TypeError):
+                return Response(
+                    {'detail': 'Invalid warehouse_id format. Must be a valid UUID.'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
 
         def to_decimal(value):
             if value is None:
@@ -846,13 +881,29 @@ class ProductViewSet(viewsets.ModelViewSet):
                 return 0
             return value
 
-        stock_products_qs = StockProduct.objects.filter(product=product).select_related('warehouse', 'stock')
+        # Apply filters to stock products queryset
+        stock_products_qs = StockProduct.objects.filter(product=product)
+        
+        if batch_id:
+            stock_products_qs = stock_products_qs.filter(stock_id=batch_id)
+        
+        if warehouse_id:
+            stock_products_qs = stock_products_qs.filter(warehouse_id=warehouse_id)
+        
+        stock_products_qs = stock_products_qs.select_related('warehouse', 'stock')
         stock_products = list(stock_products_qs)
+        
+        # Get filtered stock product IDs for cascading filters
+        stock_product_ids = [sp.id for sp in stock_products]
         warehouse_aggregate = stock_products_qs.aggregate(
             current_quantity=Coalesce(Sum('quantity'), 0)
         )
 
-        storefront_qs = StoreFrontInventory.objects.filter(product=product).select_related('storefront')
+        # Apply filters to storefront inventory
+        # NOTE: StoreFrontInventory only tracks product + storefront, NOT stock_product or warehouse
+        # When filters are active, we approximate by only showing storefronts with filtered stock
+        storefront_qs = StoreFrontInventory.objects.filter(product=product)
+        storefront_qs = storefront_qs.select_related('storefront')
         storefront_entries = list(storefront_qs)
         storefront_total = storefront_qs.aggregate(total=Coalesce(Sum('quantity'), 0))['total'] or 0
 
@@ -864,9 +915,9 @@ class ProductViewSet(viewsets.ModelViewSet):
             # Calculate reservations for this storefront
             reserved_qty = Decimal('0')
             if SALES_APP_AVAILABLE and StockReservation is not None and Sale is not None:
-                # Get active reservations linked to sales at this storefront
+                # Get active reservations linked to sales at this storefront (filtered by stock_product_ids)
                 storefront_reservations = StockReservation.objects.filter(
-                    stock_product__product=product,
+                    stock_product__in=stock_product_ids,
                     status='ACTIVE'
                 ).select_related('stock_product')
                 
@@ -899,8 +950,9 @@ class ProductViewSet(viewsets.ModelViewSet):
         completed_value = Decimal('0')
         completed_sales = set()
         if SALES_APP_AVAILABLE and SaleItem is not None:
+            # Filter sales to only those from filtered stock products
             completed_items = SaleItem.objects.filter(
-                product=product,
+                stock_product__in=stock_product_ids,
                 sale__status=Sale.STATUS_COMPLETED
             ).select_related('sale', 'sale__storefront')
             for item in completed_items:
@@ -908,8 +960,9 @@ class ProductViewSet(viewsets.ModelViewSet):
                 completed_value += to_decimal(item.total_price)
                 completed_sales.add(str(item.sale_id))
 
+        # Filter adjustments to only filtered stock products
         adjustments_qs = StockAdjustment.objects.filter(
-            stock_product__product=product,
+            stock_product__in=stock_product_ids,
             status='COMPLETED'
         )
         negative_adjustments = adjustments_qs.filter(quantity__lt=0).aggregate(total=Coalesce(Sum('quantity'), 0))['total'] or 0
@@ -924,8 +977,9 @@ class ProductViewSet(viewsets.ModelViewSet):
         orphaned_count = 0
         ACTIVE_SALE_STATUSES = {'DRAFT', 'PENDING', 'PARTIAL', 'COMPLETED'}
         if SALES_APP_AVAILABLE and StockReservation is not None:
+            # Filter reservations to only filtered stock products
             reservation_qs = StockReservation.objects.filter(
-                stock_product__product=product,
+                stock_product__in=stock_product_ids,
                 status='ACTIVE'
             ).select_related('stock_product__warehouse', 'stock_product__stock')
             reservations = list(reservation_qs)
@@ -995,6 +1049,12 @@ class ProductViewSet(viewsets.ModelViewSet):
                 'id': str(product.id),
                 'name': product.name,
                 'sku': product.sku,
+            },
+            'filters': {
+                'batch_id': batch_id,
+                'warehouse_id': warehouse_id,
+                'batch_name': (stock_products[0].stock.description or f"Batch {stock_products[0].stock.arrival_date}") if (stock_products and batch_id) else None,
+                'warehouse_name': stock_products[0].warehouse.name if (stock_products and warehouse_id) else None,
             },
             'warehouse': {
                 'recorded_quantity': to_number(recorded_quantity_decimal),
