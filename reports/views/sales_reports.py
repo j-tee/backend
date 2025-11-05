@@ -111,9 +111,15 @@ class SalesSummaryReportView(BaseReportView):
         )
         
         # Apply optional filters
-        storefront_id = request.query_params.get('storefront_id')
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
         
         sale_type = request.query_params.get('sale_type')
         if sale_type and sale_type in ['RETAIL', 'WHOLESALE']:
@@ -145,8 +151,8 @@ class SalesSummaryReportView(BaseReportView):
             )
             
             # Apply same filters
-            if storefront_id:
-                prev_queryset = prev_queryset.filter(storefront_id=storefront_id)
+            if storefront_ids:
+                prev_queryset = prev_queryset.filter(storefront_id__in=storefront_ids)
             if sale_type:
                 prev_queryset = prev_queryset.filter(type=sale_type)
             
@@ -174,15 +180,19 @@ class SalesSummaryReportView(BaseReportView):
             results_data['comparison'] = comparison_data
         
         # Build metadata
+        filters_metadata = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'sale_type': sale_type,
+            'period_type': period_type,
+            'compare_previous': compare_previous,
+        }
+
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'storefront_id': storefront_id,
-                'sale_type': sale_type,
-                'period_type': period_type,
-                'compare_previous': compare_previous,
-            }
+            filters=filters_metadata
         )
         
         # Return with standard response wrapper
@@ -194,6 +204,11 @@ class SalesSummaryReportView(BaseReportView):
                 "summary": summary,
                 "breakdown": breakdown,
                 "top_selling_hours": top_selling_hours,
+                "filters": filters_metadata,
+                "metadata": {
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                    **metadata,
+                },
             },
             "error": None
         }
@@ -201,12 +216,6 @@ class SalesSummaryReportView(BaseReportView):
         # Add comparison if available
         if comparison_data:
             response_data["data"]["comparison"] = comparison_data
-        
-        # Add metadata
-        response_data["metadata"] = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
-            **metadata
-        }
         
         return Response(response_data, status=http_status.HTTP_200_OK)
     
@@ -469,9 +478,15 @@ class SalesSummaryReportView(BaseReportView):
         )
         
         # Apply optional filters
-        storefront_id = request.query_params.get('storefront_id')
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
         
         sale_type = request.query_params.get('sale_type')
         if sale_type and sale_type in ['RETAIL', 'WHOLESALE']:
@@ -490,16 +505,16 @@ class SalesSummaryReportView(BaseReportView):
         
         # Export based on format
         if export_format == 'csv':
-            return self._export_csv(summary, breakdown, top_hours, start_date, end_date)
+            return self._export_csv(summary, breakdown, top_hours, start_date, end_date, storefront_filters)
         elif export_format == 'excel':
             return Response(
                 {'error': 'Excel format not yet implemented. Please use CSV.'},
                 status=http_status.HTTP_501_NOT_IMPLEMENTED
             )
         elif export_format == 'pdf':
-            return self._export_pdf(summary, breakdown, top_hours, start_date, end_date)
+            return self._export_pdf(summary, breakdown, top_hours, start_date, end_date, storefront_filters)
     
-    def _export_csv(self, summary, breakdown, top_hours, start_date, end_date):
+    def _export_csv(self, summary, breakdown, top_hours, start_date, end_date, storefront_filters=None):
         """Export sales summary as CSV"""
         output = io.StringIO()
         writer = csv.writer(output)
@@ -507,6 +522,11 @@ class SalesSummaryReportView(BaseReportView):
         # Header
         writer.writerow(['Sales Summary Report'])
         writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
         writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
         writer.writerow([])
         
@@ -579,7 +599,7 @@ class SalesSummaryReportView(BaseReportView):
         return response
 
 
-    def _export_pdf(self, summary, breakdown, top_hours, start_date, end_date):
+    def _export_pdf(self, summary, breakdown, top_hours, start_date, end_date, storefront_filters=None):
         """Export sales summary as PDF"""
         # Create a buffer for the PDF
         buffer = io.BytesIO()
@@ -621,7 +641,17 @@ class SalesSummaryReportView(BaseReportView):
         elements.append(title)
         
         # Period and date
-        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            storefront_line = f"Storefronts: {', '.join(labels)}"
+        else:
+            storefront_line = "Storefronts: All storefronts"
+
+        period_text = "<br/>".join([
+            f"Period: {start_date} to {end_date}",
+            storefront_line,
+            f"Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ])
         period_para = Paragraph(period_text, styles['Normal'])
         elements.append(period_para)
         elements.append(Spacer(1, 0.3*inch))
@@ -827,22 +857,57 @@ class ProductPerformanceReportView(BaseReportView):
         sale_type = request.query_params.get('sale_type')
         if sale_type:
             queryset = queryset.filter(sale__type=sale_type)
+
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(sale__storefront_id__in=storefront_ids)
         
         # Build response data
         summary = self._build_summary(queryset, start_date, end_date)
         products = self._build_product_breakdown(queryset)
         categories = self._build_category_breakdown(queryset)
-        
-        return Response({
-            'summary': summary,
-            'products': products,
-            'categories': categories,
-            'period': {
-                'start': str(start_date),
-                'end': str(end_date),
-                'type': 'custom'
-            }
-        })
+
+        filters_payload = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'category': category,
+            'sale_type': sale_type,
+        }
+
+        metadata = self.build_metadata(
+            start_date=start_date,
+            end_date=end_date,
+            filters=filters_payload
+        )
+
+        response_payload = {
+            'success': True,
+            'data': {
+                'summary': summary,
+                'products': products,
+                'categories': categories,
+                'period': {
+                    'start': str(start_date),
+                    'end': str(end_date),
+                    'type': 'custom'
+                },
+                'filters': filters_payload,
+                'metadata': {
+                    'generated_at': timezone.now().isoformat() + 'Z',
+                    **metadata,
+                }
+            },
+            'error': None
+        }
+
+        return Response(response_payload, status=http_status.HTTP_200_OK)
     
     def _build_summary(self, queryset, start_date, end_date) -> Dict[str, Any]:
         """Build summary metrics with retail/wholesale breakdown"""
@@ -1010,6 +1075,16 @@ class ProductPerformanceReportView(BaseReportView):
         sale_type = request.query_params.get('sale_type')
         if sale_type:
             queryset = queryset.filter(sale__type=sale_type)
+
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(sale__storefront_id__in=storefront_ids)
         
         # Build data
         summary = self._build_summary(queryset, start_date, end_date)
@@ -1018,16 +1093,16 @@ class ProductPerformanceReportView(BaseReportView):
         
         # Export based on format
         if export_format == 'csv':
-            return self._export_csv(summary, products, categories, start_date, end_date)
+            return self._export_csv(summary, products, categories, start_date, end_date, storefront_filters)
         elif export_format == 'excel':
             return Response(
                 {'error': 'Excel format not yet implemented. Please use CSV.'},
                 status=http_status.HTTP_501_NOT_IMPLEMENTED
             )
         elif export_format == 'pdf':
-            return self._export_pdf(summary, products, categories, start_date, end_date)
+            return self._export_pdf(summary, products, categories, start_date, end_date, storefront_filters)
     
-    def _export_csv(self, summary, products, categories, start_date, end_date):
+    def _export_csv(self, summary, products, categories, start_date, end_date, storefront_filters=None):
         """Export product performance as CSV"""
         output = io.StringIO()
         writer = csv.writer(output)
@@ -1035,6 +1110,11 @@ class ProductPerformanceReportView(BaseReportView):
         # Header
         writer.writerow(['Product Performance Report'])
         writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
         writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
         writer.writerow([])
         
@@ -1111,7 +1191,7 @@ class ProductPerformanceReportView(BaseReportView):
         
         return response
     
-    def _export_pdf(self, summary, products, categories, start_date, end_date):
+    def _export_pdf(self, summary, products, categories, start_date, end_date, storefront_filters=None):
         """Export product performance as PDF"""
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import letter, landscape
@@ -1159,8 +1239,18 @@ class ProductPerformanceReportView(BaseReportView):
         title = Paragraph("Product Performance Report", title_style)
         elements.append(title)
         
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            storefront_line = f"Storefronts: {', '.join(labels)}"
+        else:
+            storefront_line = "Storefronts: All storefronts"
+
         # Period and date
-        period_text = f"Period: {start_date} to {end_date}<br/>Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        period_text = "<br/>".join([
+            f"Period: {start_date} to {end_date}",
+            storefront_line,
+            f"Generated: {timezone.now().strftime('%Y-%m-%d %H:%M:%S')}"
+        ])
         period_para = Paragraph(period_text, styles['Normal'])
         elements.append(period_para)
         elements.append(Spacer(1, 0.2*inch))
@@ -1316,11 +1406,13 @@ class CustomerAnalyticsReportView(BaseReportView):
         
         # Get pagination params
         page, page_size = self.get_pagination_params(request)
-        
+
         # Get sort parameter
         sort_by = request.query_params.get('sort_by', 'revenue')
         if sort_by not in ['revenue', 'frequency', 'avg_order', 'recency']:
             sort_by = 'revenue'
+
+        export_format = request.query_params.get('export_format', '').lower()
         
         # Get base queryset - completed sales with customers
         queryset = Sale.objects.filter(
@@ -1332,9 +1424,22 @@ class CustomerAnalyticsReportView(BaseReportView):
         )
         
         # Apply optional filters
-        storefront_id = request.query_params.get('storefront_id')
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
+
+        filters_payload = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'sort_by': sort_by,
+        }
         
         # Aggregate by customer
         customer_data = queryset.values(
@@ -1483,6 +1588,16 @@ class CustomerAnalyticsReportView(BaseReportView):
         else:
             results = sorted(results, key=lambda x: x[sort_field], reverse=reverse)
         
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                results,
+                start_date,
+                end_date,
+                storefront_filters
+            )
+
         # Paginate
         total_count = len(results)
         start = (page - 1) * page_size
@@ -1497,15 +1612,111 @@ class CustomerAnalyticsReportView(BaseReportView):
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'storefront_id': storefront_id,
-                'sort_by': sort_by,
-            }
+            filters=filters_payload
         )
         
         return ReportResponse.paginated(
             summary, paginated_results, metadata, page, page_size, total_count
         )
+
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(summary, results, start_date, end_date, storefront_filters)
+        if export_format == 'pdf':
+            return Response(
+                {
+                    'error': 'PDF export not yet implemented. Please use CSV.'
+                },
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Customer Analytics Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S") }'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY METRICS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Customers', summary['total_customers']])
+        writer.writerow(['Total Revenue', f"${summary['total_revenue']:,.2f}"])
+        writer.writerow(['Total Orders', summary['total_orders']])
+        writer.writerow(['Average Revenue per Customer', f"${summary['average_revenue_per_customer']:,.2f}"])
+        writer.writerow(['Average Orders per Customer', summary['average_orders_per_customer']])
+        writer.writerow(['Repeat Customer Rate', f"{summary['repeat_customer_rate']:.1f}%"])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Customers', summary['retail']['customers']])
+        writer.writerow(['Revenue', f"${summary['retail']['revenue']:,.2f}"])
+        writer.writerow(['Orders', summary['retail']['orders']])
+        writer.writerow(['Avg Revenue per Customer', f"${summary['retail']['avg_revenue_per_customer']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Customers', summary['wholesale']['customers']])
+        writer.writerow(['Revenue', f"${summary['wholesale']['revenue']:,.2f}"])
+        writer.writerow(['Orders', summary['wholesale']['orders']])
+        writer.writerow(['Avg Revenue per Customer', f"${summary['wholesale']['avg_revenue_per_customer']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['CUSTOMER DETAILS'])
+        writer.writerow([
+            'Rank',
+            'Customer Name',
+            'Email',
+            'Total Spent',
+            'Orders',
+            'Average Order Value',
+            'Contribution %',
+            'Days Since Last Purchase',
+        ])
+
+        for idx, record in enumerate(results, start=1):
+            writer.writerow([
+                idx,
+                record['customer_name'] or '',
+                record['customer_email'] or '',
+                f"${record['total_spent']:,.2f}",
+                record['order_count'],
+                f"${record['average_order_value']:,.2f}",
+                f"{record['contribution_percentage']:.1f}%",
+                record['days_since_last_purchase'] if record['days_since_last_purchase'] is not None else '',
+            ])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="customer-analytics-{start_date}-to-{end_date}.csv"'
+        )
+        return response
 
 
 class RevenueTrendsReportView(BaseReportView):
@@ -1533,6 +1744,8 @@ class RevenueTrendsReportView(BaseReportView):
     def get(self, request, *args, **kwargs):
         from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
         from datetime import timedelta
+
+        export_format = request.query_params.get('export_format', '').lower()
         
         # Get business ID
         business_id, error = self.get_business_or_error(request)
@@ -1561,9 +1774,15 @@ class RevenueTrendsReportView(BaseReportView):
         )
         
         # Apply optional filters
-        storefront_id = request.query_params.get('storefront_id')
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
         
         # Get previous period data if comparison requested
         previous_data = None
@@ -1578,8 +1797,8 @@ class RevenueTrendsReportView(BaseReportView):
                 created_at__date__gte=prev_start,
                 created_at__date__lte=prev_end
             )
-            if storefront_id:
-                prev_queryset = prev_queryset.filter(storefront_id=storefront_id)
+            if storefront_ids:
+                prev_queryset = prev_queryset.filter(storefront_id__in=storefront_ids)
             
             previous_data = {
                 'start_date': prev_start,
@@ -1596,16 +1815,32 @@ class RevenueTrendsReportView(BaseReportView):
         # Build patterns (analytics insights)
         patterns = self._build_patterns(trends, summary)
         
+        filters_payload = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'grouping': grouping,
+            'compare_to_previous': compare,
+        }
+
         # Build metadata
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'storefront_id': storefront_id,
-                'grouping': grouping,
-                'compare_to_previous': compare,
-            }
+            filters=filters_payload
         )
+
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                trends,
+                patterns,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
         
         # Return unified structure with summary, trends, and patterns
         return ReportResponse.success(
@@ -1613,7 +1848,6 @@ class RevenueTrendsReportView(BaseReportView):
             results={'trends': trends, 'patterns': patterns},
             metadata=metadata
         )
-    
     def _build_summary(
         self, queryset, start_date, end_date, previous_data
     ) -> Dict[str, Any]:
@@ -1999,4 +2233,197 @@ class RevenueTrendsReportView(BaseReportView):
             'overall_trend': overall_trend,
             'growth_rate': round(growth_rate, 2),
         }
+
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        trends: List[Dict[str, Any]],
+        patterns: Dict[str, Any],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(
+                summary,
+                trends,
+                patterns,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
+        if export_format == 'pdf':
+            return Response(
+                {'error': 'PDF export not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        trends: List[Dict[str, Any]],
+        patterns: Dict[str, Any],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Revenue Trends Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow(['Grouping', grouping.title()])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY METRICS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Revenue', f"${summary['total_revenue']:,.2f}"])
+        writer.writerow(['Total Profit', f"${summary['total_profit']:,.2f}"])
+        writer.writerow(['Profit Margin %', f"{summary['profit_margin']:.2f}%"])
+        writer.writerow(['Total Orders', summary['total_orders']])
+        writer.writerow(['Average Daily Revenue', f"${summary['average_daily_revenue']:,.2f}"])
+        writer.writerow(['Average Order Value', f"${summary['average_order_value']:,.2f}"])
+        writer.writerow(['Peak Day', summary['peak_day'] or 'N/A'])
+        writer.writerow(['Peak Revenue', f"${summary['peak_revenue']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Revenue', f"${summary['retail']['revenue']:,.2f}"])
+        writer.writerow(['Profit', f"${summary['retail']['profit']:,.2f}"])
+        writer.writerow(['Profit Margin %', f"{summary['retail']['profit_margin']:.2f}%"])
+        writer.writerow(['Orders', summary['retail']['orders']])
+        writer.writerow(['Avg Order Value', f"${summary['retail']['avg_order_value']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Revenue', f"${summary['wholesale']['revenue']:,.2f}"])
+        writer.writerow(['Profit', f"${summary['wholesale']['profit']:,.2f}"])
+        writer.writerow(['Profit Margin %', f"{summary['wholesale']['profit_margin']:.2f}%"])
+        writer.writerow(['Orders', summary['wholesale']['orders']])
+        writer.writerow(['Avg Order Value', f"${summary['wholesale']['avg_order_value']:,.2f}"])
+        writer.writerow([])
+
+        if 'comparison' in summary and 'previous_period' in summary:
+            writer.writerow(['PREVIOUS PERIOD COMPARISON'])
+            writer.writerow(['Metric', 'Value'])
+            writer.writerow(['Previous Revenue', f"${summary['previous_period']['revenue']:,.2f}"])
+            writer.writerow(['Previous Profit', f"${summary['previous_period']['profit']:,.2f}"])
+            writer.writerow(['Previous Orders', summary['previous_period']['orders']])
+            writer.writerow(['Revenue Growth %', f"{summary['comparison']['revenue_growth']:.2f}%"])
+            writer.writerow(['Order Growth %', f"{summary['comparison']['order_growth']:.2f}%"])
+            writer.writerow(['Profit Growth %', f"{summary['comparison']['profit_growth']:.2f}%"])
+            writer.writerow([])
+
+        writer.writerow(['TIME SERIES (GROUPING: ' + grouping.title() + ')'])
+        writer.writerow([
+            'Period',
+            'Revenue',
+            'Profit',
+            'Profit Margin %',
+            'Orders',
+            'Average Order Value',
+            'Retail Revenue',
+            'Retail Orders',
+            'Wholesale Revenue',
+            'Wholesale Orders',
+            'Cash',
+            'Card',
+            'Credit',
+            'GCash',
+            'Other',
+            'Growth Rate %',
+            'Trend',
+        ])
+
+        for record in trends:
+            writer.writerow([
+                record['period'],
+                f"${record['revenue']:,.2f}",
+                f"${record['profit']:,.2f}",
+                f"{record['profit_margin']:.2f}%",
+                record['order_count'],
+                f"${record['average_order_value']:,.2f}",
+                f"${record['retail']['revenue']:,.2f}",
+                record['retail']['orders'],
+                f"${record['wholesale']['revenue']:,.2f}",
+                record['wholesale']['orders'],
+                f"${record['payment_methods']['cash']:,.2f}",
+                f"${record['payment_methods']['card']:,.2f}",
+                f"${record['payment_methods']['credit']:,.2f}",
+                f"${record['payment_methods']['gcash']:,.2f}",
+                f"${record['payment_methods']['other']:,.2f}",
+                f"{record.get('growth_rate', 0.0):.2f}%" if record.get('growth_rate') is not None else 'N/A',
+                record.get('trend', 'stable'),
+            ])
+
+        writer.writerow([])
+        writer.writerow(['PATTERNS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Peak Period', patterns.get('peak_day', 'N/A')])
+        writer.writerow(['Peak Revenue', f"${patterns.get('peak_revenue', 0.0):,.2f}"])
+        writer.writerow(['Lowest Period', patterns.get('lowest_day', 'N/A')])
+        writer.writerow(['Lowest Revenue', f"${patterns.get('lowest_revenue', 0.0):,.2f}"])
+        writer.writerow(['Volatility', patterns.get('volatility', 'N/A')])
+        writer.writerow(['Overall Trend', patterns.get('overall_trend', 'N/A')])
+        writer.writerow(['Growth Rate %', f"{patterns.get('growth_rate', 0.0):.2f}%"])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="revenue-trends-{start_date}-to-{end_date}.csv"'
+        )
+        return response
+
+
+class ReportStorefrontListView(BaseReportView):
+    """Return storefronts available to the current user for report filters."""
+
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, *args, **kwargs):
+        business_id, error = self.get_business_or_error(request)
+        if error:
+            return ReportResponse.error(error)
+
+        accessible_storefronts = (
+            request.user.get_accessible_storefronts()
+            .filter(business_link__business_id=business_id, business_link__is_active=True)
+            .order_by('name')
+        )
+
+        storefront_payload = [
+            {
+                'id': str(storefront.id),
+                'name': storefront.name,
+                'location': storefront.location,
+            }
+            for storefront in accessible_storefronts
+        ]
+
+        return Response(
+            {
+                'success': True,
+                'data': storefront_payload,
+                'metadata': {
+                    'generated_at': timezone.now().isoformat() + 'Z',
+                    'count': len(storefront_payload),
+                },
+                'error': None,
+            },
+            status=http_status.HTTP_200_OK
+        )
 

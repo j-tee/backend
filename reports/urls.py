@@ -23,6 +23,7 @@ from .views.sales_reports import (
     ProductPerformanceReportView,
     CustomerAnalyticsReportView,
     RevenueTrendsReportView,
+    ReportStorefrontListView,
 )
 
 # Financial Report views (NEW - Phase 3)
@@ -97,6 +98,7 @@ urlpatterns = [
     # (GET endpoints that return JSON analytics)
     
     # Sales Reports (Phase 2) - Complete
+    path('api/storefronts/', ReportStorefrontListView.as_view(), name='report-storefronts'),
     path('api/sales/summary/', SalesSummaryReportView.as_view(), name='sales-summary-report'),
     path('api/sales/products/', ProductPerformanceReportView.as_view(), name='product-performance-report'),
     path('api/sales/product-performance/', ProductPerformanceReportView.as_view(), name='product-performance-report-alt'),  # Alternative URL

@@ -6,12 +6,17 @@ Tier 1 Implementation: Using existing sales, payment, and credit data.
 """
 
 from decimal import Decimal
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from datetime import timedelta, date
+import csv
+import io
 from django.db.models import Sum, Count, Avg, Q, F, Min, Max
 from django.db.models.functions import TruncDate, TruncWeek, TruncMonth
 from django.utils import timezone
+from django.http import HttpResponse
 from rest_framework.permissions import IsAuthenticated
+from rest_framework import status as http_status
+from rest_framework.response import Response
 
 from sales.models import Sale, SaleItem, Payment, Customer
 from reports.services.report_base import BaseReportView
@@ -43,6 +48,8 @@ class RevenueProfitReportView(BaseReportView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, *args, **kwargs):
+        export_format = request.query_params.get('export_format', '').lower()
+
         # Get business ID
         business_id, error = self.get_business_or_error(request)
         if error:
@@ -67,13 +74,19 @@ class RevenueProfitReportView(BaseReportView):
         )
         
         # Apply optional filters
-        storefront_id = request.query_params.get('storefront_id')
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
-        
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
+
         sale_type = request.query_params.get('sale_type')
         if sale_type and sale_type in ['RETAIL', 'WHOLESALE']:
-            queryset = queryset.filter(sale_type=sale_type)
+            queryset = queryset.filter(type=sale_type)
         
         # Build summary
         summary = self._build_summary(queryset)
@@ -81,16 +94,31 @@ class RevenueProfitReportView(BaseReportView):
         # Build results (time-series)
         results = self._build_time_series(queryset, grouping)
         
+        filters_payload = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'sale_type': sale_type,
+            'grouping': grouping,
+        }
+
         # Build metadata
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'storefront_id': storefront_id,
-                'sale_type': sale_type,
-                'grouping': grouping,
-            }
+            filters=filters_payload
         )
+
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                results,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
         
         return ReportResponse.success(summary, results, metadata)
     
@@ -299,6 +327,127 @@ class RevenueProfitReportView(BaseReportView):
         
         return results
 
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(
+                summary,
+                results,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
+        if export_format == 'pdf':
+            return Response(
+                {'error': 'PDF export not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Revenue & Profit Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow(['Grouping', grouping.title()])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY METRICS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Revenue', f"${summary['total_revenue']:,.2f}"])
+        writer.writerow(['Total Cost', f"${summary['total_cost']:,.2f}"])
+        writer.writerow(['Gross Profit', f"${summary['gross_profit']:,.2f}"])
+        writer.writerow(['Gross Margin %', f"{summary['gross_margin']:.2f}%"])
+        writer.writerow(['Net Profit', f"${summary['net_profit']:,.2f}"])
+        writer.writerow(['Net Margin %', f"{summary['net_margin']:.2f}%"])
+        writer.writerow(['Total Orders', summary['total_sales']])
+        writer.writerow(['Average Order Value', f"${summary['average_sale_value']:,.2f}"])
+        writer.writerow(['Best Margin %', f"{summary['best_margin']:.2f}%"])
+        writer.writerow(['Worst Margin %', f"{summary['worst_margin']:.2f}%"])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Revenue', f"${summary['retail']['revenue']:,.2f}"])
+        writer.writerow(['Cost', f"${summary['retail']['cost']:,.2f}"])
+        writer.writerow(['Profit', f"${summary['retail']['profit']:,.2f}"])
+        writer.writerow(['Profit Margin %', f"{summary['retail']['profit_margin']:.2f}%"])
+        writer.writerow(['Orders', summary['retail']['orders']])
+        writer.writerow(['Avg Order Value', f"${summary['retail']['avg_order_value']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Revenue', f"${summary['wholesale']['revenue']:,.2f}"])
+        writer.writerow(['Cost', f"${summary['wholesale']['cost']:,.2f}"])
+        writer.writerow(['Profit', f"${summary['wholesale']['profit']:,.2f}"])
+        writer.writerow(['Profit Margin %', f"{summary['wholesale']['profit_margin']:.2f}%"])
+        writer.writerow(['Orders', summary['wholesale']['orders']])
+        writer.writerow(['Avg Order Value', f"${summary['wholesale']['avg_order_value']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['TIME SERIES BREAKDOWN'])
+        writer.writerow([
+            'Period',
+            'Revenue',
+            'Cost',
+            'Profit',
+            'Margin %',
+            'Orders',
+            'Avg Order Value',
+            'Retail Revenue',
+            'Retail Profit',
+            'Wholesale Revenue',
+            'Wholesale Profit',
+        ])
+
+        for record in results:
+            writer.writerow([
+                record['period'],
+                f"${record['revenue']:,.2f}",
+                f"${record['cost']:,.2f}",
+                f"${record['profit']:,.2f}",
+                f"{record['margin']:.2f}%",
+                record['order_count'],
+                f"${record['average_order_value']:,.2f}",
+                f"${record['retail']['revenue']:,.2f}",
+                f"${record['retail']['profit']:,.2f}",
+                f"${record['wholesale']['revenue']:,.2f}",
+                f"${record['wholesale']['profit']:,.2f}",
+            ])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = (
+            f'attachment; filename="revenue-profit-{start_date}-to-{end_date}.csv"'
+        )
+        return response
+
 
 class ARAgingReportView(BaseReportView):
     """
@@ -323,6 +472,7 @@ class ARAgingReportView(BaseReportView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, *args, **kwargs):
+        export_format = request.query_params.get('export_format', '').lower()
         # Get business ID
         business_id, error = self.get_business_or_error(request)
         if error:
@@ -352,24 +502,91 @@ class ARAgingReportView(BaseReportView):
             min_balance = Decimal(min_balance)
         except:
             min_balance = Decimal('0')
-        
-        # Get customers with credit balances
-        # Query using AccountsReceivable table for accurate AR tracking
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+
         from sales.models import AccountsReceivable
-        
-        customers_query = Customer.objects.filter(
-            business_id=business_id,
-            outstanding_balance__gt=min_balance
-        ).select_related('business')
-        
-        # Apply optional customer filter
+
+        ar_queryset = AccountsReceivable.objects.filter(
+            customer__business_id=business_id,
+            amount_outstanding__gt=0,
+            status__in=['PENDING', 'PARTIAL', 'IN_COLLECTION']
+        ).select_related('customer', 'sale')
+
         customer_id = request.query_params.get('customer_id')
         if customer_id:
-            customers_query = customers_query.filter(id=customer_id)
-        
-        # Build aging data using AccountsReceivable records
-        aging_data = []
-        total_ar = Decimal('0')
+            ar_queryset = ar_queryset.filter(customer_id=customer_id)
+
+        if storefront_ids:
+            ar_queryset = ar_queryset.filter(sale__storefront_id__in=storefront_ids)
+
+        customer_entries: Dict[str, Dict[str, Any]] = {}
+
+        def init_entry(customer):
+            return {
+                'customer': customer,
+                'balance': Decimal('0'),
+                'credit_limit': Decimal(str(customer.credit_limit or 0)),
+                'aging': {
+                    'current': Decimal('0'),
+                    '1_30_days': Decimal('0'),
+                    '31_60_days': Decimal('0'),
+                    '61_90_days': Decimal('0'),
+                    'over_90_days': Decimal('0'),
+                },
+                'retail_balance': Decimal('0'),
+                'retail_aging': {
+                    'current': Decimal('0'),
+                    '1_30_days': Decimal('0'),
+                    '31_60_days': Decimal('0'),
+                    '61_90_days': Decimal('0'),
+                    'over_90_days': Decimal('0'),
+                },
+                'wholesale_balance': Decimal('0'),
+                'wholesale_aging': {
+                    'current': Decimal('0'),
+                    '1_30_days': Decimal('0'),
+                    '31_60_days': Decimal('0'),
+                    '61_90_days': Decimal('0'),
+                    'over_90_days': Decimal('0'),
+                },
+            }
+
+        for ar in ar_queryset:
+            customer = ar.customer
+            entry = customer_entries.setdefault(str(customer.id), init_entry(customer))
+
+            amount = Decimal(str(ar.amount_outstanding or 0))
+            if amount <= 0:
+                continue
+
+            bucket = self._map_aging_bucket(ar.aging_category)
+
+            entry['balance'] += amount
+            entry['aging'][bucket] += amount
+
+            sale_type = getattr(ar.sale, 'type', '').upper()
+            if sale_type == 'RETAIL':
+                entry['retail_balance'] += amount
+                entry['retail_aging'][bucket] += amount
+            elif sale_type == 'WHOLESALE':
+                entry['wholesale_balance'] += amount
+                entry['wholesale_aging'][bucket] += amount
+
+        # Apply minimum balance filter and build result list
+        filtered_entries = []
+        for entry in customer_entries.values():
+            if entry['balance'] <= min_balance:
+                continue
+            filtered_entries.append(entry)
+
+        filtered_entries.sort(key=lambda e: e['balance'], reverse=True)
+
         aging_totals = {
             'current': Decimal('0'),
             '1_30_days': Decimal('0'),
@@ -377,8 +594,6 @@ class ARAgingReportView(BaseReportView):
             '61_90_days': Decimal('0'),
             'over_90_days': Decimal('0'),
         }
-        
-        # Retail/Wholesale aging totals
         retail_aging_totals = {
             'current': Decimal('0'),
             '1_30_days': Decimal('0'),
@@ -393,107 +608,48 @@ class ARAgingReportView(BaseReportView):
             '61_90_days': Decimal('0'),
             'over_90_days': Decimal('0'),
         }
+
+        total_ar = Decimal('0')
         retail_ar = Decimal('0')
         wholesale_ar = Decimal('0')
-        
-        for customer in customers_query:
-            balance = customer.outstanding_balance
-            if balance <= 0:
-                continue
-            
-            total_ar += balance
-            
-            # Query AccountsReceivable records for this customer
-            # Use actual AR records with computed aging_category
-            ar_records = AccountsReceivable.objects.filter(
-                customer=customer,
-                status__in=['PENDING', 'PARTIAL', 'OVERDUE']
-            ).select_related('sale')
-            
-            # Initialize aging buckets for this customer
-            aging_buckets = {
-                'current': Decimal('0'),
-                '1_30_days': Decimal('0'),
-                '31_60_days': Decimal('0'),
-                '61_90_days': Decimal('0'),
-                'over_90_days': Decimal('0'),
-            }
-            
-            retail_sales_amount = Decimal('0')
-            wholesale_sales_amount = Decimal('0')
-            retail_aging = {k: Decimal('0') for k in aging_buckets.keys()}
-            wholesale_aging = {k: Decimal('0') for k in aging_buckets.keys()}
-            
-            # Process each AR record using its auto-calculated aging_category
-            for ar in ar_records:
-                amount = ar.amount_outstanding
-                
-                # Map AR aging_category to report bucket names
-                if ar.aging_category == 'CURRENT':
-                    bucket = 'current'
-                elif ar.aging_category == '1-30_DAYS':
-                    bucket = '1_30_days'
-                elif ar.aging_category == '31-60_DAYS':
-                    bucket = '31_60_days'
-                elif ar.aging_category == '61-90_DAYS':
-                    bucket = '61_90_days'
-                elif ar.aging_category == 'OVER_90_DAYS':
-                    bucket = 'over_90_days'
-                else:
-                    bucket = 'current'  # Default fallback
-                
-                aging_buckets[bucket] += amount
+
+        aging_data = []
+
+        for entry in filtered_entries:
+            total_ar += entry['balance']
+            for bucket, amount in entry['aging'].items():
                 aging_totals[bucket] += amount
-                
-                # Separate by retail/wholesale based on sale type
-                if ar.sale.type == 'RETAIL':
-                    retail_sales_amount += amount
-                    retail_ar += amount
-                    retail_aging[bucket] += amount
-                    retail_aging_totals[bucket] += amount
-                elif ar.sale.type == 'WHOLESALE':
-                    wholesale_sales_amount += amount
-                    wholesale_ar += amount
-                    wholesale_aging[bucket] += amount
-                    wholesale_aging_totals[bucket] += amount
-            
-            for bucket, amount in retail_aging.items():
+            for bucket, amount in entry['retail_aging'].items():
                 retail_aging_totals[bucket] += amount
-            
-            for bucket, amount in wholesale_aging.items():
+            for bucket, amount in entry['wholesale_aging'].items():
                 wholesale_aging_totals[bucket] += amount
-            
-            # Calculate risk level using actual aging data
+            retail_ar += entry['retail_balance']
+            wholesale_ar += entry['wholesale_balance']
+
+            customer = entry['customer']
             risk_level = self._calculate_risk_level(
-                aging_buckets, balance, customer.credit_limit
+                entry['aging'], entry['balance'], entry['credit_limit']
             )
-            
-            # Calculate credit utilization
-            utilization = AggregationHelper.calculate_percentage(
-                balance,
-                customer.credit_limit
-            ) if customer.credit_limit > 0 else Decimal('100.00')
-            
+            credit_utilization = AggregationHelper.calculate_percentage(
+                entry['balance'], entry['credit_limit']
+            ) if entry['credit_limit'] > 0 else Decimal('100.00')
+
             aging_data.append({
                 'customer_id': str(customer.id),
                 'customer_name': customer.name,
                 'customer_email': customer.email,
-                'total_balance': float(balance),
-                'credit_limit': float(customer.credit_limit),
-                'credit_utilization': float(utilization),
-                'current': float(aging_buckets['current']),
-                '1_30_days': float(aging_buckets['1_30_days']),
-                '31_60_days': float(aging_buckets['31_60_days']),
-                '61_90_days': float(aging_buckets['61_90_days']),
-                'over_90_days': float(aging_buckets['over_90_days']),
+                'total_balance': float(entry['balance']),
+                'credit_limit': float(entry['credit_limit']),
+                'credit_utilization': float(credit_utilization),
+                'current': float(entry['aging']['current']),
+                '1_30_days': float(entry['aging']['1_30_days']),
+                '31_60_days': float(entry['aging']['31_60_days']),
+                '61_90_days': float(entry['aging']['61_90_days']),
+                'over_90_days': float(entry['aging']['over_90_days']),
                 'risk_level': risk_level,
-                # Retail/Wholesale breakdown using actual AR data
-                'retail_balance': float(retail_sales_amount),
-                'wholesale_balance': float(wholesale_sales_amount),
+                'retail_balance': float(entry['retail_balance']),
+                'wholesale_balance': float(entry['wholesale_balance']),
             })
-        
-        # Sort by balance descending
-        aging_data.sort(key=lambda x: x['total_balance'], reverse=True)
         
         # Build summary
         total_customers = len(aging_data)
@@ -551,6 +707,23 @@ class ARAgingReportView(BaseReportView):
                 },
             },
         }
+
+        filters_payload = {
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+            'customer_id': customer_id,
+            'min_balance': float(min_balance),
+        }
+
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                aging_data,
+                as_of_date,
+                storefront_filters,
+            )
         
         # Paginate
         total_count = len(aging_data)
@@ -566,10 +739,7 @@ class ARAgingReportView(BaseReportView):
         metadata = self.build_metadata(
             start_date=as_of_date,
             end_date=as_of_date,
-            filters={
-                'customer_id': customer_id,
-                'min_balance': float(min_balance),
-            }
+            filters=filters_payload
         )
         
         return ReportResponse.paginated(
@@ -597,6 +767,19 @@ class ARAgingReportView(BaseReportView):
             'over_90_days': Decimal('0'),
         }
     
+    def _map_aging_bucket(self, category: str) -> str:
+        mapping = {
+            'CURRENT': 'current',
+            '30_DAYS': '31_60_days',
+            '1_30_DAYS': '1_30_days',
+            '60_DAYS': '61_90_days',
+            '31_60_DAYS': '31_60_days',
+            '90_PLUS': 'over_90_days',
+            'OVER_90_DAYS': 'over_90_days',
+            '61_90_DAYS': '61_90_days',
+        }
+        return mapping.get(category, 'current')
+
     def _calculate_risk_level(
         self, aging_buckets: Dict[str, Decimal], balance: Decimal, credit_limit: Decimal
     ) -> str:
@@ -616,6 +799,112 @@ class ARAgingReportView(BaseReportView):
         
         # Low risk
         return 'low'
+
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        as_of_date: date,
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(summary, results, as_of_date, storefront_filters)
+        if export_format == 'pdf':
+            return Response(
+                {'error': 'PDF export not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        as_of_date: date,
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Accounts Receivable Aging Report'])
+        writer.writerow([f'As of Date', str(as_of_date)])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY METRICS'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total AR Outstanding', f"${summary['total_ar_outstanding']:,.2f}"])
+        writer.writerow(['Total Customers', summary['total_customers_with_balance']])
+        writer.writerow(['Percentage Overdue', f"{summary['percentage_overdue']:.2f}%"])
+        writer.writerow(['At Risk Amount', f"${summary['at_risk_amount']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['AGING BUCKETS'])
+        writer.writerow(['Bucket', 'Amount'])
+        writer.writerow(['Current', f"${summary['aging_buckets']['current']:,.2f}"])
+        writer.writerow(['1-30 Days', f"${summary['aging_buckets']['1_30_days']:,.2f}"])
+        writer.writerow(['31-60 Days', f"${summary['aging_buckets']['31_60_days']:,.2f}"])
+        writer.writerow(['61-90 Days', f"${summary['aging_buckets']['61_90_days']:,.2f}"])
+        writer.writerow(['90+ Days', f"${summary['aging_buckets']['over_90_days']:,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Outstanding', f"${summary['retail']['ar_outstanding']:,.2f}"])
+        writer.writerow(['Percent of Total', f"{summary['retail']['percentage_of_total']:.2f}%"])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Outstanding', f"${summary['wholesale']['ar_outstanding']:,.2f}"])
+        writer.writerow(['Percent of Total', f"{summary['wholesale']['percentage_of_total']:.2f}%"])
+        writer.writerow([])
+
+        writer.writerow(['CUSTOMER DETAILS'])
+        writer.writerow([
+            'Customer',
+            'Email',
+            'Total Balance',
+            'Credit Limit',
+            'Utilization %',
+            'Current',
+            '1-30 Days',
+            '31-60 Days',
+            '61-90 Days',
+            '90+ Days',
+            'Retail Balance',
+            'Wholesale Balance',
+            'Risk Level',
+        ])
+
+        for record in results:
+            writer.writerow([
+                record['customer_name'],
+                record['customer_email'],
+                f"${record['total_balance']:,.2f}",
+                f"${record['credit_limit']:,.2f}",
+                f"{record['credit_utilization']:.2f}%",
+                f"${record['current']:,.2f}",
+                f"${record['1_30_days']:,.2f}",
+                f"${record['31_60_days']:,.2f}",
+                f"${record['61_90_days']:,.2f}",
+                f"${record['over_90_days']:,.2f}",
+                f"${record['retail_balance']:,.2f}",
+                f"${record['wholesale_balance']:,.2f}",
+                record['risk_level'],
+            ])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="ar-aging-report.csv"'
+        return response
 
 
 class CollectionRatesReportView(BaseReportView):
@@ -671,47 +960,182 @@ class CollectionRatesReportView(BaseReportView):
     
     def get(self, request):
         """Generate collection rates report"""
-        # Get business ID
+        export_format = request.query_params.get('export_format', '').lower()
+
+        # Resolve business context
         business_id, error = self.get_business_or_error(request)
         if error:
             return ReportResponse.error(error)
-        
-        # Get date range
+
+        # Date range defaults to trailing 90 days when not provided
         start_date, end_date, error = self.get_date_range(request, default_days=90)
         if error:
             return ReportResponse.error(error)
-        
-        storefront_id = request.query_params.get('storefront_id')
-        grouping = request.query_params.get('grouping', 'monthly')
-        
-        # Build queryset for credit sales
+
+        grouping = request.query_params.get('grouping', 'monthly').lower()
+        if grouping not in {'daily', 'weekly', 'monthly'}:
+            grouping = 'monthly'
+
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+
+        storefront_ids = storefront_filters['ids']
+
         queryset = Sale.objects.filter(
             business_id=business_id,
-            type='CREDIT',
             created_at__date__gte=start_date,
-            created_at__date__lte=end_date
+            created_at__date__lte=end_date,
+            status__in=[
+                Sale.STATUS_COMPLETED,
+                Sale.STATUS_PARTIAL,
+                Sale.STATUS_PENDING,
+            ],
+        ).filter(
+            Q(payment_type=Sale.PAYMENT_TYPE_CREDIT) | Q(is_credit_sale=True)
         )
-        
-        if storefront_id:
-            queryset = queryset.filter(storefront_id=storefront_id)
-        
-        # Build summary
+
+        if storefront_ids:
+            queryset = queryset.filter(storefront_id__in=storefront_ids)
+
         summary = self._build_summary(queryset)
-        
-        # Build time series
         time_series = self._build_time_series(queryset, grouping, start_date, end_date)
-        
-        # Build metadata
+
+        filters_payload = {
+            'grouping': grouping,
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+        }
+
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'grouping': grouping,
-                'storefront_id': storefront_id
-            }
+            filters=filters_payload
         )
-        
+
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                time_series,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
+
         return ReportResponse.success(summary, time_series, metadata)
+
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        time_series: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(
+                summary,
+                time_series,
+                start_date,
+                end_date,
+                grouping,
+                storefront_filters,
+            )
+        if export_format == 'pdf':
+            return Response(
+                {'error': 'PDF export not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        time_series: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Collection Rates Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow(['Grouping', grouping.title()])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Credit Sales Amount', f"${Decimal(str(summary['total_credit_sales_amount'])):,.2f}"])
+        writer.writerow(['Total Collected Amount', f"${Decimal(str(summary['total_collected_amount'])):,.2f}"])
+        writer.writerow(['Outstanding Amount', f"${Decimal(str(summary['outstanding_amount'])):,.2f}"])
+        writer.writerow(['Overall Collection Rate %', f"{summary['overall_collection_rate']:.2f}%"])
+        writer.writerow(['Average Collection Period (Days)', f"{summary['average_collection_period_days']:.1f}"])
+        writer.writerow(['Total Credit Sales Count', summary['total_credit_sales_count']])
+        writer.writerow(['Collected Sales Count', summary['collected_sales_count']])
+        writer.writerow(['Outstanding Sales Count', summary['outstanding_sales_count']])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Credit Sales Amount', f"${Decimal(str(summary['retail']['credit_sales_amount'])):,.2f}"])
+        writer.writerow(['Collected Amount', f"${Decimal(str(summary['retail']['collected_amount'])):,.2f}"])
+        writer.writerow(['Collection Rate %', f"{summary['retail']['collection_rate']:.2f}%"])
+        writer.writerow(['Average Collection Period (Days)', f"{summary['retail']['average_collection_period_days']:.1f}"])
+        writer.writerow(['Credit Sales Count', summary['retail']['credit_sales_count']])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Credit Sales Amount', f"${Decimal(str(summary['wholesale']['credit_sales_amount'])):,.2f}"])
+        writer.writerow(['Collected Amount', f"${Decimal(str(summary['wholesale']['collected_amount'])):,.2f}"])
+        writer.writerow(['Collection Rate %', f"{summary['wholesale']['collection_rate']:.2f}%"])
+        writer.writerow(['Average Collection Period (Days)', f"{summary['wholesale']['average_collection_period_days']:.1f}"])
+        writer.writerow(['Credit Sales Count', summary['wholesale']['credit_sales_count']])
+        writer.writerow([])
+
+        if time_series:
+            writer.writerow(['TIME SERIES'])
+            writer.writerow([
+                'Period',
+                'Credit Sales Amount',
+                'Collected Amount',
+                'Collection Rate %',
+                'Avg Days to Collect',
+                'Retail Collection Rate %',
+                'Wholesale Collection Rate %',
+            ])
+            for record in time_series:
+                writer.writerow([
+                    record['period'],
+                    f"${Decimal(str(record['credit_sales_amount'])):,.2f}",
+                    f"${Decimal(str(record['collected_amount'])):,.2f}",
+                    f"{record['collection_rate']:.2f}%",
+                    f"{record['average_days_to_collect']:.1f}",
+                    f"{record['retail']['collection_rate']:.2f}%",
+                    f"{record['wholesale']['collection_rate']:.2f}%",
+                ])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="collection-rates-report.csv"'
+        return response
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
         """Build summary statistics for collection rates"""
@@ -722,18 +1146,17 @@ class CollectionRatesReportView(BaseReportView):
         )
         
         # Get collected amounts from payments
-        from sales.models import Payment
         sale_ids = queryset.values_list('id', flat=True)
         collected_stats = Payment.objects.filter(
             sale_id__in=sale_ids,
-            status='COMPLETED'
+            status='SUCCESSFUL'
         ).aggregate(
             collected_amount=Sum('amount_paid')
         )
         
         # Count sales that have been fully or partially paid
         collected_count = queryset.filter(
-            status__in=['COMPLETED', 'PARTIAL']
+            status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL]
         ).filter(
             amount_paid__gt=0
         ).count()
@@ -763,7 +1186,7 @@ class CollectionRatesReportView(BaseReportView):
         retail_sale_ids = retail_queryset.values_list('id', flat=True)
         retail_collected = Payment.objects.filter(
             sale_id__in=retail_sale_ids,
-            status='COMPLETED'
+            status='SUCCESSFUL'
         ).aggregate(collected_amount=Sum('amount_paid'))
         
         retail_amount = retail_stats['total_amount'] or Decimal('0.00')
@@ -784,7 +1207,7 @@ class CollectionRatesReportView(BaseReportView):
         wholesale_sale_ids = wholesale_queryset.values_list('id', flat=True)
         wholesale_collected = Payment.objects.filter(
             sale_id__in=wholesale_sale_ids,
-            status='COMPLETED'
+            status='SUCCESSFUL'
         ).aggregate(collected_amount=Sum('amount_paid'))
         
         wholesale_amount = wholesale_stats['total_amount'] or Decimal('0.00')
@@ -836,7 +1259,7 @@ class CollectionRatesReportView(BaseReportView):
         
         for sale in sales_with_payments:
             # Get last payment date
-            last_payment = sale.payments.filter(status='COMPLETED').order_by('-created_at').first()
+            last_payment = sale.payments.filter(status='SUCCESSFUL').order_by('-created_at').first()
             if last_payment:
                 days_to_collect = (last_payment.created_at.date() - sale.created_at.date()).days
                 total_days += days_to_collect
@@ -865,32 +1288,33 @@ class CollectionRatesReportView(BaseReportView):
         # For each period, calculate collection metrics
         time_series = []
         for period_item in period_data:
-            period_date = period_item['period']
-            
+            period_value = period_item['period']
+            period_start = period_value.date() if hasattr(period_value, 'date') else period_value
+            period_end = self._get_period_end(period_start, grouping)
+
             # Get collected amount for this period's sales
             period_sales = queryset.filter(
-                created_at__date__gte=period_date,
-                created_at__date__lt=self._get_period_end(period_date, grouping)
+                created_at__date__gte=period_start,
+                created_at__date__lt=period_end
             )
-            
+
             # Get collected amounts from payments for this period
-            from sales.models import Payment
             sale_ids = period_sales.values_list('id', flat=True)
             collected_stats = Payment.objects.filter(
                 sale_id__in=sale_ids,
-                status='COMPLETED'
+                status='SUCCESSFUL'
             ).aggregate(
                 collected_amount=Sum('amount_paid')
             )
-            
+
             collected_amount = collected_stats['collected_amount'] or Decimal('0.00')
             credit_sales_amount = period_item['credit_sales_amount'] or Decimal('0.00')
-            
+
             collection_rate = (
                 float(collected_amount / credit_sales_amount * 100)
                 if credit_sales_amount > 0 else 0.0
             )
-            
+
             # Calculate average days for this period
             avg_days = self._calculate_average_collection_period(period_sales)
             
@@ -903,7 +1327,7 @@ class CollectionRatesReportView(BaseReportView):
             retail_sale_ids = retail_period.values_list('id', flat=True)
             retail_collected_stats = Payment.objects.filter(
                 sale_id__in=retail_sale_ids,
-                status='COMPLETED'
+                status='SUCCESSFUL'
             ).aggregate(collected_amount=Sum('amount_paid'))
             
             retail_sales_amt = retail_stats['credit_sales_amount'] or Decimal('0.00')
@@ -922,7 +1346,7 @@ class CollectionRatesReportView(BaseReportView):
             wholesale_sale_ids = wholesale_period.values_list('id', flat=True)
             wholesale_collected_stats = Payment.objects.filter(
                 sale_id__in=wholesale_sale_ids,
-                status='COMPLETED'
+                status='SUCCESSFUL'
             ).aggregate(collected_amount=Sum('amount_paid'))
             
             wholesale_sales_amt = wholesale_stats['credit_sales_amount'] or Decimal('0.00')
@@ -932,10 +1356,12 @@ class CollectionRatesReportView(BaseReportView):
                 if wholesale_sales_amt > 0 else 0.0
             )
             
+            period_label = period_start.strftime('%Y-%m') if grouping == 'monthly' else period_start.strftime('%Y-%m-%d')
+
             time_series.append({
-                'period': period_date.strftime('%Y-%m-%d' if grouping == 'daily' else '%Y-%m-%d'),
-                'period_start': period_date.strftime('%Y-%m-%d'),
-                'period_end': self._get_period_end(period_date, grouping).strftime('%Y-%m-%d'),
+                'period': period_label,
+                'period_start': period_start.strftime('%Y-%m-%d'),
+                'period_end': period_end.strftime('%Y-%m-%d'),
                 'credit_sales_amount': str(credit_sales_amount),
                 'collected_amount': str(collected_amount),
                 'collection_rate': round(collection_rate, 2),
@@ -1034,53 +1460,191 @@ class CashFlowReportView(BaseReportView):
     
     def get(self, request):
         """Generate cash flow report"""
-        # Get business ID
+        export_format = request.query_params.get('export_format', '').lower()
+
         business_id, error = self.get_business_or_error(request)
         if error:
             return ReportResponse.error(error)
-        
-        # Get date range
+
         start_date, end_date, error = self.get_date_range(request, default_days=30)
         if error:
             return ReportResponse.error(error)
-        
-        storefront_id = request.query_params.get('storefront_id')
-        grouping = request.query_params.get('grouping', 'daily')
+
+        grouping = request.query_params.get('grouping', 'daily').lower()
+        if grouping not in {'daily', 'weekly', 'monthly'}:
+            grouping = 'daily'
+
         payment_method = request.query_params.get('payment_method')
-        
-        # Build queryset for payments (inflows)
+        if payment_method:
+            payment_method = payment_method.upper()
+
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+        storefront_ids = storefront_filters['ids']
+
         queryset = Payment.objects.filter(
             sale__business_id=business_id,
             created_at__date__gte=start_date,
             created_at__date__lte=end_date,
-            status='COMPLETED'
+            status='SUCCESSFUL'
         )
-        
-        if storefront_id:
-            queryset = queryset.filter(sale__storefront_id=storefront_id)
-        
+
+        if storefront_ids:
+            queryset = queryset.filter(sale__storefront_id__in=storefront_ids)
+
         if payment_method:
             queryset = queryset.filter(payment_method=payment_method)
-        
-        # Build summary
+
         summary = self._build_summary(queryset)
-        
-        # Build time series
         time_series = self._build_time_series(queryset, grouping, start_date, end_date)
-        
-        # Build metadata
+
+        filters_payload = {
+            'grouping': grouping,
+            'payment_method': payment_method,
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+        }
+
         metadata = self.build_metadata(
             start_date=start_date,
             end_date=end_date,
-            filters={
-                'grouping': grouping,
-                'storefront_id': storefront_id,
-                'payment_method': payment_method,
-                'note': 'Tier 1: Only tracking inflows (payments). Outflows will be added in Tier 2.'
-            }
+            filters=filters_payload,
+            note='Tier 1: Only tracking inflows (payments). Outflows will be added in Tier 2.'
         )
-        
+
+        if export_format:
+            return self._handle_export(
+                export_format,
+                summary,
+                time_series,
+                start_date,
+                end_date,
+                grouping,
+                payment_method,
+                storefront_filters,
+            )
+
         return ReportResponse.success(summary, time_series, metadata)
+
+    def _handle_export(
+        self,
+        export_format: str,
+        summary: Dict[str, Any],
+        time_series: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        payment_method: Optional[str],
+        storefront_filters: Dict[str, Any],
+    ) -> Response:
+        if export_format == 'csv':
+            return self._export_csv(
+                summary,
+                time_series,
+                start_date,
+                end_date,
+                grouping,
+                payment_method,
+                storefront_filters,
+            )
+        if export_format == 'pdf':
+            return Response(
+                {'error': 'PDF export not yet implemented. Please use CSV.'},
+                status=http_status.HTTP_501_NOT_IMPLEMENTED
+            )
+        return Response(
+            {'error': 'Invalid export format. Use csv or pdf.'},
+            status=http_status.HTTP_400_BAD_REQUEST
+        )
+
+    def _export_csv(
+        self,
+        summary: Dict[str, Any],
+        time_series: List[Dict[str, Any]],
+        start_date: date,
+        end_date: date,
+        grouping: str,
+        payment_method: Optional[str],
+        storefront_filters: Dict[str, Any],
+    ) -> HttpResponse:
+        output = io.StringIO()
+        writer = csv.writer(output)
+
+        writer.writerow(['Cash Flow Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow(['Grouping', grouping.title()])
+        if payment_method:
+            writer.writerow(['Payment Method', payment_method])
+        writer.writerow([f'Generated: {timezone.now().strftime("%Y-%m-%d %H:%M:%S")}'])
+        writer.writerow([])
+
+        writer.writerow(['SUMMARY'])
+        writer.writerow(['Metric', 'Value'])
+        writer.writerow(['Total Inflows', f"${Decimal(str(summary['total_inflows'])):,.2f}"])
+        writer.writerow(['Total Outflows', f"${Decimal(str(summary['total_outflows'])):,.2f}"])
+        writer.writerow(['Net Cash Flow', f"${Decimal(str(summary['net_cash_flow'])):,.2f}"])
+        writer.writerow(['Opening Balance', f"${Decimal(str(summary['opening_balance'])):,.2f}"])
+        writer.writerow(['Closing Balance', f"${Decimal(str(summary['closing_balance'])):,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['INFLOWS BY METHOD'])
+        writer.writerow(['Method', 'Amount'])
+        for method, amount in summary['inflow_by_method'].items():
+            writer.writerow([method, f"${Decimal(str(amount)):,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['INFLOWS BY TYPE'])
+        writer.writerow(['Category', 'Amount'])
+        writer.writerow(['Cash Sales', f"${Decimal(str(summary['inflow_by_type']['cash_sales'])):,.2f}"])
+        writer.writerow(['Credit Payments', f"${Decimal(str(summary['inflow_by_type']['credit_payments'])):,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['RETAIL BREAKDOWN'])
+        writer.writerow(['Inflows', f"${Decimal(str(summary['retail']['inflows'])):,.2f}"])
+        writer.writerow(['Transactions', summary['retail']['transaction_count']])
+        writer.writerow(['Average Transaction', f"${Decimal(str(summary['retail']['average_transaction'])):,.2f}"])
+        writer.writerow([])
+
+        writer.writerow(['WHOLESALE BREAKDOWN'])
+        writer.writerow(['Inflows', f"${Decimal(str(summary['wholesale']['inflows'])):,.2f}"])
+        writer.writerow(['Transactions', summary['wholesale']['transaction_count']])
+        writer.writerow(['Average Transaction', f"${Decimal(str(summary['wholesale']['average_transaction'])):,.2f}"])
+        writer.writerow([])
+
+        if time_series:
+            writer.writerow(['TIME SERIES'])
+            writer.writerow([
+                'Period',
+                'Inflows',
+                'Outflows',
+                'Net Flow',
+                'Running Balance',
+                'Transactions',
+            ])
+            for record in time_series:
+                writer.writerow([
+                    record['period'],
+                    f"${Decimal(str(record['inflows'])):,.2f}",
+                    f"${Decimal(str(record['outflows'])):,.2f}",
+                    f"${Decimal(str(record['net_flow'])):,.2f}",
+                    f"${Decimal(str(record['running_balance'])):,.2f}",
+                    record['transaction_count'],
+                ])
+
+        output.seek(0)
+        response = HttpResponse(output.getvalue(), content_type='text/csv; charset=utf-8')
+        response['Content-Disposition'] = 'attachment; filename="cash-flow-report.csv"'
+        return response
     
     def _build_summary(self, queryset) -> Dict[str, Any]:
         """Build summary cash flow statistics"""

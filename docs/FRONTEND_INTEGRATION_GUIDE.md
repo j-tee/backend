@@ -284,8 +284,11 @@ Many reports support filtering by:
   start_date: 'YYYY-MM-DD',
   end_date: 'YYYY-MM-DD',
   customer_type: 'RETAIL|WHOLESALE',
+  storefront_id: 'uuid',        // optional single storefront scope
+  storefront_ids: 'uuid,uuid',  // optional multi-storefront scope
   min_purchases: 5,             // Minimum number of purchases
   sort_by: 'revenue|purchases|average_value', // Default: revenue
+  export_format: 'csv|pdf',     // optional export
   page: 1,
   page_size: 100
 }
@@ -326,6 +329,7 @@ Many reports support filtering by:
 - Show retail vs wholesale split with donut chart
 - Allow filtering by customer type
 - Display top customers in a leaderboard style
+- Surface storefront scope when filtering so teams know which locations feed the leaderboard
 
 ---
 
@@ -543,32 +547,62 @@ Many reports support filtering by:
   start_date: 'YYYY-MM-DD',
   end_date: 'YYYY-MM-DD',
   grouping: 'daily|weekly|monthly',
-  customer_type: 'RETAIL|WHOLESALE'
+  storefront_id: 'uuid',        // optional single storefront scope
+  storefront_ids: 'uuid,uuid',  // optional multi-storefront scope
+  export_format: 'csv|pdf'      // optional export (CSV available)
 }
 ```
 
 **Response Structure:**
 ```json
 {
-  "summary": {
-    "total_credit_issued": "500000.00",
-    "total_payments_received": "400000.00",
-    "total_outstanding": "100000.00",
-    "collection_rate": 80.0,       // Percentage collected
-    "average_days_to_collect": 25,
-    "on_time_collection_rate": 70.0
-  },
-  "data": [
-    {
-      "period": "2024-10",
-      "credit_issued": "100000.00",
-      "payments_received": "85000.00",
-      "outstanding": "15000.00",
-      "collection_rate": 85.0,
-      "avg_days_to_collect": 20
+  "success": true,
+  "data": {
+    "summary": {
+      "total_credit_sales_amount": "500000.00",
+      "total_collected_amount": "420000.00",
+      "outstanding_amount": "80000.00",
+      "overall_collection_rate": 84.0,
+      "average_collection_period_days": 25.5,
+      "retail": {
+        "credit_sales_amount": 320000.0,
+        "collected_amount": 280000.0,
+        "collection_rate": 87.5,
+        "average_collection_period_days": 23.1
+      },
+      "wholesale": {
+        "credit_sales_amount": 180000.0,
+        "collected_amount": 140000.0,
+        "collection_rate": 77.8,
+        "average_collection_period_days": 29.4
+      }
+    },
+    "results": [
+      {
+        "period": "2024-10",
+        "period_start": "2024-10-01",
+        "period_end": "2024-11-01",
+        "credit_sales_amount": "150000.00",
+        "collected_amount": "120000.00",
+        "collection_rate": 80.0,
+        "average_days_to_collect": 22.3,
+        "retail": {
+          "collection_rate": 82.5
+        },
+        "wholesale": {
+          "collection_rate": 75.5
+        }
+      }
+    ],
+    "metadata": {
+      "filters_applied": {
+        "storefront_id": "uuid-primary",
+        "storefront_ids": ["uuid-primary"],
+        "storefront_names": ["Flagship Store"],
+        "grouping": "monthly"
+      }
     }
-    // ... more periods
-  ]
+  }
 }
 ```
 
@@ -592,33 +626,64 @@ Many reports support filtering by:
   start_date: 'YYYY-MM-DD',
   end_date: 'YYYY-MM-DD',
   grouping: 'daily|weekly|monthly',
-  warehouse_id: 'uuid'
+  storefront_id: 'uuid',        // optional single storefront scope
+  storefront_ids: 'uuid,uuid',  // optional multi-storefront scope
+  payment_method: 'cash|card|bank_transfer|mobile_money|momo',
+  export_format: 'csv|pdf'      // optional export (CSV available)
 }
 ```
 
 **Response Structure:**
 ```json
 {
-  "summary": {
-    "opening_balance": "50000.00",
-    "total_cash_in": "400000.00",
-    "total_cash_out": "350000.00",
-    "net_cash_flow": "50000.00",
-    "closing_balance": "100000.00",
-    "largest_inflow": "25000.00",
-    "largest_outflow": "15000.00"
-  },
-  "data": [
-    {
-      "period": "2024-10-12",
-      "opening_balance": "95000.00",
-      "cash_in": "20000.00",
-      "cash_out": "15000.00",
-      "net_flow": "5000.00",
-      "closing_balance": "100000.00"
+  "success": true,
+  "data": {
+    "summary": {
+      "total_inflows": "125000.00",
+      "total_outflows": "0.00",
+      "net_cash_flow": "125000.00",
+      "opening_balance": "0.00",
+      "closing_balance": "125000.00",
+      "inflow_by_method": {
+        "CASH": "80000.00",
+        "CARD": "30000.00",
+        "BANK_TRANSFER": "15000.00",
+        "MOBILE_MONEY": "0.00"
+      },
+      "retail": {
+        "inflows": 90000.0,
+        "transaction_count": 45,
+        "average_transaction": 2000.0
+      },
+      "wholesale": {
+        "inflows": 35000.0,
+        "transaction_count": 5,
+        "average_transaction": 7000.0
+      }
+    },
+    "results": [
+      {
+        "period": "2024-10-12",
+        "period_start": "2024-10-12",
+        "period_end": "2024-10-13",
+        "inflows": "5000.00",
+        "outflows": "0.00",
+        "net_flow": "5000.00",
+        "running_balance": "5000.00",
+        "transaction_count": 12
+      }
+    ],
+    "metadata": {
+      "filters_applied": {
+        "storefront_id": "uuid-primary",
+        "storefront_ids": ["uuid-primary"],
+        "storefront_names": ["Flagship Store"],
+        "grouping": "daily",
+        "payment_method": "CASH"
+      },
+      "note": "Tier 1: Only tracking inflows (payments). Outflows will be added in Tier 2."
     }
-    // ... more periods
-  ]
+  }
 }
 ```
 

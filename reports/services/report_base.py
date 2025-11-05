@@ -4,12 +4,14 @@ Base Report Builder Classes
 Provides foundation for all analytical reports with common patterns.
 """
 
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import date
 from decimal import Decimal
 from rest_framework.views import APIView
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
 from django.db.models import QuerySet
+from rest_framework import status as http_status
 
 # Subscription enforcement
 from subscriptions.permissions import RequiresSubscriptionForReports
@@ -349,6 +351,97 @@ class BaseReportView(APIView, BusinessFilterMixin, DateRangeFilterMixin, Paginat
             filters['end_date'] = end_date
 
         return filters
+
+    def get_storefront_filters(
+        self,
+        request,
+        *,
+        business_id: Optional[int] = None,
+        enforce_access: bool = True,
+        include_names: bool = True,
+    ) -> Tuple[Dict[str, Any], Optional[Response]]:
+        """Parse storefront filters and optionally enforce access permissions."""
+
+        primary = request.query_params.get('storefront_id')
+
+        raw_values: List[str] = []
+
+        multi_params = request.query_params.getlist('storefront_ids')
+        if not multi_params:
+            single_multi = request.query_params.get('storefront_ids')
+            if single_multi:
+                multi_params = [single_multi]
+
+        for raw_entry in multi_params:
+            segments = [segment.strip() for segment in raw_entry.split(',') if segment.strip()]
+            if segments:
+                raw_values.extend(segments)
+
+        if primary:
+            raw_values.append(primary.strip())
+
+        seen: Set[str] = set()
+        unique_ids: List[str] = []
+        for value in raw_values:
+            if value not in seen:
+                seen.add(value)
+                unique_ids.append(value)
+
+        filters: Dict[str, Any] = {
+            'primary': primary.strip() if primary else None,
+            'ids': unique_ids,
+        }
+
+        if include_names:
+            filters['names'] = []
+
+        if not unique_ids:
+            return filters, None
+
+        accessible_storefronts = request.user.get_accessible_storefronts()
+        if business_id is not None:
+            accessible_storefronts = accessible_storefronts.filter(
+                business_link__business_id=business_id,
+                business_link__is_active=True,
+            )
+
+        permitted_storefronts = list(accessible_storefronts.filter(id__in=unique_ids))
+        permitted_ids = {str(storefront.id) for storefront in permitted_storefronts}
+
+        if enforce_access and len(permitted_ids) != len(unique_ids):
+            missing_ids = [storefront_id for storefront_id in unique_ids if storefront_id not in permitted_ids]
+            error = ReportError.create(
+                ReportError.INVALID_FILTER,
+                "Storefront not found or inaccessible for this user.",
+                {'storefront_ids': missing_ids}
+            )
+            return filters, ReportResponse.error(error, http_status=http_status.HTTP_404_NOT_FOUND)
+
+        if include_names:
+            name_map = {str(storefront.id): storefront.name for storefront in permitted_storefronts}
+            filters['names'] = [name_map.get(storefront_id, storefront_id) for storefront_id in unique_ids]
+
+        return filters, None
+
+    @staticmethod
+    def resolve_storefront_names(storefront_ids: List[str]) -> List[str]:
+        """Map storefront identifiers to display names while preserving order."""
+
+        if not storefront_ids:
+            return []
+
+        from inventory.models import StoreFront
+
+        storefront_qs = StoreFront.objects.filter(id__in=storefront_ids)
+        name_map = {str(storefront.id): storefront.name for storefront in storefront_qs}
+
+        ordered_names: List[str] = []
+        for storefront_id in storefront_ids:
+            name = name_map.get(storefront_id)
+            if name:
+                ordered_names.append(name)
+
+        return ordered_names
 
 
 class BaseReportBuilder:

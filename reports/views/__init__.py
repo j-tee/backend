@@ -26,6 +26,7 @@ from .sales_reports import (
     ProductPerformanceReportView,
     CustomerAnalyticsReportView,
     RevenueTrendsReportView,
+    ReportStorefrontListView,
 )
 
 # Analytical report views - Financial (Phase 3)
@@ -70,6 +71,7 @@ __all__ = [
     'ProductPerformanceReportView',
     'CustomerAnalyticsReportView',
     'RevenueTrendsReportView',
+    'ReportStorefrontListView',
     
     # Financial Reports
     'RevenueProfitReportView',

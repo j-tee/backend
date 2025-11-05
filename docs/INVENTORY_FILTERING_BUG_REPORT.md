@@ -13,6 +13,13 @@
 
 The backend now **fully supports batch and warehouse filtering** in the `stock_reconciliation` endpoint!
 
+### 🆕 Storefront Filters Update (Sales Reports)
+- Storefront-aware filtering is now live across sales analytics endpoints (`/reports/api/sales-summary/`, `/reports/api/product-performance/`, `/reports/api/customer-analytics/`, `/reports/api/revenue-trends/`).
+- The backend validates requested storefront IDs against the current user's accessible storefronts and returns `INVALID_FILTER` errors for unauthorized selections.
+- CSV exports now include the applied storefront scope in their headers so downloaded reports stay consistent with on-screen filters.
+- New endpoint: `GET /reports/api/storefronts/` returns the storefront list the logged-in member may select from.
+- **Frontend TODO (≈15 minutes):** wire storefront picker to the new list endpoint, include `storefront_id` (or comma-separated IDs) in report requests, and surface backend error messages to users when they pick an unavailable storefront.
+
 ### What's New
 ```http
 # All filter combinations now work!
@@ -1904,6 +1911,13 @@ curl -X GET "http://localhost:8000/api/inventory/products/abc-123/stock-reconcil
 ---
 
 ## 📋 Document Change Log
+
+### Version 4.0 (November 5, 2025) - **Sales Reports Storefront Filtering**
+- ✅ Centralized storefront validation in `BaseReportView.get_storefront_filters`
+- ✅ Sales report endpoints now require storefronts to belong to the requesting business
+- ✅ CSV exports label the storefront scope for traceability
+- ✅ Added `/reports/api/storefronts/` listing endpoint for the frontend filter picker
+- ✅ Updated documentation with frontend action items for storefront-aware reports
 
 ### Version 3.0 (November 4, 2025) - **BACKEND IMPLEMENTATION COMPLETE**
 - ✅ **IMPLEMENTED:** All filtering functionality in backend
