@@ -378,7 +378,7 @@ class CustomerSegmentationReportTestCase(TestCase):
         })
         
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertEqual(response['Content-Type'], 'text/csv')
+        self.assertEqual(response['Content-Type'], 'text/csv; charset=utf-8')
         self.assertIn('attachment', response['Content-Disposition'])
         
         # Check CSV content
