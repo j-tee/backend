@@ -85,7 +85,21 @@ class TopCustomersReportView(BaseReportView):
                 )
                 return ReportResponse.error(error)
 
-        customer_metrics = self._build_customer_metrics(business_id, start_date, end_date)
+        storefront_filters, error_response = self.get_storefront_filters(
+            request,
+            business_id=business_id
+        )
+        if error_response:
+            return error_response
+
+        storefront_ids = storefront_filters['ids']
+
+        customer_metrics = self._build_customer_metrics(
+            business_id,
+            start_date,
+            end_date,
+            storefront_ids
+        )
 
         filtered_metrics: List[Dict[str, Any]] = []
         if customer_metrics:
@@ -96,6 +110,14 @@ class TopCustomersReportView(BaseReportView):
         serialized_customers = [self._serialize_customer(item) for item in top_metrics]
         summary = self._build_summary(filtered_metrics)
 
+        filters_payload = {
+            'segment': segment,
+            'limit': limit,
+            'storefront_id': storefront_filters['primary'],
+            'storefront_ids': storefront_ids,
+            'storefront_names': storefront_filters['names'],
+        }
+
         metadata = {
             'segment': segment,
             'limit_applied': limit,
@@ -103,13 +125,26 @@ class TopCustomersReportView(BaseReportView):
             'returned_records': len(serialized_customers),
             'start_date': start_date.isoformat(),
             'end_date': end_date.isoformat(),
-            'generated_at': timezone.now().isoformat()
+            'generated_at': timezone.now().isoformat(),
+            'filters_applied': filters_payload,
         }
 
         if export_format == 'csv':
-            return self._build_csv_response(summary, serialized_customers, start_date, end_date)
+            return self._build_csv_response(
+                summary,
+                serialized_customers,
+                start_date,
+                end_date,
+                storefront_filters
+            )
         if export_format == 'pdf':
-            return self._build_pdf_response(summary, serialized_customers, start_date, end_date)
+            return self._build_pdf_response(
+                summary,
+                serialized_customers,
+                start_date,
+                end_date,
+                storefront_filters
+            )
 
         payload = {
             'success': True,
@@ -145,12 +180,20 @@ class TopCustomersReportView(BaseReportView):
             return self.DEFAULT_LIMIT, ReportResponse.error(error)
         return limit, None
 
-    def _build_customer_metrics(self, business_id: int, start_date: date, end_date: date) -> List[Dict[str, Any]]:
+    def _build_customer_metrics(
+        self,
+        business_id: int,
+        start_date: date,
+        end_date: date,
+        storefront_ids: List[str]
+    ) -> List[Dict[str, Any]]:
         sale_filters = Q(
             sales__status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL],
             sales__created_at__date__gte=start_date,
             sales__created_at__date__lte=end_date
         )
+        if storefront_ids:
+            sale_filters &= Q(sales__storefront_id__in=storefront_ids)
 
         customers_qs = (
             Customer.objects.filter(business_id=business_id)
@@ -169,8 +212,20 @@ class TopCustomersReportView(BaseReportView):
             return []
 
         customer_ids = [customer.id for customer in customers if customer.id]
-        sales_dates = self._get_sales_dates(business_id, customer_ids, start_date, end_date)
-        favorite_categories = self._get_favorite_categories(business_id, customer_ids, start_date, end_date)
+        sales_dates = self._get_sales_dates(
+            business_id,
+            customer_ids,
+            start_date,
+            end_date,
+            storefront_ids
+        )
+        favorite_categories = self._get_favorite_categories(
+            business_id,
+            customer_ids,
+            start_date,
+            end_date,
+            storefront_ids
+        )
 
         metrics: List[Dict[str, Any]] = []
 
@@ -277,13 +332,23 @@ class TopCustomersReportView(BaseReportView):
         summary: Dict[str, Any],
         customers: List[Dict[str, Any]],
         start_date: date,
-        end_date: date
+        end_date: date,
+        storefront_filters: Dict[str, Any]
     ) -> HttpResponse:
         response = HttpResponse(content_type='text/csv')
         filename = f"top-customers-{start_date.isoformat()}-to-{end_date.isoformat()}.csv"
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
         writer = csv.writer(response)
+        writer.writerow(['Top Customers Report'])
+        writer.writerow([f'Period: {start_date} to {end_date}'])
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            writer.writerow(['Storefront Scope', ', '.join(labels)])
+        else:
+            writer.writerow(['Storefront Scope', 'All storefronts'])
+        writer.writerow([])
+
         writer.writerow([
             'Customer Name', 'Email', 'Phone', 'Total Revenue', 'Total Purchases', 'Average Order Value',
             'First Purchase', 'Last Purchase', 'Lifetime (days)', 'Purchase Frequency', 'Favorite Category',
@@ -316,7 +381,8 @@ class TopCustomersReportView(BaseReportView):
         summary: Dict[str, Any],
         customers: List[Dict[str, Any]],
         start_date: date,
-        end_date: date
+        end_date: date,
+        storefront_filters: Dict[str, Any]
     ) -> HttpResponse:
         buffer = BytesIO()
         doc = SimpleDocTemplate(buffer, pagesize=letter, title='Top Customers Report')
@@ -325,6 +391,13 @@ class TopCustomersReportView(BaseReportView):
 
         title = f"Top Customers Report ({start_date.isoformat()} to {end_date.isoformat()})"
         elements.append(Paragraph(title, styles['Title']))
+        elements.append(Spacer(1, 12))
+
+        if storefront_filters and storefront_filters.get('ids'):
+            labels = storefront_filters.get('names') or storefront_filters.get('ids')
+            elements.append(Paragraph(f"Storefront Scope: {', '.join(labels)}", styles['Normal']))
+        else:
+            elements.append(Paragraph("Storefront Scope: All storefronts", styles['Normal']))
         elements.append(Spacer(1, 12))
 
         summary_table = Table([
@@ -465,23 +538,24 @@ class TopCustomersReportView(BaseReportView):
         business_id: int,
         customer_ids: List[Any],
         start_date: date,
-        end_date: date
+        end_date: date,
+        storefront_ids: List[str]
     ) -> Dict[Any, List[date]]:
         sales_map: Dict[Any, List[date]] = defaultdict(list)
         if not customer_ids:
             return sales_map
 
-        sales = (
-            Sale.objects.filter(
-                business_id=business_id,
-                customer_id__in=customer_ids,
-                status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL],
-                created_at__date__gte=start_date,
-                created_at__date__lte=end_date
-            )
-            .values('customer_id', 'created_at')
-            .order_by('customer_id', 'created_at')
+        sales_queryset = Sale.objects.filter(
+            business_id=business_id,
+            customer_id__in=customer_ids,
+            status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL],
+            created_at__date__gte=start_date,
+            created_at__date__lte=end_date
         )
+        if storefront_ids:
+            sales_queryset = sales_queryset.filter(storefront_id__in=storefront_ids)
+
+        sales = sales_queryset.values('customer_id', 'created_at').order_by('customer_id', 'created_at')
 
         for sale in sales:
             customer_id = sale['customer_id']
@@ -496,20 +570,25 @@ class TopCustomersReportView(BaseReportView):
         business_id: int,
         customer_ids: List[Any],
         start_date: date,
-        end_date: date
+        end_date: date,
+        storefront_ids: List[str]
     ) -> Dict[Any, str]:
         favorites: Dict[Any, str] = {}
         if not customer_ids:
             return favorites
 
+        sale_items_queryset = SaleItem.objects.filter(
+            sale__business_id=business_id,
+            sale__customer_id__in=customer_ids,
+            sale__status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL],
+            sale__created_at__date__gte=start_date,
+            sale__created_at__date__lte=end_date
+        )
+        if storefront_ids:
+            sale_items_queryset = sale_items_queryset.filter(sale__storefront_id__in=storefront_ids)
+
         sale_items = (
-            SaleItem.objects.filter(
-                sale__business_id=business_id,
-                sale__customer_id__in=customer_ids,
-                sale__status__in=[Sale.STATUS_COMPLETED, Sale.STATUS_PARTIAL],
-                sale__created_at__date__gte=start_date,
-                sale__created_at__date__lte=end_date
-            )
+            sale_items_queryset
             .values('sale__customer_id', 'product__category__name')
             .annotate(total_revenue=Coalesce(Sum('total_price'), Decimal('0.00')))
             .order_by('sale__customer_id', '-total_revenue')

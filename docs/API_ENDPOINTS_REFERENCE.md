@@ -27,6 +27,8 @@
 | 7 | `/financial/collection-rates/` | GET | Credit collection efficiency metrics |
 | 8 | `/financial/cash-flow/` | GET | Cash on hand movements |
 
+> **Storefront scope:** Sales and financial analytics endpoints accept `storefront_id` (and optional `storefront_ids`) to constrain dashboards and exports to specific storefronts. Omit the parameter to retain current all-storefront totals.
+
 ### Inventory Reports (4)
 
 | # | Endpoint | Method | Purpose |
