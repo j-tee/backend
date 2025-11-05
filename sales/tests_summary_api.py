@@ -354,7 +354,7 @@ class SalesSummaryAPITestCase(APITestCase):
 
         response = self.client.get(url, params)
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response['Content-Type'], 'text/csv')
+        self.assertEqual(response['Content-Type'], 'text/csv; charset=utf-8')
 
         csv_content = response.content.decode('utf-8')
         rows = list(csv.reader(io.StringIO(csv_content)))

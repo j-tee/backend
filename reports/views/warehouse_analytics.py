@@ -684,7 +684,7 @@ class WarehouseAnalyticsAPIView(APIView):
         import csv
         from django.http import HttpResponse
         
-        response = HttpResponse(content_type='text/csv')
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = f'attachment; filename="warehouse_analytics_{start_date}_{end_date}.csv"'
         
         writer = csv.writer(response)

@@ -1387,7 +1387,7 @@ class StockMovementHistoryExportView(BaseReportView):
         if export_format == 'csv':
             streaming_content = self._stream_csv_rows(base_kwargs, timezone_obj)
             filename = f"stock_movements_{end_date.isoformat()}.csv"
-            response = StreamingHttpResponse(streaming_content, content_type='text/csv')
+            response = StreamingHttpResponse(streaming_content, content_type='text/csv; charset=utf-8')
         else:
             streaming_content, filename = self._build_xlsx_stream(base_kwargs, timezone_obj, end_date)
             response = StreamingHttpResponse(

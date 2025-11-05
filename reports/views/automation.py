@@ -302,7 +302,7 @@ class ExportHistoryViewSet(viewsets.ReadOnlyModelViewSet):
             # Determine content type
             content_types = {
                 'excel': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'csv': 'text/csv',
+                'csv': 'text/csv; charset=utf-8',
                 'pdf': 'application/pdf'
             }
             content_type = content_types.get(history.format, 'application/octet-stream')

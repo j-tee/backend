@@ -180,7 +180,7 @@ class StorefrontSalesReportBaseCase(APITestCase):
             user=self.user,
             customer=customer,
             payment_type="CREDIT",
-            status="COMPLETED",
+            status=Sale.STATUS_PENDING,
             type=sale_type,
             is_credit_sale=True,
         )

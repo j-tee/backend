@@ -1509,7 +1509,7 @@ class SaleViewSet(viewsets.ModelViewSet):
         queryset = self.filter_queryset(self.get_queryset())
         
         # Create CSV response
-        response = HttpResponse(content_type='text/csv')
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = 'attachment; filename="sales_export.csv"'
         
         writer = csv.writer(response)
