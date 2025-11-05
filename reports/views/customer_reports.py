@@ -335,7 +335,7 @@ class TopCustomersReportView(BaseReportView):
         end_date: date,
         storefront_filters: Dict[str, Any]
     ) -> HttpResponse:
-        response = HttpResponse(content_type='text/csv')
+        response = HttpResponse(content_type='text/csv; charset=utf-8')
         filename = f"top-customers-{start_date.isoformat()}-to-{end_date.isoformat()}.csv"
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
@@ -1523,7 +1523,7 @@ class CustomerSegmentationReportView(BaseReportView):
                 actions
             ])
         
-        response = HttpResponse(buffer.getvalue(), content_type='text/csv')
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (
             f'attachment; filename="customer-segmentation-{start_date}-to-{end_date}.csv"'
         )
@@ -2575,7 +2575,7 @@ class CreditUtilizationReportView(BaseReportView):
                 f"{item['last_payment_amount']:.2f}",
             ])
 
-        response = HttpResponse(buffer.getvalue(), content_type='text/csv')
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (
             f'attachment; filename="credit-utilization-{start_date}-to-{end_date}.csv"'
         )
@@ -3531,7 +3531,7 @@ class PurchasePatternAnalysisReportView(BaseReportView):
         writer.writerow(['online', channel_prefs.get(self.CHANNEL_ONLINE, 0)])
         writer.writerow(['phone', channel_prefs.get(self.CHANNEL_PHONE, 0)])
 
-        response = HttpResponse(buffer.getvalue(), content_type='text/csv')
+        response = HttpResponse(buffer.getvalue(), content_type='text/csv; charset=utf-8')
         response['Content-Disposition'] = (
             f'attachment; filename="customer-purchase-patterns-{start_date}-to-{end_date}.csv"'
         )
