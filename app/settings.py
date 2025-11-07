@@ -68,6 +68,7 @@ INSTALLED_APPS = [
     'subscriptions',
     'reports',
     'settings.apps.SettingsConfig',
+    'ai_features.apps.AiFeaturesConfig',
 ]
 
 MIDDLEWARE = [
@@ -387,6 +388,45 @@ if ENABLE_API_THROTTLE:
 else:
     REST_FRAMEWORK.pop('DEFAULT_THROTTLE_CLASSES', None)
     REST_FRAMEWORK.pop('DEFAULT_THROTTLE_RATES', None)
+
+
+# ====================
+# AI Features Configuration
+# ====================
+
+# OpenAI API Configuration
+OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+OPENAI_ORGANIZATION = config('OPENAI_ORGANIZATION', default='')
+
+# Paystack Payment Configuration
+PAYSTACK_SECRET_KEY = config('PAYSTACK_SECRET_KEY', default='')
+PAYSTACK_PUBLIC_KEY = config('PAYSTACK_PUBLIC_KEY', default='')
+
+# AI Feature Flags
+AI_FEATURES_ENABLED = config('AI_FEATURES_ENABLED', default=True, cast=bool)
+
+# AI Model Selection
+AI_MODELS = {
+    'cheap': 'gpt-4o-mini',  # $0.00015 input, $0.0006 output
+    'standard': 'gpt-3.5-turbo',  # $0.0005 input, $0.0015 output
+    'advanced': 'gpt-4-turbo',  # $0.01 input, $0.03 output
+}
+
+# Rate Limiting (prevent abuse)
+AI_RATE_LIMITS = {
+    'requests_per_minute': 10,
+    'requests_per_hour': 100,
+    'requests_per_day': 500,
+}
+
+# Cost Tracking & Alerts
+from decimal import Decimal
+AI_COST_ALERT_THRESHOLD = 100  # Alert if monthly cost exceeds GHS 100 per business
+AI_BUDGET_CAPS = {
+    'per_business_daily': Decimal('10.0'),  # GHS 10/day max
+    'per_business_monthly': Decimal('200.0'),  # GHS 200/month max
+    'platform_monthly': Decimal('10000.0'),  # GHS 10,000 total platform budget
+}
 
 PLATFORM_OWNER_EMAIL = config('PLATFORM_OWNER_EMAIL', default='juliustetteh@gmail.com')
 
