@@ -90,6 +90,11 @@ class CreditPurchaseRequestSerializer(serializers.Serializer):
         choices=['mobile_money', 'card'],
         default='mobile_money'
     )
+    callback_url = serializers.URLField(
+        required=False,
+        allow_blank=True,
+        help_text="Frontend callback URL for payment redirect (e.g., https://frontend.com/payment/callback)"
+    )
 
 
 class NaturalLanguageQuerySerializer(serializers.Serializer):

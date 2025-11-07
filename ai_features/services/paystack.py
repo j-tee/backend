@@ -234,7 +234,7 @@ class PaystackService:
 
 def generate_payment_reference(prefix: str = "AI-CREDIT") -> str:
     """
-    Generate unique payment reference
+    Generate unique payment reference with collision detection
     
     Args:
         prefix: Reference prefix
@@ -244,8 +244,20 @@ def generate_payment_reference(prefix: str = "AI-CREDIT") -> str:
     """
     import time
     import secrets
+    import uuid
+    from ..models import AICreditPurchase
     
-    timestamp = int(time.time())
-    random_suffix = secrets.token_hex(4)
+    max_attempts = 10
     
-    return f"{prefix}-{timestamp}-{random_suffix}"
+    for _ in range(max_attempts):
+        # Use timestamp + UUID for better uniqueness
+        timestamp = int(time.time() * 1000)  # milliseconds for more precision
+        unique_id = uuid.uuid4().hex[:8]
+        reference = f"{prefix}-{timestamp}-{unique_id}"
+        
+        # Check if reference already exists
+        if not AICreditPurchase.objects.filter(payment_reference=reference).exists():
+            return reference
+    
+    # Fallback: use pure UUID if all attempts fail
+    return f"{prefix}-{uuid.uuid4().hex}"

@@ -133,7 +133,8 @@ def purchase_credits(request):
     {
         "package": "starter" | "value" | "premium" | "custom",
         "custom_amount": 50.00,  // Required if package="custom"
-        "payment_method": "mobile_money" | "card"
+        "payment_method": "mobile_money" | "card",
+        "callback_url": "https://frontend.com/payment/callback"  // Optional: Frontend callback URL
     }
     
     Packages:
@@ -157,6 +158,8 @@ def purchase_credits(request):
         },
         "credits_to_add": 100.0
     }
+    
+    Note: If callback_url is not provided, defaults to {FRONTEND_URL}/payment/callback
     """
     from subscriptions.models import TaxConfiguration
     from datetime import date
@@ -172,6 +175,7 @@ def purchase_credits(request):
     business_id = str(business.id)
     package = serializer.validated_data['package']
     payment_method = serializer.validated_data.get('payment_method', 'mobile_money')
+    callback_url = serializer.validated_data.get('callback_url')
     
     # Define credit packages
     packages = {
@@ -251,9 +255,16 @@ def purchase_credits(request):
         # Generate unique payment reference
         payment_reference = generate_payment_reference()
         
-        # Initialize Paystack transaction
-        callback_url = request.build_absolute_uri('/ai/api/credits/verify/')
+        # Use provided callback_url or default to subscription callback (for consistency)
+        from django.conf import settings
+        if callback_url:
+            paystack_callback_url = callback_url
+        else:
+            # Default to same callback as subscriptions for consistency
+            # Frontend can detect payment type from reference prefix (AI-CREDIT-xxx vs SUB-xxx)
+            paystack_callback_url = f'{settings.FRONTEND_URL}/app/subscription/payment/callback'
         
+        # Initialize Paystack transaction
         paystack_response = PaystackService.initialize_transaction(
             email=request.user.email,
             amount=total_amount,  # Include taxes
@@ -268,7 +279,7 @@ def purchase_credits(request):
                 'bonus_credits': str(bonus_credits),
                 'purchase_type': 'ai_credits'
             },
-            callback_url=callback_url
+            callback_url=paystack_callback_url
         )
         
         # Create pending purchase record with tax information
@@ -317,19 +328,26 @@ def purchase_credits(request):
         )
 
 
-@api_view(['GET'])
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def verify_payment(request):
     """
     Verify Paystack payment and credit the account
     
     GET /ai/api/credits/verify/?reference=AI-CREDIT-xxx
+    POST /ai/api/credits/verify/ with {"reference": "AI-CREDIT-xxx"}
     
     This endpoint is called:
-    1. By Paystack redirect after payment (callback_url)
-    2. By frontend to check payment status
+    1. By frontend to verify payment (with authentication)
+    2. As a manual verification endpoint
+    
+    Note: Paystack should redirect to FRONTEND callback page, not this backend API.
     """
-    reference = request.GET.get('reference')
+    # Support both GET and POST, and both query params and body
+    if request.method == 'GET':
+        reference = request.GET.get('reference') or request.GET.get('trxref')
+    else:
+        reference = request.data.get('reference') or request.data.get('trxref')
     
     if not reference:
         return Response(
@@ -373,16 +391,31 @@ def verify_payment(request):
         # Convert pesewas to GHS
         amount_paid_ghs = Decimal(str(payment_data['amount'])) / Decimal('100')
         
-        # Credit the account
-        result = AIBillingService.purchase_credits(
-            business_id=str(purchase.business_id),
-            amount_paid=amount_paid_ghs,
-            credits_purchased=purchase.credits_purchased,
-            payment_reference=reference,
-            payment_method=purchase.payment_method,
-            user_id=str(purchase.user_id),
-            bonus_credits=purchase.bonus_credits
+        # Add credits to business balance (don't create new purchase record, it already exists)
+        from datetime import timedelta
+        total_credits = purchase.credits_purchased + purchase.bonus_credits
+        expires_at = timezone.now() + timedelta(days=180)
+        
+        # Get or create credit balance record
+        from ai_features.models import BusinessAICredits
+        credits, created = BusinessAICredits.objects.get_or_create(
+            business_id=purchase.business_id,
+            is_active=True,
+            defaults={
+                'balance': Decimal('0.00'),
+                'expires_at': expires_at
+            }
         )
+        
+        # Add new credits
+        credits.balance += total_credits
+        credits.expires_at = max(credits.expires_at, expires_at)  # Extend expiry if needed
+        credits.save()
+        
+        # Clear cache
+        from django.core.cache import cache
+        cache_key = f"ai_credits_balance_{purchase.business_id}"
+        cache.delete(cache_key)
         
         # Update purchase status
         purchase.payment_status = 'completed'
@@ -393,19 +426,27 @@ def verify_payment(request):
             'status': 'success',
             'message': 'Payment verified and credits added successfully',
             'reference': reference,
-            'credits_added': float(purchase.credits_purchased + purchase.bonus_credits),
-            'new_balance': result['new_balance']
+            'credits_added': float(total_credits),
+            'new_balance': float(credits.balance)
         })
     
     except PaystackException as e:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error(f'PaystackException in verify_payment: {e}', exc_info=True)
         return Response(
             {'error': 'verification_failed', 'message': str(e)},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
     
     except Exception as e:
+        import logging
+        import traceback
+        logger = logging.getLogger(__name__)
+        logger.error(f'Exception in verify_payment: {e}', exc_info=True)
+        logger.error(f'Traceback: {traceback.format_exc()}')
         return Response(
-            {'error': str(e)},
+            {'error': str(e), 'type': type(e).__name__},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
