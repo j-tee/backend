@@ -20,6 +20,7 @@ urlpatterns = [
     path('subscriptions/', include('subscriptions.urls')),
     path('reports/', include('reports.urls')),
     path('settings/', include('settings.urls')),
+    path('ai/', include('ai_features.urls')),
     path('auth/invitations/<str:token>/', BusinessInvitationInfoView.as_view(), name='invitation-info'),
     path('auth/invitations/<str:token>/accept/', BusinessInvitationAcceptView.as_view(), name='invitation-accept'),
     # Subscription API aliases at root level for frontend compatibility
