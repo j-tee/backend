@@ -21,6 +21,7 @@ from .services import (
     InsufficientCreditsException, 
     QueryIntelligenceService, 
     get_openai_service, 
+    OpenAIServiceError,
     PaystackService, 
     PaystackException,
     generate_payment_reference
@@ -691,6 +692,22 @@ def natural_language_query(request):
         return Response(
             {'error': 'insufficient_credits', 'message': str(e)},
             status=status.HTTP_402_PAYMENT_REQUIRED
+        )
+    except OpenAIServiceError as e:
+        AIBillingService.log_failed_transaction(
+            business_id=business_id,
+            feature='natural_language_query',
+            error_message=str(e),
+            user_id=str(request.user.id),
+            request_data={'query': query}
+        )
+        return Response(
+            {
+                'error': 'ai_provider_unavailable',
+                'message': 'Our AI partner temporarily rejected the request. Please try again shortly.',
+                'detail': str(e)
+            },
+            status=status.HTTP_503_SERVICE_UNAVAILABLE
         )
     except Exception as e:
         AIBillingService.log_failed_transaction(

@@ -19,6 +19,11 @@ except ImportError:
     OpenAI = None
 
 
+class OpenAIServiceError(Exception):
+    """Raised when OpenAI service encounters an error"""
+    pass
+
+
 class OpenAIService:
     """Centralized OpenAI API service"""
     
@@ -177,7 +182,7 @@ class OpenAIService:
             
         except Exception as e:
             processing_time_ms = int((time.time() - start_time) * 1000)
-            raise Exception(f"OpenAI API Error: {str(e)}")
+            raise OpenAIServiceError(f"OpenAI API Error: {str(e)}")
     
     def generate_text(
         self,
