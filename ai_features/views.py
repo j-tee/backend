@@ -6,7 +6,7 @@ REST API endpoints for all AI-powered features.
 import time
 import json
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from django.db.models import Sum, Count, Q, Avg
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
