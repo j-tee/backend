@@ -62,7 +62,16 @@ class OpenAIService:
         if not api_key:
             raise ValueError("OPENAI_API_KEY not configured in settings")
         
-        self.client = OpenAI(api_key=api_key)
+        # Initialize OpenAI client with explicit parameters only
+        try:
+            self.client = OpenAI(
+                api_key=api_key,
+                timeout=60.0,
+                max_retries=2
+            )
+        except TypeError as e:
+            # Fallback for version compatibility
+            self.client = OpenAI(api_key=api_key)
     
     def _get_model_for_feature(self, feature: str) -> str:
         """Get the appropriate model for a feature"""
