@@ -6,7 +6,7 @@ REST API endpoints for all AI-powered features.
 import time
 import json
 from decimal import Decimal
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from django.db.models import Sum, Count, Q, Avg
 from rest_framework import status
 from rest_framework.decorators import api_view, permission_classes
@@ -17,11 +17,12 @@ from django.utils import timezone
 
 from .models import BusinessAICredits, AITransaction, AICreditPurchase
 from .services import (
-    AIBillingService, 
-    InsufficientCreditsException, 
-    QueryIntelligenceService, 
-    get_openai_service, 
-    PaystackService, 
+    AIBillingService,
+    InsufficientCreditsException,
+    QueryIntelligenceService,
+    get_openai_service,
+    OpenAIServiceError,
+    PaystackService,
     PaystackException,
     generate_payment_reference
 )
@@ -68,6 +69,93 @@ def require_business(user):
         )
         return None, error_response
     return business, None
+
+
+def _build_ai_provider_error_message(error: Exception) -> str:
+    """Return a concise, user-friendly message for AI provider failures."""
+    error_text = str(error)
+
+    if 'insufficient_quota' in error_text or '429' in error_text:
+        return (
+            "We temporarily ran out of AI capacity. No credits were deducted; please try again in a few minutes."
+        )
+
+    if 'connection' in error_text.lower() or 'timeout' in error_text.lower():
+        return (
+            "We could not reach the AI service due to a network hiccup. No credits were deducted; please try again shortly."
+        )
+
+    return (
+        "The AI service returned an unexpected error. No credits were deducted; please try again later."
+    )
+
+
+def _respond_with_ai_provider_issue(
+    *,
+    business_id: str,
+    feature: str,
+    user_id: Optional[str],
+    request_data: Optional[Dict[str, Any]],
+    error: Exception
+):
+    """Log an AI provider failure and return a friendly response for the query UI."""
+    AIBillingService.log_failed_transaction(
+        business_id=business_id,
+        feature=feature,
+        error_message=str(error),
+        user_id=user_id,
+        request_data=request_data,
+    )
+
+    balance = AIBillingService.get_credit_balance(business_id)
+
+    return Response(
+        {
+            'answer': _build_ai_provider_error_message(error),
+            'query_type': 'error',
+            'data': {},
+            'follow_up_questions': [],
+            'visualization_hints': {},
+            'credits_used': 0,
+            'new_balance': float(balance),
+            'error': {
+                'code': 'ai_provider_unavailable',
+                'detail': str(error),
+            },
+        },
+        status=status.HTTP_200_OK,
+    )
+
+
+def _respond_with_standard_ai_provider_error(
+    *,
+    business_id: str,
+    feature: str,
+    user_id: Optional[str],
+    request_data: Optional[Dict[str, Any]],
+    error: Exception,
+    status_code: int = status.HTTP_503_SERVICE_UNAVAILABLE,
+    extra_payload: Optional[Dict[str, Any]] = None,
+):
+    """Return a consistent error payload for non-query endpoints."""
+    AIBillingService.log_failed_transaction(
+        business_id=business_id,
+        feature=feature,
+        error_message=str(error),
+        user_id=user_id,
+        request_data=request_data,
+    )
+
+    payload: Dict[str, Any] = {
+        'error': 'ai_provider_unavailable',
+        'message': _build_ai_provider_error_message(error),
+        'detail': str(error),
+    }
+
+    if extra_payload:
+        payload.update(extra_payload)
+
+    return Response(payload, status=status_code)
 
 
 # ============================================================================
@@ -692,6 +780,14 @@ def natural_language_query(request):
             {'error': 'insufficient_credits', 'message': str(e)},
             status=status.HTTP_402_PAYMENT_REQUIRED
         )
+    except OpenAIServiceError as e:
+        return _respond_with_ai_provider_issue(
+            business_id=business_id,
+            feature='natural_language_query',
+            user_id=str(request.user.id),
+            request_data={'query': query},
+            error=e,
+        )
     except Exception as e:
         AIBillingService.log_failed_transaction(
             business_id=business_id,
@@ -826,6 +922,14 @@ Generate a {tone} product description."""
             {'error': 'Product not found'},
             status=status.HTTP_404_NOT_FOUND
         )
+    except OpenAIServiceError as e:
+        return _respond_with_standard_ai_provider_error(
+            business_id=business_id,
+            feature='product_description',
+            user_id=str(request.user.id),
+            request_data={'product_id': str(product_id), 'tone': tone},
+            error=e,
+        )
     except Exception as e:
         AIBillingService.log_failed_transaction(
             business_id=business_id,
@@ -952,6 +1056,14 @@ Generate {message_type} with {tone} tone."""
         return Response(
             {'error': 'Customer not found'},
             status=status.HTTP_404_NOT_FOUND
+        )
+    except OpenAIServiceError as e:
+        return _respond_with_standard_ai_provider_error(
+            business_id=business_id,
+            feature='collection_message',
+            user_id=str(request.user.id),
+            request_data={'customer_id': str(customer_id), 'message_type': message_type},
+            error=e,
         )
     except Exception as e:
         AIBillingService.log_failed_transaction(
@@ -1103,6 +1215,14 @@ Provide detailed credit risk assessment."""
         return Response(
             {'error': 'Customer not found'},
             status=status.HTTP_404_NOT_FOUND
+        )
+    except OpenAIServiceError as e:
+        return _respond_with_standard_ai_provider_error(
+            business_id=business_id,
+            feature='credit_assessment',
+            user_id=str(request.user.id),
+            request_data={'customer_id': str(customer_id), 'assessment_type': assessment_type},
+            error=e,
         )
     except Exception as e:
         AIBillingService.log_failed_transaction(

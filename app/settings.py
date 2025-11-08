@@ -396,6 +396,7 @@ else:
 
 # OpenAI API Configuration
 OPENAI_API_KEY = config('OPENAI_API_KEY', default='')
+OPENAI_USE_MOCK = config('OPENAI_USE_MOCK', cast=bool, default=False)
 OPENAI_ORGANIZATION = config('OPENAI_ORGANIZATION', default='')
 
 # Paystack Payment Configuration
