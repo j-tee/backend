@@ -13,7 +13,7 @@ from django.utils import timezone
 
 from sales.models import Sale, SaleItem, Customer
 from inventory.models import Product, Stock, StoreFront
-from .openai_service import get_openai_service
+from .openai_service import get_openai_service, OpenAIServiceError
 
 
 class QueryIntelligenceService:
@@ -337,8 +337,11 @@ Please provide a comprehensive answer to the user's question based on this data.
             
             return result['content']
             
+        except OpenAIServiceError:
+            # Propagate known OpenAI service errors so callers can avoid charging credits
+            raise
         except Exception as e:
-            return f"I found the data but couldn't generate a proper answer. Error: {str(e)}"
+            raise OpenAIServiceError(f"Failed to generate answer: {str(e)}")
     
     def _format_response(self, answer: str, data: Dict[str, Any], query_type: str) -> Dict[str, Any]:
         """Format the final response with answer, data, and suggestions"""
