@@ -162,17 +162,33 @@ class CollectionMessageRequestSerializer(serializers.Serializer):
     include_payment_plan = serializers.BooleanField(default=False)
 
 
+class ReportNarrativeRequestSerializer(serializers.Serializer):
+    """Serializer for AI-generated report narratives"""
+
+    REPORT_TYPE_CHOICES = [
+        ('sales_summary', 'Sales Summary'),
+        ('stock_levels', 'Stock Levels'),
+        ('revenue_profit', 'Revenue & Profit'),
+        ('ar_aging', 'Accounts Receivable Aging'),
+        ('inventory_movement', 'Inventory Movement'),
+        ('general', 'General Report'),
+    ]
+
+    report_type = serializers.ChoiceField(choices=REPORT_TYPE_CHOICES)
+    report_data = serializers.DictField()
+
+    def validate_report_data(self, value):
+        if not isinstance(value, dict) or not value:
+            raise serializers.ValidationError("report_data must be a non-empty object")
+        return value
+
+
 class InventoryForecastRequestSerializer(serializers.Serializer):
     """Serializer for inventory forecasting request"""
     
-    product_id = serializers.UUIDField(required=True)
-    forecast_days = serializers.IntegerField(
-        default=30,
-        min_value=7,
-        max_value=90
-    )
-    include_seasonality = serializers.BooleanField(default=True)
-    include_recommendations = serializers.BooleanField(default=True)
+    warehouse_id = serializers.UUIDField(required=False, allow_null=True)
+    category_id = serializers.UUIDField(required=False, allow_null=True)
+    forecast_days = serializers.IntegerField(default=30, min_value=15, max_value=90)
 
 
 class AIUsageStatsSerializer(serializers.Serializer):

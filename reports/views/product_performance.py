@@ -26,7 +26,6 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from sales.models import Sale, SaleItem
 from products.models import Product
 from businesses.models import Business
-from ..helpers import DateRangeHelper, AggregationHelper
 
 
 class ProductPerformanceView(APIView):
@@ -70,7 +69,6 @@ class ProductPerformanceView(APIView):
             return self._handle_export(request, business, export_format)
         
         # Get date range
-        period = request.query_params.get('period', 'this_month')
         start_date_str = request.query_params.get('start_date')
         end_date_str = request.query_params.get('end_date')
         
@@ -78,13 +76,21 @@ class ProductPerformanceView(APIView):
             start_date = parse_date(start_date_str)
             end_date = parse_date(end_date_str)
         else:
-            start_date, end_date = DateRangeHelper.get_date_range(period)
+            # Default to all time (last 5 years) to ensure data is always visible
+            end_date = timezone.now().date()
+            start_date = end_date - timedelta(days=1825)  # ~5 years
+        
+        # Convert dates to timezone-aware datetime objects
+        # Start of day for start_date
+        start_datetime = timezone.make_aware(datetime.combine(start_date, datetime.min.time()))
+        # End of day for end_date
+        end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
         
         # Build queryset
         sale_items = SaleItem.objects.filter(
             sale__business=business,
-            sale__transaction_date__gte=start_date,
-            sale__transaction_date__lte=end_date,
+            sale__completed_at__gte=start_datetime,
+            sale__completed_at__lte=end_datetime,
             sale__status='COMPLETED'
         ).select_related('product', 'sale')
         
@@ -113,7 +119,7 @@ class ProductPerformanceView(APIView):
             'period': {
                 'start': str(start_date),
                 'end': str(end_date),
-                'type': period
+                'type': 'custom'
             }
         })
     
@@ -263,7 +269,6 @@ class ProductPerformanceView(APIView):
             )
         
         # Get date range
-        period = request.query_params.get('period', 'this_month')
         start_date_str = request.query_params.get('start_date')
         end_date_str = request.query_params.get('end_date')
         
@@ -271,13 +276,21 @@ class ProductPerformanceView(APIView):
             start_date = parse_date(start_date_str)
             end_date = parse_date(end_date_str)
         else:
-            start_date, end_date = DateRangeHelper.get_date_range(period)
+            # Default to all time (last 5 years) to ensure data is always visible
+            end_date = timezone.now().date()
+            start_date = end_date - timedelta(days=1825)  # ~5 years
+        
+        # Convert dates to timezone-aware datetime objects
+        # Start of day for start_date
+        start_datetime = timezone.make_aware(datetime.combine(start_date, datetime.min.time()))
+        # End of day for end_date
+        end_datetime = timezone.make_aware(datetime.combine(end_date, datetime.max.time()))
         
         # Build queryset
         sale_items = SaleItem.objects.filter(
             sale__business=business,
-            sale__transaction_date__gte=start_date,
-            sale__transaction_date__lte=end_date,
+            sale__completed_at__gte=start_datetime,
+            sale__completed_at__lte=end_datetime,
             sale__status='COMPLETED'
         ).select_related('product', 'sale')
         
