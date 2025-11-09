@@ -890,19 +890,23 @@ class ProductPerformanceReportView(BaseReportView):
         )
 
         response_payload = {
-            'summary': summary,
-            'products': products,
-            'categories': categories,
-            'period': {
-                'start': str(start_date),
-                'end': str(end_date),
-                'type': 'custom'
+            'success': True,
+            'data': {
+                'summary': summary,
+                'products': products,
+                'categories': categories,
+                'period': {
+                    'start': str(start_date),
+                    'end': str(end_date),
+                    'type': 'custom'
+                },
+                'filters': filters_payload,
+                'metadata': {
+                    'generated_at': timezone.now().isoformat() + 'Z',
+                    **metadata,
+                },
             },
-            'filters': filters_payload,
-            'metadata': {
-                'generated_at': timezone.now().isoformat() + 'Z',
-                **metadata,
-            }
+            'error': None,
         }
 
         return Response(response_payload, status=http_status.HTTP_200_OK)
