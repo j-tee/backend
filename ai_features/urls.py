@@ -25,6 +25,12 @@ urlpatterns = [
     # Product Features
     path('api/products/generate-description/', views.generate_product_description, name='generate-description'),
     
+    # Report Narrative
+    path('api/reports/narrative/', views.generate_report_narrative, name='generate-report-narrative'),
+    
+    # Inventory Forecasting
+    path('api/inventory/forecast/', views.generate_inventory_forecast, name='inventory-forecast'),
+    
     # Smart Collections
     path('api/collections/message/', views.generate_collection_message, name='collection-message'),
     path('api/credit/assess/', views.assess_credit_risk, name='assess-credit'),

@@ -842,11 +842,13 @@ class ProductPerformanceReportView(BaseReportView):
             return ReportResponse.error(error)
         
         # Build base queryset
+        # Use completed_at if available, otherwise fall back to created_at for older records
         queryset = SaleItem.objects.filter(
             sale__business_id=business_id,
-            sale__status='COMPLETED',
-            sale__created_at__date__gte=start_date,
-            sale__created_at__date__lte=end_date
+            sale__status='COMPLETED'
+        ).filter(
+            Q(sale__completed_at__date__gte=start_date, sale__completed_at__date__lte=end_date) |
+            Q(sale__completed_at__isnull=True, sale__created_at__date__gte=start_date, sale__created_at__date__lte=end_date)
         ).select_related('product', 'sale')
         
         # Apply filters
@@ -888,23 +890,19 @@ class ProductPerformanceReportView(BaseReportView):
         )
 
         response_payload = {
-            'success': True,
-            'data': {
-                'summary': summary,
-                'products': products,
-                'categories': categories,
-                'period': {
-                    'start': str(start_date),
-                    'end': str(end_date),
-                    'type': 'custom'
-                },
-                'filters': filters_payload,
-                'metadata': {
-                    'generated_at': timezone.now().isoformat() + 'Z',
-                    **metadata,
-                }
+            'summary': summary,
+            'products': products,
+            'categories': categories,
+            'period': {
+                'start': str(start_date),
+                'end': str(end_date),
+                'type': 'custom'
             },
-            'error': None
+            'filters': filters_payload,
+            'metadata': {
+                'generated_at': timezone.now().isoformat() + 'Z',
+                **metadata,
+            }
         }
 
         return Response(response_payload, status=http_status.HTTP_200_OK)
@@ -1060,11 +1058,13 @@ class ProductPerformanceReportView(BaseReportView):
             return ReportResponse.error(error)
         
         # Build queryset
+        # Use completed_at if available, otherwise fall back to created_at for older records
         queryset = SaleItem.objects.filter(
             sale__business_id=business_id,
-            sale__status='COMPLETED',
-            sale__created_at__date__gte=start_date,
-            sale__created_at__date__lte=end_date
+            sale__status='COMPLETED'
+        ).filter(
+            Q(sale__completed_at__date__gte=start_date, sale__completed_at__date__lte=end_date) |
+            Q(sale__completed_at__isnull=True, sale__created_at__date__gte=start_date, sale__created_at__date__lte=end_date)
         ).select_related('product', 'sale')
         
         # Apply filters
