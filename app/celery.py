@@ -55,6 +55,31 @@ app.conf.update(
             'task': 'sales.tasks.release_expired_reservations',
             'schedule': 900.0,  # Run every 15 minutes
         },
+        # Security and GDPR compliance tasks
+        'cleanup-expired-ai-transactions': {
+            'task': 'app.tasks.cleanup_expired_ai_transactions',
+            'schedule': 7200.0,  # Run every 2 hours
+        },
+        'check-low-ai-credits': {
+            'task': 'app.tasks.check_low_ai_credits',
+            'schedule': 21600.0,  # Run every 6 hours
+        },
+        'cleanup-expired-subscriptions': {
+            'task': 'app.tasks.cleanup_expired_subscriptions',
+            'schedule': 86400.0,  # Run daily
+        },
+        'cleanup-expired-stock-reservations': {
+            'task': 'app.tasks.cleanup_expired_stock_reservations',
+            'schedule': 900.0,  # Run every 15 minutes
+        },
+        'check-payment-gateway-health': {
+            'task': 'app.tasks.check_payment_gateway_health',
+            'schedule': 300.0,  # Run every 5 minutes
+        },
+        'send-subscription-expiry-reminders': {
+            'task': 'app.tasks.send_subscription_expiry_reminders',
+            'schedule': 86400.0,  # Run daily
+        },
     },
 )
 

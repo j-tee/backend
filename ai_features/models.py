@@ -1,10 +1,12 @@
 """
 AI Features Models
 Manages AI credit system, transactions, and purchases for AI-powered features.
+GDPR Compliant: Auto-deletes transaction data after 90 days
 """
 
 import uuid
 from decimal import Decimal
+from datetime import timedelta
 from django.db import models
 from django.core.validators import MinValueValidator
 from django.utils import timezone
@@ -134,6 +136,10 @@ class AITransaction(models.Model):
         default=0,
         help_text="Time taken to process request in milliseconds"
     )
+    retention_until = models.DateTimeField(
+        help_text="GDPR retention date - auto-delete after this date",
+        db_index=True
+    )
     
     class Meta:
         db_table = 'ai_transactions'
@@ -145,6 +151,13 @@ class AITransaction(models.Model):
             models.Index(fields=['business', 'success']),
             models.Index(fields=['-timestamp']),
         ]
+    
+    def save(self, *args, **kwargs):
+        # Set retention date if not set (90 days from now)
+        if not self.retention_until:
+            from datetime import timedelta
+            self.retention_until = timezone.now() + timedelta(days=90)
+        super().save(*args, **kwargs)
     
     def __str__(self):
         status = "✓" if self.success else "✗"
