@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     'reports',
     'settings.apps.SettingsConfig',
     'ai_features.apps.AiFeaturesConfig',
+    'programs.apps.ProgramsConfig',
 ]
 
 MIDDLEWARE = [
