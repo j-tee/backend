@@ -9,7 +9,7 @@ WorkingDirectory=/var/www/pos/backend
 Environment="PATH=/var/www/pos/backend/venv/bin"
 Environment="DJANGO_ENV_FILE=/var/www/pos/backend/.env.production"
 ExecStart=/var/www/pos/backend/venv/bin/gunicorn \
-          --workers 3 \
+          --workers 2 \
           --bind unix:/var/www/pos/backend/gunicorn.sock \
           --timeout 120 \
           --access-logfile /var/www/pos/backend/logs/gunicorn_access.log \

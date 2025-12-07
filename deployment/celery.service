@@ -10,6 +10,7 @@ WorkingDirectory=/var/www/pos/backend
 Environment="PATH=/var/www/pos/backend/venv/bin"
 Environment="DJANGO_ENV_FILE=/var/www/pos/backend/.env.production"
 ExecStart=/var/www/pos/backend/venv/bin/celery -A app worker \
+          --concurrency=2 \
           --loglevel=info \
           --logfile=/var/www/pos/backend/logs/celery_worker.log
 
