@@ -83,7 +83,9 @@ jobs:
           script: |
             cd /var/www/pos/backend
             
-            # Pull latest code
+            # Ensure we're on main branch and pull latest code
+            git fetch origin
+            git checkout main
             git pull origin main
             
             # Activate virtual environment and set environment
