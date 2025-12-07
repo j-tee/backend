@@ -239,9 +239,9 @@ class SubscriptionViewSet(viewsets.ModelViewSet):
         if storefront_count == 0:
             return Response(
                 {
-                    'error': 'No active storefronts found',
+                    'error': 'No active storefront found',
                     'code': 'NO_STOREFRONTS',
-                    'detail': 'You must have at least one active storefront to subscribe',
+                    'detail': 'You do not have an active storefront. Please setup a storefront and proceed with subscription',
                     'storefront_count': 0
                 },
                 status=status.HTTP_400_BAD_REQUEST
