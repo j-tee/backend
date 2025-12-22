@@ -153,3 +153,8 @@ debug/__pycache__/
 
 # Keep docs in docs folder
 !docs/
+
+# Interview and personal documents
+interview_response.md
+interview_response_accurate.md
+Interview_Response_Julius_Senior_Engineer.pdf
