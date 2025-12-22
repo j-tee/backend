@@ -31,6 +31,8 @@ app.conf.update(
         'inventory.tasks.*': {'queue': 'inventory'},
         'sales.tasks.*': {'queue': 'sales'},
         'subscriptions.tasks.*': {'queue': 'subscriptions'},
+        'reports.*': {'queue': 'reports'},
+        'ai_features.*': {'queue': 'ai_features'},
     },
     
     # Periodic tasks
@@ -79,6 +81,19 @@ app.conf.update(
         'send-subscription-expiry-reminders': {
             'task': 'app.tasks.send_subscription_expiry_reminders',
             'schedule': 86400.0,  # Run daily
+        },
+        # Inventory alerts
+        'send-low-stock-alerts': {
+            'task': 'inventory.tasks.send_low_stock_alert',
+            'schedule': 21600.0,  # Run every 6 hours
+        },
+        'check-expiring-products': {
+            'task': 'inventory.tasks.check_expiring_products',
+            'schedule': 86400.0,  # Run daily
+        },
+        'send-stock-movement-report': {
+            'task': 'inventory.tasks.send_stock_movement_report',
+            'schedule': 604800.0,  # Run weekly
         },
     },
 )

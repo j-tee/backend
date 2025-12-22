@@ -34,6 +34,7 @@ from .serializers import (
     BusinessMembershipDetailSerializer,
 )
 from .utils import send_business_invitation_email, EmailDeliveryError
+from .tasks import send_welcome_email
 
 
 def get_managed_business_ids(user):
@@ -430,6 +431,10 @@ class RegisterUserView(APIView):
         serializer = UserRegistrationSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             user = serializer.save()
+            
+            # Send welcome email asynchronously
+            send_welcome_email.delay(user.id)
+            
             return Response(
                 {
                     'message': 'Account created. Check your email for the verification link.',

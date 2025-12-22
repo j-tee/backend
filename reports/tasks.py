@@ -347,3 +347,326 @@ def retry_failed_exports(max_retries: int = 3):
     except Exception as e:
         logger.error(f"Error in retry task: {str(e)}", exc_info=True)
         raise
+
+
+@shared_task(name='reports.generate_sales_report')
+def generate_sales_report(business_id: str, start_date: str, end_date: str, format: str = 'pdf', user_id: str = None):
+    """
+    Generate a sales report asynchronously.
+    
+    This task generates comprehensive sales reports in the background to avoid
+    blocking API requests during heavy data processing.
+    
+    Args:
+        business_id: UUID of the business
+        start_date: Start date in ISO format (YYYY-MM-DD)
+        end_date: End date in ISO format (YYYY-MM-DD)
+        format: Export format ('pdf', 'excel', 'csv')
+        user_id: Optional user ID who requested the report
+        
+    Returns:
+        dict: Report generation results with file URL
+    """
+    from accounts.models import Business
+    from sales.models import Sale
+    from reports.pdf_exporters import SalesPDFExporter
+    from reports.csv_exporters import SalesCSVExporter
+    from reports.exporters import SalesExcelExporter
+    from django.core.files.base import ContentFile
+    from django.utils.dateparse import parse_date
+    import io
+    
+    logger.info(f"Generating sales report for business {business_id} ({start_date} to {end_date})")
+    
+    try:
+        business = Business.objects.get(id=business_id)
+        start = parse_date(start_date)
+        end = parse_date(end_date)
+        
+        # Query sales data
+        sales = Sale.objects.filter(
+            business=business,
+            created_at__date__gte=start,
+            created_at__date__lte=end
+        ).select_related('customer', 'storefront').prefetch_related('sale_items__product')
+        
+        # Generate report based on format
+        if format == 'pdf':
+            exporter = SalesPDFExporter()
+            file_content = exporter.export(sales, business, start, end)
+            filename = f"sales_report_{start_date}_{end_date}.pdf"
+            content_type = 'application/pdf'
+        elif format == 'excel':
+            exporter = SalesExcelExporter()
+            file_content = exporter.export(sales, business, start, end)
+            filename = f"sales_report_{start_date}_{end_date}.xlsx"
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:  # csv
+            exporter = SalesCSVExporter()
+            file_content = exporter.export(sales, business, start, end)
+            filename = f"sales_report_{start_date}_{end_date}.csv"
+            content_type = 'text/csv'
+        
+        # Save to media storage
+        from django.core.files.storage import default_storage
+        file_path = f"reports/sales/{business_id}/{filename}"
+        saved_path = default_storage.save(file_path, ContentFile(file_content))
+        file_url = default_storage.url(saved_path)
+        
+        logger.info(f"Sales report generated successfully: {file_url}")
+        
+        return {
+            'status': 'completed',
+            'file_url': file_url,
+            'filename': filename,
+            'record_count': sales.count(),
+            'format': format
+        }
+        
+    except Business.DoesNotExist:
+        logger.error(f"Business {business_id} not found")
+        raise
+    except Exception as e:
+        logger.error(f"Error generating sales report: {str(e)}", exc_info=True)
+        raise
+
+
+@shared_task(name='reports.generate_inventory_report')
+def generate_inventory_report(business_id: str, format: str = 'excel', include_zero_stock: bool = False):
+    """
+    Generate an inventory report asynchronously.
+    
+    Args:
+        business_id: UUID of the business
+        format: Export format ('excel', 'csv', 'pdf')
+        include_zero_stock: Whether to include items with zero stock
+        
+    Returns:
+        dict: Report generation results with file URL
+    """
+    from accounts.models import Business
+    from inventory.models import StockProduct
+    from reports.exporters import InventoryExcelExporter
+    from reports.csv_exporters import InventoryCSVExporter
+    from django.core.files.base import ContentFile
+    
+    logger.info(f"Generating inventory report for business {business_id}")
+    
+    try:
+        business = Business.objects.get(id=business_id)
+        
+        # Query inventory data
+        stock_products = StockProduct.objects.filter(
+            business=business
+        ).select_related('product', 'supplier')
+        
+        if not include_zero_stock:
+            stock_products = stock_products.exclude(calculated_quantity=0)
+        
+        # Generate report
+        if format == 'excel':
+            exporter = InventoryExcelExporter()
+            file_content = exporter.export(stock_products, business)
+            filename = f"inventory_report_{timezone.now().strftime('%Y%m%d')}.xlsx"
+            content_type = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:  # csv
+            exporter = InventoryCSVExporter()
+            file_content = exporter.export(stock_products, business)
+            filename = f"inventory_report_{timezone.now().strftime('%Y%m%d')}.csv"
+            content_type = 'text/csv'
+        
+        # Save to storage
+        from django.core.files.storage import default_storage
+        file_path = f"reports/inventory/{business_id}/{filename}"
+        saved_path = default_storage.save(file_path, ContentFile(file_content))
+        file_url = default_storage.url(saved_path)
+        
+        logger.info(f"Inventory report generated successfully: {file_url}")
+        
+        return {
+            'status': 'completed',
+            'file_url': file_url,
+            'filename': filename,
+            'record_count': stock_products.count(),
+            'format': format
+        }
+        
+    except Business.DoesNotExist:
+        logger.error(f"Business {business_id} not found")
+        raise
+    except Exception as e:
+        logger.error(f"Error generating inventory report: {str(e)}", exc_info=True)
+        raise
+
+
+@shared_task(name='reports.export_customers_to_csv')
+def export_customers_to_csv(business_id: str):
+    """
+    Export customer list to CSV asynchronously.
+    
+    Args:
+        business_id: UUID of the business
+        
+    Returns:
+        dict: Export results with file URL
+    """
+    from accounts.models import Business
+    from sales.models import Customer
+    from django.core.files.base import ContentFile
+    import csv
+    import io
+    
+    logger.info(f"Exporting customers for business {business_id}")
+    
+    try:
+        business = Business.objects.get(id=business_id)
+        
+        # Query customers
+        customers = Customer.objects.filter(business=business).order_by('name')
+        
+        # Generate CSV
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write headers
+        writer.writerow([
+            'Name', 'Email', 'Phone', 'Address', 'Credit Limit',
+            'Current Balance', 'Total Purchases', 'Created Date'
+        ])
+        
+        # Write data
+        for customer in customers:
+            writer.writerow([
+                customer.name,
+                customer.email or '',
+                customer.phone or '',
+                customer.address or '',
+                customer.credit_limit or 0,
+                customer.current_balance or 0,
+                customer.total_purchases or 0,
+                customer.created_at.strftime('%Y-%m-%d')
+            ])
+        
+        # Save to storage
+        from django.core.files.storage import default_storage
+        filename = f"customers_export_{timezone.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        file_path = f"exports/customers/{business_id}/{filename}"
+        saved_path = default_storage.save(file_path, ContentFile(output.getvalue().encode('utf-8')))
+        file_url = default_storage.url(saved_path)
+        
+        logger.info(f"Customers exported successfully: {file_url}")
+        
+        return {
+            'status': 'completed',
+            'file_url': file_url,
+            'filename': filename,
+            'record_count': customers.count()
+        }
+        
+    except Business.DoesNotExist:
+        logger.error(f"Business {business_id} not found")
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting customers: {str(e)}", exc_info=True)
+        raise
+
+
+@shared_task(name='reports.export_transactions_to_excel')
+def export_transactions_to_excel(business_id: str, start_date: str, end_date: str):
+    """
+    Export financial transactions to Excel asynchronously.
+    
+    Args:
+        business_id: UUID of the business
+        start_date: Start date in ISO format
+        end_date: End date in ISO format
+        
+    Returns:
+        dict: Export results with file URL
+    """
+    from accounts.models import Business
+    from sales.models import Sale, Payment
+    from django.utils.dateparse import parse_date
+    from openpyxl import Workbook
+    from django.core.files.base import ContentFile
+    import io
+    
+    logger.info(f"Exporting transactions for business {business_id}")
+    
+    try:
+        business = Business.objects.get(id=business_id)
+        start = parse_date(start_date)
+        end = parse_date(end_date)
+        
+        # Create workbook
+        wb = Workbook()
+        
+        # Sales sheet
+        ws_sales = wb.active
+        ws_sales.title = "Sales"
+        ws_sales.append(['Date', 'Reference', 'Customer', 'Total Amount', 'Payment Status', 'Created By'])
+        
+        sales = Sale.objects.filter(
+            business=business,
+            created_at__date__gte=start,
+            created_at__date__lte=end
+        ).select_related('customer', 'created_by')
+        
+        for sale in sales:
+            ws_sales.append([
+                sale.created_at.strftime('%Y-%m-%d %H:%M'),
+                sale.reference_number,
+                sale.customer.name if sale.customer else 'Walk-in',
+                float(sale.total_amount),
+                sale.payment_status,
+                sale.created_by.name if sale.created_by else ''
+            ])
+        
+        # Payments sheet
+        ws_payments = wb.create_sheet("Payments")
+        ws_payments.append(['Date', 'Reference', 'Customer', 'Amount', 'Method', 'Status'])
+        
+        payments = Payment.objects.filter(
+            business=business,
+            created_at__date__gte=start,
+            created_at__date__lte=end
+        ).select_related('customer')
+        
+        for payment in payments:
+            ws_payments.append([
+                payment.created_at.strftime('%Y-%m-%d %H:%M'),
+                payment.reference or '',
+                payment.customer.name if payment.customer else '',
+                float(payment.amount),
+                payment.payment_method,
+                payment.status
+            ])
+        
+        # Save to buffer
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        buffer.seek(0)
+        
+        # Save to storage
+        from django.core.files.storage import default_storage
+        filename = f"transactions_{start_date}_{end_date}.xlsx"
+        file_path = f"exports/transactions/{business_id}/{filename}"
+        saved_path = default_storage.save(file_path, ContentFile(buffer.read()))
+        file_url = default_storage.url(saved_path)
+        
+        logger.info(f"Transactions exported successfully: {file_url}")
+        
+        return {
+            'status': 'completed',
+            'file_url': file_url,
+            'filename': filename,
+            'sales_count': sales.count(),
+            'payments_count': payments.count()
+        }
+        
+    except Business.DoesNotExist:
+        logger.error(f"Business {business_id} not found")
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting transactions: {str(e)}", exc_info=True)
+        raise

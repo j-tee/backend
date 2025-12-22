@@ -1200,6 +1200,9 @@ def paystack_webhook(request):
     - charge.failed
     - transfer.success
     - etc.
+    
+    This endpoint quickly validates the webhook and queues async processing
+    to avoid timeouts on the webhook endpoint.
     """
     # Verify webhook signature
     signature = request.headers.get('X-Paystack-Signature', '')
@@ -1215,7 +1218,7 @@ def paystack_webhook(request):
     event = data.get('event')
     
     if event == 'charge.success':
-        # Payment successful
+        # Payment successful - process asynchronously
         payment_data = data.get('data', {})
         reference = payment_data.get('reference')
         
@@ -1223,42 +1226,38 @@ def paystack_webhook(request):
             return Response({'status': 'ignored'})
         
         try:
-            # Get purchase record
-            purchase = AICreditPurchase.objects.get(payment_reference=reference)
+            # Check if this is an AI credit purchase
+            purchase_exists = AICreditPurchase.objects.filter(
+                payment_reference=reference
+            ).exists()
             
-            # Check if already processed
-            if purchase.payment_status == 'completed':
-                return Response({'status': 'already_processed'})
+            if not purchase_exists:
+                # Not an AI credit purchase, ignore
+                return Response({'status': 'ignored'})
             
             # Convert pesewas to GHS
-            amount_paid_ghs = Decimal(str(payment_data['amount'])) / Decimal('100')
+            amount_paid_ghs = str(Decimal(str(payment_data['amount'])) / Decimal('100'))
             
-            # Credit the account
-            AIBillingService.purchase_credits(
-                business_id=str(purchase.business_id),
-                amount_paid=amount_paid_ghs,
-                credits_purchased=purchase.credits_purchased,
+            # Queue async processing (non-blocking)
+            from ai_features.tasks import process_payment_webhook
+            process_payment_webhook.delay(
                 payment_reference=reference,
-                payment_method=purchase.payment_method,
-                user_id=str(purchase.user_id),
-                bonus_credits=purchase.bonus_credits
+                amount_paid=amount_paid_ghs,
+                payment_provider='paystack'
             )
             
-            # Update purchase status
-            purchase.payment_status = 'completed'
-            purchase.completed_at = timezone.now()
-            purchase.save()
-            
-            return Response({'status': 'success'})
-        
-        except AICreditPurchase.DoesNotExist:
-            # Not an AI credit purchase, ignore
-            return Response({'status': 'ignored'})
+            return Response({
+                'status': 'queued',
+                'message': 'Payment processing queued'
+            })
         
         except Exception as e:
-            # Log error but return 200 to Paystack
-            print(f"Webhook processing error: {str(e)}")
-            return Response({'status': 'error', 'message': str(e)})
+            # Log error but return 200 to Paystack (webhook will retry)
+            print(f"Webhook queuing error: {str(e)}")
+            return Response({
+                'status': 'error',
+                'message': 'Failed to queue payment processing'
+            })
     
     # For other events, just acknowledge
     return Response({'status': 'received'})
