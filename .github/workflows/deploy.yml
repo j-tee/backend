@@ -98,17 +98,44 @@ jobs:
             # Run migrations
             python manage.py migrate --noinput
             
+            # Update systemd service files if changed
+            echo "=== Updating systemd service files ==="
+            
+            # Copy service files to systemd directory
+            sudo cp -f deployment/gunicorn.service /etc/systemd/system/posbackend.service
+            sudo cp -f deployment/celery.service /etc/systemd/system/posbackend-celery.service
+            sudo cp -f deployment/celery-beat.service /etc/systemd/system/posbackend-celery-beat.service
+            
+            # Reload systemd daemon to recognize changes
+            sudo systemctl daemon-reload
+            
+            # Ensure services are enabled (auto-start on boot)
+            sudo systemctl enable posbackend
+            sudo systemctl enable posbackend-celery
+            sudo systemctl enable posbackend-celery-beat
+            
+            echo "✓ Service files updated"
+            
             # Collect static files
             python manage.py collectstatic --noinput
             
-            # Restart services
-            sudo systemctl restart gunicorn || echo "gunicorn service not installed yet"
-            sudo systemctl restart celery || echo "celery service not installed yet"
-            sudo systemctl restart celery-beat || echo "celery-beat service not installed yet"
+            # Restart services (using correct service names)
+            sudo systemctl restart posbackend || echo "posbackend (gunicorn) service not installed yet"
+            sudo systemctl restart posbackend-celery || echo "posbackend-celery service not installed yet"
+            sudo systemctl restart posbackend-celery-beat || echo "posbackend-celery-beat service not installed yet"
             
             # Reload Nginx
             sudo systemctl reload nginx || echo "Nginx reload failed"
             
             # Check service status
-            sudo systemctl status gunicorn --no-pager || echo "gunicorn not running"
+            echo "=== Service Status ==="
+            sudo systemctl status posbackend --no-pager || echo "posbackend not running"
+            sudo systemctl status posbackend-celery --no-pager || echo "posbackend-celery not running"
+            sudo systemctl status posbackend-celery-beat --no-pager || echo "posbackend-celery-beat not running"
+            
+            # Verify Celery workers are processing
+            echo "=== Celery Worker Check ==="
+            source venv/bin/activate
+            celery -A app inspect active || echo "No active tasks"
+            celery -A app inspect stats || echo "Celery stats unavailable"
 
